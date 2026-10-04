@@ -93,3 +93,26 @@ fn column_order_and_extra_columns_dont_matter() {
         );
     }
 }
+
+/// A full-height vertical line through the panel (seen in match recordings: another window's
+/// light border crossing a scene panel) is ink on every row; it must not merge the header and
+/// rows into one text line.
+#[test]
+fn full_height_vertical_line_is_ignored() {
+    let mut img = image::open("tests/fixtures/frame0.png").unwrap().to_rgb8();
+    let font = Font::builtin().unwrap();
+    let original = layout::detect(&img, PANEL, &font).unwrap();
+
+    let x = PANEL.x + PANEL.w - 40;
+    for y in PANEL.y..PANEL.y + PANEL.h {
+        for dx in 0..2 {
+            img.put_pixel(x + dx, y, image::Rgb([120, 120, 120]));
+        }
+    }
+    let lined = layout::detect(&img, PANEL, &font).unwrap();
+    assert_eq!(lined.row0_y, original.row0_y);
+    assert!((lined.row_pitch - original.row_pitch).abs() < 0.01);
+    for col in [Column::Distance, Column::Name, Column::Type, Column::Velocity] {
+        assert_eq!(lined.column(col), original.column(col), "{col:?}");
+    }
+}

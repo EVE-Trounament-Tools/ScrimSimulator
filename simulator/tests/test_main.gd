@@ -32,6 +32,7 @@ func after_each() -> void:
 func _main() -> Main:
 	var m: Main = Main.new()
 	add_node(m)
+	m.assets.fetch_ewar_icons = false
 	return m
 
 

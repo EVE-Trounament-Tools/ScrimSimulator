@@ -18,7 +18,7 @@ const AUDIO_EXTENSIONS := ["ogg", "mp3", "wav"]
 
 
 ## `[{ path, name, modified, audio, folder }]` for every CSV in the library: the library's own
-## first, then each of `folders()` in turn, newest first within each; `name` drops the
+## first, then each of `folders()` in turn, in natural name order within each (`_2` before `_10`); `name` drops the
 ## `.positions.csv` / `.csv` extension, `modified` is a Unix time, `audio` whether the match has
 ## an audio file and `folder` the folder it is in.
 static func list() -> Array:
@@ -36,8 +36,7 @@ static func list() -> Array:
 				"path": path, "name": display_name(file), "modified": FileAccess.get_modified_time(path),
 				"audio": audio_path(path) != "", "folder": folder,
 			})
-		here.sort_custom(func(a, b):
-			return a.modified > b.modified if a.modified != b.modified else a.name.naturalnocasecmp_to(b.name) < 0)
+		here.sort_custom(func(a, b): return a.name.naturalnocasecmp_to(b.name) < 0)
 		out.append_array(here)
 	return out
 

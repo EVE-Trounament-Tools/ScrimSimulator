@@ -101,7 +101,9 @@ column (ISO 8601 UTC, e.g. `2026-04-04T17:43:59.000Z`): the first row is the sta
 last row the end, and every tick in between can be lined up with combat logs and other EVE logs.
 The saved `match.mp3` covers the same window, so it starts with the data.
 
-- More than one CD→WF in the video: pick one with `--match N`.
+- More than one CD→WF in the video: pick one with `--match N`, or process each with `--match all`
+  into its own `match_01.positions.csv`, `match_01.mp3`, `match_01.positions.logs/`, … (the GUI
+  does this).
 - `--t0 HH:MM:SS` gives the EVE time at video second 0 yourself, skipping the chat OCR.
 - `--tournament` uses the tournament system messages ("30 seconds until match start",
   "Match completed!") instead.
@@ -165,8 +167,8 @@ many cycles so far. Events seen in several logs are counted once; drones and pil
 matched to the replay are left out. Columns with no data are hidden, and like the others they can
 be moved, resized or hidden from the roster header. EVE gamelogs don't record sensor dampeners,
 tracking or guidance disruptors, target painters, or remote sensor boosters and tracking
-computers, so those never show. EWAR icons come with the ship icon download; if you downloaded it
-before this feature, download it again in Settings to get them (until then they show as text).
+computers, so those never show. EWAR icons are fetched once from CCP's image server the first
+time they're shown and kept in `sde/assets/ewar/` (until then, or offline, they show as text).
 
 Right-click a pilot → **Get Damage Breakdown** opens a window of the damage coming in on that pilot
 from each attacker: pilot, ship and DPS (over the last 10 s, like the roster), highest first, with
@@ -290,5 +292,6 @@ git tag -a v0.2.0 -m v0.2.0 && git push origin v0.2.0
 
 ## Credits
 
-- Ship sizes: CCP's Static Data Export. Bracket icons: CCP's Image Export Collection.
+- Ship sizes: CCP's Static Data Export. Bracket icons: CCP's Image Export Collection. EWAR
+  icons: CCP's image server.
 - Hull models: [EstamelGG/EVE_Model_Gallery](https://github.com/EstamelGG/EVE_Model_Gallery).

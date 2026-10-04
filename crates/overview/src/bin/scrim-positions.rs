@@ -11,7 +11,9 @@
 //! (`third_party/ScrimTrimmer`, via `scripts/scrim_trimmer_bridge.py`): it finds the EVE time at
 //! video second 0 from the scene's `chat` rect and the match's CD -> WF/GF window, only that window
 //! is OCR'd, and every CSV row gets its EVE time (`eve_time`) so the data can be lined up with
-//! other EVE logs.
+//! other EVE logs. A video holding several matches is processed one match (`--match N`) or all of
+//! them (`--match all`) per run; with `all`, each match's outputs are named `<video>_NN.*`, where
+//! an OBS-style `<video>` name ("2026-10-04 05-58-36") is cut to its date (`output_stem`).
 //!
 //! The audio of the processed window is saved next to the CSV as `<video>.mp3` (as ScrimTrimmer's
 //! `--extract-audio` does), so it starts with the data and the simulator pairs the two by name.
@@ -21,7 +23,7 @@
 //! simulator reads a match's combat logs from.
 
 use anyhow::{bail, ensure, Context, Result};
-use chrono::{DateTime, NaiveDateTime, NaiveTime, TimeDelta, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Utc};
 use clap::Parser;
 use glyph::Font;
 use overview::layout::Layout;
@@ -67,9 +69,10 @@ struct Cli {
     /// stamped with EVE times from it.
     #[arg(long)]
     t0: Option<String>,
-    /// Which CD -> WF/GF pair to process (1-based) when the video holds more than one.
-    #[arg(long = "match", value_name = "N")]
-    match_n: Option<usize>,
+    /// Which CD -> WF/GF pair to process (1-based) when the video holds more than one, or `all`
+    /// to process each of them into its own `<video>_NN.*` outputs.
+    #[arg(long = "match", value_name = "N|all")]
+    match_sel: Option<MatchSel>,
     /// Use tournament system messages ("30 seconds until match start", "Match completed!") as
     /// the match window instead of CD and WF/GF.
     #[arg(long)]
@@ -88,6 +91,28 @@ struct Cli {
     videos: Vec<PathBuf>,
 }
 
+/// Which of a video's matches `--match` picks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MatchSel {
+    /// The `n`th (1-based).
+    One(usize),
+    All,
+}
+
+impl std::str::FromStr for MatchSel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        if s.eq_ignore_ascii_case("all") {
+            return Ok(Self::All);
+        }
+        match s.parse() {
+            Ok(n @ 1..) => Ok(Self::One(n)),
+            _ => Err(format!("{s:?} is not a match number (1, 2, …) or `all`")),
+        }
+    }
+}
+
 /// The part of a video to process, and the EVE time of its first frame (when known).
 #[derive(Debug, PartialEq)]
 struct Window {
@@ -104,8 +129,9 @@ struct BridgeOutput {
     pairs: Vec<(u32, u32)>,
 }
 
-/// Run the ScrimTrimmer bridge on `video` and pick its match window.
-fn match_window(cli: &Cli, scene: &Scene, video: &Path) -> Result<Window> {
+/// Run the ScrimTrimmer bridge on `video` and pick its match windows, each with its 1-based
+/// number when `--match all` picked more than one (so its outputs need their own names).
+fn match_windows(cli: &Cli, scene: &Scene, video: &Path) -> Result<Vec<(Option<usize>, Window)>> {
     let mut cmd = Command::new(&cli.python);
     cmd.arg(&cli.trimmer_bridge).arg(video);
     for log in &cli.chat_logs {
@@ -139,31 +165,54 @@ fn match_window(cli: &Cli, scene: &Scene, video: &Path) -> Result<Window> {
     let t0: DateTime<Utc> = DateTime::parse_from_rfc3339(&bridge.t0_utc)
         .with_context(|| format!("bridge t0 {:?}", bridge.t0_utc))?
         .into();
-    let (cd, wf) = pick_pair(&bridge.pairs, cli.match_n)?;
-    let window = Window {
-        start_s: cd as f64,
-        end_s: Some(wf as f64),
-        eve_origin: Some(t0 + TimeDelta::seconds(cd as i64)),
-    };
-    println!(
-        "  t0 {} ({}); match {cd}s -> {wf}s of video",
-        bridge.t0_utc, bridge.t0_source
-    );
-    Ok(window)
+    let picked = pick_pairs(&bridge.pairs, cli.match_sel)?;
+    println!("  t0 {} ({})", bridge.t0_utc, bridge.t0_source);
+    let numbered = picked.len() > 1;
+    Ok(picked
+        .into_iter()
+        .map(|(i, (cd, wf))| {
+            println!("  match {i}: {cd}s -> {wf}s of video");
+            let window = Window {
+                start_s: cd as f64,
+                end_s: Some(wf as f64),
+                eve_origin: Some(t0 + TimeDelta::seconds(cd as i64)),
+            };
+            (numbered.then_some(i), window)
+        })
+        .collect())
 }
 
-/// The `(cd, wf)` pair to process: the only one, or the `n`th (1-based).
-fn pick_pair(pairs: &[(u32, u32)], n: Option<usize>) -> Result<(u32, u32)> {
-    match (pairs, n) {
+/// The `(cd, wf)` pairs to process, each with its 1-based number: the only one, the `n`th, or all.
+fn pick_pairs(pairs: &[(u32, u32)], sel: Option<MatchSel>) -> Result<Vec<(usize, (u32, u32))>> {
+    let numbered = pairs.iter().copied().enumerate().map(|(i, p)| (i + 1, p));
+    match (pairs, sel) {
         ([], _) => bail!("no CD -> WF/GF pair found in the chat log within the video"),
-        (_, Some(n)) => pairs.get(n.wrapping_sub(1)).copied().with_context(|| {
-            format!("--match {n}, but the video has {} match(es): {pairs:?}", pairs.len())
-        }),
-        ([only], None) => Ok(*only),
+        (_, Some(MatchSel::All)) => Ok(numbered.collect()),
+        (_, Some(MatchSel::One(n))) => match pairs.get(n.wrapping_sub(1)) {
+            Some(&p) => Ok(vec![(n, p)]),
+            None => bail!("--match {n}, but the video has {} match(es): {pairs:?}", pairs.len()),
+        },
+        ([only], None) => Ok(vec![(1, *only)]),
         (_, None) => bail!(
-            "the video has {} matches (video seconds {pairs:?}); pick one with --match N",
+            "the video has {} matches (video seconds {pairs:?}); pick one with --match N, or \
+             process each with --match all",
             pairs.len()
         ),
+    }
+}
+
+/// Output name for a video named `stem`: an OBS-style "YYYY-MM-DD HH-MM-SS" name keeps only its
+/// date ("2026-10-04 05-58-36" -> "2026-10-04"); any other name is used as is.
+fn output_stem(stem: &str) -> String {
+    let (Some(date), Some(rest)) = (stem.get(..10), stem.get(10..)) else {
+        return stem.to_string();
+    };
+    let is_time = |s: &str| NaiveTime::parse_from_str(s, "%H-%M-%S").is_ok();
+    match rest.strip_prefix([' ', '_']).and_then(|r| r.get(..8).map(|t| (t, &r[8..]))) {
+        Some((time, tail)) if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok() && is_time(time) => {
+            format!("{date}{tail}")
+        }
+        _ => stem.to_string(),
     }
 }
 
@@ -219,7 +268,7 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&cli.out)
         .with_context(|| format!("creating {}", cli.out.display()))?;
 
-    if cli.chat_logs.is_empty() && cli.match_n.is_some() {
+    if cli.chat_logs.is_empty() && cli.match_sel.is_some() {
         bail!("--match needs --chat-log");
     }
     if let (false, Some(t0)) = (cli.chat_logs.is_empty(), &cli.t0) {
@@ -227,39 +276,57 @@ fn main() -> Result<()> {
             .with_context(|| format!("--t0 {t0:?}: with --chat-log it must be HH:MM:SS"))?;
     }
 
+    let mut failed = 0;
     for video in &cli.videos {
-        let window = if !cli.chat_logs.is_empty() {
-            match_window(&cli, &scene, video)
+        let windows = if !cli.chat_logs.is_empty() {
+            match_windows(&cli, &scene, video)
         } else {
-            cli.t0.as_deref().map(parse_t0_utc).transpose().map(|eve_origin| Window {
-                start_s: 0.0,
-                end_s: None,
-                eve_origin,
+            cli.t0.as_deref().map(parse_t0_utc).transpose().map(|eve_origin| {
+                vec![(None, Window { start_s: 0.0, end_s: None, eve_origin })]
             })
         }
         .with_context(|| format!("finding the match in {}", video.display()))?;
-        let eve_span = process_video(video, &scene, &font, cli.fps, cli.hwaccel.as_deref(), &cli.out, &window)
-            .with_context(|| format!("processing {}", video.display()))?;
-        if !cli.no_audio {
-            save_audio(video, &cli.out, &window);
-        }
-        if !cli.combat_logs.is_empty() {
-            match eve_span {
-                Some(span) => save_combat_logs(&cli.combat_logs, video, &cli.out, span),
-                None => eprintln!(
-                    "  warning: no EVE times (give --chat-log or --t0); combat logs not saved"
-                ),
+        let stem = output_stem(&video.file_stem().unwrap_or_default().to_string_lossy());
+        let n = windows.len();
+        for (i, window) in windows {
+            let Some(i) = i else {
+                process_match(&cli, &scene, &font, video, &stem, &window)?;
+                continue;
+            };
+            println!("== match {i}/{n} of {}", video.display());
+            // One bad match shouldn't lose the others.
+            if let Err(e) = process_match(&cli, &scene, &font, video, &format!("{stem}_{i:02}"), &window) {
+                eprintln!("  error: match {i}: {e:#}");
+                failed += 1;
             }
+        }
+    }
+    ensure!(failed == 0, "{failed} match(es) failed");
+    Ok(())
+}
+
+/// OCR one match window of `video` and save its CSV, audio and combat logs as `<out_stem>.*`.
+fn process_match(cli: &Cli, scene: &Scene, font: &Font, video: &Path, out_stem: &str, window: &Window) -> Result<()> {
+    let eve_span = process_video(video, scene, font, cli.fps, cli.hwaccel.as_deref(), &cli.out, out_stem, window)
+        .with_context(|| format!("processing {}", video.display()))?;
+    if !cli.no_audio {
+        save_audio(video, &cli.out, out_stem, window);
+    }
+    if !cli.combat_logs.is_empty() {
+        match eve_span {
+            Some(span) => save_combat_logs(&cli.combat_logs, &cli.out, out_stem, span),
+            None => eprintln!(
+                "  warning: no EVE times (give --chat-log or --t0); combat logs not saved"
+            ),
         }
     }
     Ok(())
 }
 
-/// Extract the window's audio to `<out>/<video stem>.mp3`. Audio is an extra, so a failure (or a
+/// Extract the window's audio to `<out>/<out_stem>.mp3`. Audio is an extra, so a failure (or a
 /// recording without an audio track) is reported and the positions CSV is kept.
-fn save_audio(video: &Path, out: &Path, window: &Window) {
-    let stem = video.file_stem().unwrap_or_default().to_string_lossy();
-    let path = out.join(format!("{stem}.mp3"));
+fn save_audio(video: &Path, out: &Path, out_stem: &str, window: &Window) {
+    let path = out.join(format!("{out_stem}.mp3"));
     match videoin::extract_audio(video, window.start_s, window.end_s, &path) {
         Ok(true) => println!("  wrote {}", path.display()),
         Ok(false) => println!("  {} has no audio track; no audio saved", video.display()),
@@ -268,17 +335,16 @@ fn save_audio(video: &Path, out: &Path, window: &Window) {
 }
 
 /// Save the part of each gamelog in `logs` (files, or folders of them) logged during `span` (EVE
-/// times of the first and last CSV rows) to `<out>/<video stem>.positions.logs/`, skipping logs
+/// times of the first and last CSV rows) to `<out>/<out_stem>.positions.logs/`, skipping logs
 /// with no combat in it. Like audio, combat logs are an extra: failures are reported and the CSV
 /// is kept.
 fn save_combat_logs(
     logs: &[PathBuf],
-    video: &Path,
     out: &Path,
+    out_stem: &str,
     span: (DateTime<Utc>, DateTime<Utc>),
 ) {
-    let stem = video.file_stem().unwrap_or_default().to_string_lossy();
-    let dest = out.join(format!("{stem}.positions.logs"));
+    let dest = out.join(format!("{out_stem}.positions.logs"));
     let (first, last) = (span.0.naive_utc(), span.1.naive_utc());
     // A rerun replaces the previous run's logs rather than adding to them.
     if let Ok(old) = std::fs::read_dir(&dest) {
@@ -415,6 +481,7 @@ fn process_video(
     fps: f64,
     hwaccel: Option<&str>,
     out: &Path,
+    out_stem: &str,
     window: &Window,
 ) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>> {
     let started = std::time::Instant::now();
@@ -511,8 +578,7 @@ fn process_video(
     let solved: Vec<Vec<Fix>> =
         readings.iter().map(|r| solve_track(fit.corners, &r.distances)).collect();
 
-    let stem = video.file_stem().unwrap_or_default().to_string_lossy();
-    let path = out.join(format!("{stem}.positions.csv"));
+    let path = out.join(format!("{out_stem}.positions.csv"));
     std::fs::write(
         &path,
         positions_csv(&per_observer, &roster, &readings, &solved, window.eve_origin),
@@ -810,13 +876,33 @@ mod tests {
 
     #[test]
     fn pair_selection() {
-        assert!(pick_pair(&[], None).is_err());
-        assert_eq!(pick_pair(&[(4, 38)], None).unwrap(), (4, 38));
+        use MatchSel::{All, One};
+        assert!(pick_pairs(&[], None).is_err());
+        assert!(pick_pairs(&[], Some(All)).is_err());
+        assert_eq!(pick_pairs(&[(4, 38)], None).unwrap(), [(1, (4, 38))]);
         let two = [(8, 41), (59, 95)];
-        assert!(pick_pair(&two, None).is_err());
-        assert_eq!(pick_pair(&two, Some(2)).unwrap(), (59, 95));
-        assert!(pick_pair(&two, Some(0)).is_err());
-        assert!(pick_pair(&two, Some(3)).is_err());
+        assert!(pick_pairs(&two, None).is_err());
+        assert_eq!(pick_pairs(&two, Some(One(2))).unwrap(), [(2, (59, 95))]);
+        assert!(pick_pairs(&two, Some(One(0))).is_err());
+        assert!(pick_pairs(&two, Some(One(3))).is_err());
+        assert_eq!(pick_pairs(&two, Some(All)).unwrap(), [(1, (8, 41)), (2, (59, 95))]);
+    }
+
+    #[test]
+    fn match_sel_parses() {
+        assert_eq!("all".parse(), Ok(MatchSel::All));
+        assert_eq!("ALL".parse(), Ok(MatchSel::All));
+        assert_eq!("2".parse(), Ok(MatchSel::One(2)));
+        assert!("0".parse::<MatchSel>().is_err());
+        assert!("x".parse::<MatchSel>().is_err());
+    }
+
+    #[test]
+    fn output_stem_drops_time() {
+        assert_eq!(output_stem("2026-10-04 05-58-36"), "2026-10-04");
+        assert_eq!(output_stem("2026-10-04_05-58-36 drac"), "2026-10-04 drac");
+        assert_eq!(output_stem("match"), "match");
+        assert_eq!(output_stem("2026-10-04 notatime"), "2026-10-04 notatime");
     }
 
     #[test]

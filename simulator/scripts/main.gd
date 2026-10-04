@@ -234,6 +234,7 @@ func _ready() -> void:
 	assets.status_changed.connect(func(text): sde_label.text = text)
 	assets.needs_download.connect(_prompt_assets)
 	assets.assets_changed.connect(_on_assets_changed)
+	assets.ewar_icons_changed.connect(_update_roster_cells)
 	assets.start(models_on, Settings.get_value("sde/auto_update"))
 	_apply_visual_mode()
 

@@ -1,11 +1,13 @@
 //! A window for running `scrim-positions` on one recording: pick the video, the observer's Local
 //! chat log, the output folder, optionally the gamelogs of the pilots in the match, and whether
-//! to save the audio. The
-//! choices are remembered between sessions (eframe's app storage). The tool runs as a child
-//! process found next to this executable (or on `PATH`), and its output is shown as it runs.
+//! to save the audio. Gamelogs with combat during the chat log's session are found in the Gamelogs
+//! folder and added on their own whenever the chat log or folder changes. The choices are
+//! remembered between sessions (eframe's app storage). The tool runs as a child process found
+//! next to this executable (or on `PATH`), and its output is shown as it runs.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+use chrono::{DateTime, NaiveDateTime, TimeDelta, Utc};
 use eframe::egui;
 use std::collections::HashMap;
 use std::io::Read;
@@ -22,10 +24,17 @@ struct Settings {
     video: String,
     chat_log: String,
     out_dir: String,
+    /// The run's subfolder of `out_dir`; not persisted, so each session starts at today's date.
+    #[serde(skip)]
+    run_name: String,
     /// Gamelogs to attach to the match.
     combat_log_files: Vec<String>,
-    /// Where the combat log picker opens: the folder of the last logs picked.
+    /// The Gamelogs folder: searched for logs matching the chat log, and where the combat log
+    /// picker opens.
     combat_log_dir: String,
+    /// The entries of `combat_log_files` found by searching `combat_log_dir`, replaced by the
+    /// next search; the rest were picked by hand.
+    found_logs: Vec<String>,
     extract_audio: bool,
     scene: String,
 }
@@ -36,7 +45,9 @@ impl Default for Settings {
             video: String::new(),
             chat_log: String::new(),
             out_dir: String::new(),
+            run_name: chrono::Local::now().format("%m-%d").to_string(),
             combat_log_files: Vec::new(),
+            found_logs: Vec::new(),
             combat_log_dir: default_gamelogs().map(path_string).unwrap_or_default(),
             extract_audio: true,
             scene: default_scene().map(path_string).unwrap_or_default(),
@@ -55,24 +66,106 @@ fn default_gamelogs() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
-/// How a gamelog is shown in the list: its character and session start (from the header), since
-/// the file names are only a date and a character ID.
-fn gamelog_label(path: &str) -> String {
-    let file = Path::new(path).file_name().unwrap_or_default().to_string_lossy().into_owned();
+/// The `Listener:` and `Session Started:` header values of a gamelog's first 4 KiB.
+fn gamelog_header(path: &str) -> std::io::Result<(Option<String>, Option<String>)> {
     let mut head = Vec::new();
-    let read = std::fs::File::open(path).and_then(|f| f.take(4096).read_to_end(&mut head));
-    if let Err(e) = read {
-        return format!("{file}  ({e})");
-    }
+    std::fs::File::open(path)?.take(4096).read_to_end(&mut head)?;
     let head = String::from_utf8_lossy(&head);
     let field = |key: &str| {
         head.lines().find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_owned()))
     };
-    match (field("Listener:"), field("Session Started:")) {
-        (Some(who), Some(when)) => format!("{who}  ·  {when}  ·  {file}"),
-        (Some(who), None) => format!("{who}  ·  {file}"),
+    Ok((field("Listener:"), field("Session Started:")))
+}
+
+/// How a gamelog is shown in the list: its character and session start (from the header), since
+/// the file names are only a date and a character ID.
+fn gamelog_label(path: &str) -> String {
+    let file = Path::new(path).file_name().unwrap_or_default().to_string_lossy().into_owned();
+    match gamelog_header(path) {
+        Err(e) => format!("{file}  ({e})"),
+        Ok((Some(who), Some(when))) => format!("{who}  ·  {when}  ·  {file}"),
+        Ok((Some(who), None)) => format!("{who}  ·  {file}"),
         _ => format!("{file}  (not an EVE gamelog)"),
     }
+}
+
+/// The time at the start of a log line, `[ 2026.09.26 15:12:59 ] …` (chat log lines may start
+/// with a BOM).
+fn line_time(line: &str) -> Option<NaiveDateTime> {
+    let s = line.trim_start_matches('\u{feff}').strip_prefix("[ ")?.get(..19)?;
+    NaiveDateTime::parse_from_str(s, "%Y.%m.%d %H:%M:%S").ok()
+}
+
+/// A chat log's text: EVE writes them as UTF-16LE with a BOM.
+fn decode_chat_log(bytes: &[u8]) -> String {
+    match bytes.strip_prefix(&[0xFF, 0xFE]) {
+        Some(rest) => {
+            let units: Vec<u16> =
+                rest.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            String::from_utf16_lossy(&units)
+        }
+        None => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+/// The EVE times a chat log covers: its session start (header) to its last message.
+fn chat_span(text: &str) -> Result<(NaiveDateTime, NaiveDateTime), String> {
+    let start = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Session started:"))
+        .and_then(|v| NaiveDateTime::parse_from_str(v.trim(), "%Y.%m.%d %H:%M:%S").ok())
+        .ok_or("not an EVE chat log (no Session started header)")?;
+    let end = text.lines().rev().find_map(line_time).unwrap_or(start);
+    Ok((start, end))
+}
+
+/// Whether gamelog `text` (with a `Listener:` header) has combat between `start` and `end`.
+fn has_combat(text: &str, start: NaiveDateTime, end: NaiveDateTime) -> bool {
+    text.lines().any(|l| l.trim().starts_with("Listener:"))
+        && text.lines().any(|l| {
+            l.get(24..).is_some_and(|rest| rest.starts_with("(combat) "))
+                && line_time(l).is_some_and(|t| t >= start && t <= end)
+        })
+}
+
+/// The gamelogs in `dir` with combat between `start` and `end`, sorted. Cheap skips first, as
+/// `scrim-positions` does: a log started after `end` (its name starts with the session's EVE start
+/// time), or last written before `start`.
+fn find_gamelogs(dir: &Path, start: NaiveDateTime, end: NaiveDateTime) -> std::io::Result<Vec<String>> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")) {
+            continue;
+        }
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if name.get(..15).and_then(|s| NaiveDateTime::parse_from_str(s, "%Y%m%d_%H%M%S").ok())
+            .is_some_and(|t| t > end)
+        {
+            continue;
+        }
+        let since = start.and_utc() - TimeDelta::minutes(1);
+        if entry.metadata().and_then(|m| m.modified()).is_ok_and(|m| DateTime::<Utc>::from(m) < since) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        if has_combat(&String::from_utf8_lossy(&bytes), start, end) {
+            found.push(path_string(path));
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// What a search of the Gamelogs folder found: the logs, and the chat log's span.
+type Found = Result<(Vec<String>, NaiveDateTime, NaiveDateTime), String>;
+
+/// Search `dir` for the gamelogs matching chat log `chat`.
+fn search(chat: &Path, dir: &Path) -> Found {
+    let bytes = std::fs::read(chat).map_err(|e| format!("reading the chat log: {e}"))?;
+    let (start, end) = chat_span(&decode_chat_log(&bytes))?;
+    let logs = find_gamelogs(dir, start, end).map_err(|e| format!("reading {}: {e}", dir.display()))?;
+    Ok((logs, start, end))
 }
 
 /// `scene.json` next to this executable (as in the release zip), else the source tree's.
@@ -139,6 +232,12 @@ struct App {
     progress: bool,
     /// `gamelog_label` of each combat log, read once.
     labels: HashMap<String, String>,
+    /// The Gamelogs folder search in progress.
+    scan: Option<Receiver<Found>>,
+    /// The (chat log, folder) last searched; another search starts when they change.
+    scanned: Option<(String, String)>,
+    /// What the last search found, or why it failed.
+    scan_status: String,
 }
 
 impl App {
@@ -147,7 +246,75 @@ impl App {
             .storage
             .and_then(|s| eframe::get_value(s, SETTINGS_KEY))
             .unwrap_or_default();
-        Self { settings, run: None, log: Vec::new(), progress: false, labels: HashMap::new() }
+        Self {
+            settings,
+            run: None,
+            log: Vec::new(),
+            progress: false,
+            labels: HashMap::new(),
+            scan: None,
+            scanned: None,
+            scan_status: String::new(),
+        }
+    }
+
+    /// Start searching the Gamelogs folder when the chat log or folder changed since the last
+    /// search (and both exist); take in the result of a search that finished.
+    fn poll_scan(&mut self, ctx: &egui::Context) {
+        let s = &self.settings;
+        let key = (s.chat_log.trim().to_owned(), s.combat_log_dir.trim().to_owned());
+        let ready = Path::new(&key.0).is_file() && Path::new(&key.1).is_dir();
+        if ready && self.scanned.as_ref() != Some(&key) && self.run.is_none() {
+            let (tx, rx) = channel();
+            let (chat, dir) = (PathBuf::from(&key.0), PathBuf::from(&key.1));
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(search(&chat, &dir));
+                ctx.request_repaint();
+            });
+            // A newer search replaces one still running; its result is dropped.
+            self.scan = Some(rx);
+            self.scanned = Some(key);
+        }
+        let Some(found) = self.scan.as_ref().and_then(|rx| rx.try_recv().ok()) else { return };
+        self.scan = None;
+        match found {
+            Ok((logs, start, end)) => {
+                let added = self.add_found(logs);
+                self.scan_status = format!(
+                    "found {added} gamelog(s) with combat between {} and {}",
+                    start.format("%Y.%m.%d %H:%M"),
+                    end.format("%H:%M"),
+                );
+            }
+            Err(e) => self.scan_status = e,
+        }
+    }
+
+    /// Replace the previously found logs with `logs`, skipping copies of a log already in the list
+    /// (same character and session start, e.g. picked by hand from another folder); how many
+    /// were added.
+    fn add_found(&mut self, logs: Vec<String>) -> usize {
+        let s = &mut self.settings;
+        s.combat_log_files.retain(|p| !s.found_logs.contains(p));
+        s.found_logs.clear();
+        let mut seen: Vec<_> =
+            s.combat_log_files.iter().filter_map(|p| gamelog_header(p).ok()).collect();
+        for log in logs {
+            if s.combat_log_files.contains(&log) {
+                continue;
+            }
+            let header = gamelog_header(&log).ok();
+            if let Some(h) = header.as_ref().filter(|h| h.0.is_some() && h.1.is_some()) {
+                if seen.contains(h) {
+                    continue;
+                }
+                seen.push(h.clone());
+            }
+            s.combat_log_files.push(log.clone());
+            s.found_logs.push(log);
+        }
+        s.found_logs.len()
     }
 
     fn push(&mut self, out: Output) {
@@ -174,6 +341,8 @@ impl App {
             Some("Pick a video.")
         } else if s.out_dir.trim().is_empty() {
             Some("Pick an output folder.")
+        } else if s.run_name.trim().is_empty() {
+            Some("Name the run folder.")
         } else if s.scene.trim().is_empty() {
             Some("Pick a scene file.")
         } else {
@@ -185,9 +354,10 @@ impl App {
         let s = &self.settings;
         let exe = scrim_positions();
         let mut cmd = Command::new(&exe);
-        cmd.arg("--scene").arg(s.scene.trim()).arg("--out").arg(s.out_dir.trim());
+        cmd.arg("--scene").arg(s.scene.trim()).arg("--out").arg(Path::new(s.out_dir.trim()).join(s.run_name.trim()));
         if !s.chat_log.trim().is_empty() {
-            cmd.arg("--chat-log").arg(s.chat_log.trim());
+            // Every CD -> WF/GF in the video, each into its own `<video>_NN.*` outputs.
+            cmd.arg("--chat-log").arg(s.chat_log.trim()).args(["--match", "all"]);
         }
         if !s.extract_audio {
             cmd.arg("--no-audio");
@@ -274,9 +444,15 @@ fn path_row(
 
 /// The combat logs list: one row per gamelog (its character, session start and file name) with a
 /// remove button, and buttons to add more or clear them.
-fn combat_logs_ui(ui: &mut egui::Ui, s: &mut Settings, labels: &mut HashMap<String, String>) {
+fn combat_logs_ui(ui: &mut egui::Ui, app: &mut App) {
+    let (s, labels) = (&mut app.settings, &mut app.labels);
     ui.horizontal(|ui| {
         ui.label("Combat logs");
+        let can_scan = Path::new(s.chat_log.trim()).is_file() && Path::new(s.combat_log_dir.trim()).is_dir();
+        let rescan = ui.add_enabled(can_scan, egui::Button::new("Rescan"));
+        if rescan.on_hover_text("Search the Gamelogs folder for logs with combat during the chat log").clicked() {
+            app.scanned = None;
+        }
         if ui.button("Add logs…").clicked() {
             let mut dialog = rfd::FileDialog::new()
                 .set_title("Gamelogs of the pilots in the match")
@@ -285,9 +461,6 @@ fn combat_logs_ui(ui: &mut egui::Ui, s: &mut Settings, labels: &mut HashMap<Stri
                 dialog = dialog.set_directory(&s.combat_log_dir);
             }
             for p in dialog.pick_files().unwrap_or_default() {
-                if let Some(dir) = p.parent() {
-                    s.combat_log_dir = path_string(dir.to_path_buf());
-                }
                 let p = path_string(p);
                 if !s.combat_log_files.contains(&p) {
                     s.combat_log_files.push(p);
@@ -296,8 +469,16 @@ fn combat_logs_ui(ui: &mut egui::Ui, s: &mut Settings, labels: &mut HashMap<Stri
         }
         if ui.add_enabled(!s.combat_log_files.is_empty(), egui::Button::new("Clear")).clicked() {
             s.combat_log_files.clear();
+            s.found_logs.clear();
         }
-        ui.weak("optional: each pilot's gamelog; ones with no combat in the match are skipped");
+        if app.scan.is_some() {
+            ui.spinner();
+            ui.weak("searching the Gamelogs folder…");
+        } else if !app.scan_status.is_empty() {
+            ui.weak(&app.scan_status);
+        } else {
+            ui.weak("optional: each pilot's gamelog; ones with no combat in the match are skipped");
+        }
     });
     let mut remove = None;
     egui::ScrollArea::vertical().id_salt("combat_logs").max_height(120.0).show(ui, |ui| {
@@ -312,13 +493,15 @@ fn combat_logs_ui(ui: &mut egui::Ui, s: &mut Settings, labels: &mut HashMap<Stri
         }
     });
     if let Some(i) = remove {
-        s.combat_log_files.remove(i);
+        let p = s.combat_log_files.remove(i);
+        s.found_logs.retain(|f| *f != p);
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
+        self.poll_scan(ctx);
         let running = self.run.is_some();
 
         egui::TopBottomPanel::top("settings").show(ctx, |ui| {
@@ -331,12 +514,25 @@ impl eframe::App for App {
                             .add_filter("All files", &["*"])
                             .pick_file()
                     });
-                    path_row(ui, "Chat log", &mut s.chat_log, "optional: Local chat log, finds the match and EVE times", |d| {
+                    path_row(ui, "Chat log", &mut s.chat_log, "optional: Local chat log, finds the matches (each processed) and EVE times", |d| {
                         d.add_filter("Chat log", &["txt"]).pick_file()
                     });
-                    path_row(ui, "Output folder", &mut s.out_dir, "where the CSV (and audio, logs) go", |d| {
+                    path_row(ui, "Gamelogs folder", &mut s.combat_log_dir, "EVE's Gamelogs folder: searched for logs with combat during the chat log", |d| {
                         d.pick_folder()
                     });
+                    path_row(ui, "Output folder", &mut s.out_dir, "parent folder: each run goes in its own subfolder", |d| {
+                        d.pick_folder()
+                    });
+                    ui.label("Run folder");
+                    ui.horizontal(|ui| {
+                        let field = egui::TextEdit::singleline(&mut s.run_name).hint_text("subfolder for this run's CSV (and audio, logs)");
+                        ui.add_sized([160.0, ui.spacing().interact_size.y], field);
+                        if !s.out_dir.trim().is_empty() && !s.run_name.trim().is_empty() {
+                            let full = Path::new(s.out_dir.trim()).join(s.run_name.trim());
+                            ui.weak(full.display().to_string());
+                        }
+                    });
+                    ui.end_row();
                     path_row(ui, "Scene", &mut s.scene, "scene.json: where each overview is in the frame", |d| {
                         d.add_filter("Scene", &["json"]).pick_file()
                     });
@@ -344,8 +540,11 @@ impl eframe::App for App {
                     ui.checkbox(&mut s.extract_audio, "Extract audio (<video>.mp3 next to the CSV)");
                     ui.end_row();
                 });
+            });
+            ui.add_enabled_ui(!running, |ui| {
                 ui.add_space(4.0);
-                combat_logs_ui(ui, s, &mut self.labels);
+                combat_logs_ui(ui, self);
+                let s = &self.settings;
                 if !s.combat_log_files.is_empty() && s.chat_log.trim().is_empty() {
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
@@ -411,4 +610,57 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(s: &str) -> NaiveDateTime {
+        NaiveDateTime::parse_from_str(s, "%Y.%m.%d %H:%M:%S").unwrap()
+    }
+
+    fn gamelog(listener: &str, lines: &[&str]) -> String {
+        let mut out = format!(
+            "------\r\n  Gamelog\r\n  Listener: {listener}\r\n  Session Started: 2026.09.26 12:00:00\r\n------\r\n"
+        );
+        for l in lines {
+            out += l;
+            out += "\r\n";
+        }
+        out
+    }
+
+    #[test]
+    fn chat_span_of_utf16_log() {
+        let text = "\u{feff}\r\n  Channel Name:    Local\r\n  Session started: 2026.09.26 12:59:55\r\n\
+            \u{feff}[ 2026.09.26 13:00:01 ] A > hi\r\n\u{feff}[ 2026.09.26 15:13:01 ] B > o7\r\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend(text.trim_start_matches('\u{feff}').encode_utf16().flat_map(u16::to_le_bytes));
+        let span = chat_span(&decode_chat_log(&bytes)).unwrap();
+        assert_eq!(span, (t("2026.09.26 12:59:55"), t("2026.09.26 15:13:01")));
+        assert!(chat_span("not a chat log").is_err());
+    }
+
+    #[test]
+    fn finds_logs_with_combat_in_span() {
+        let dir = std::env::temp_dir().join(format!("positions-gui-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let combat = |time: &str| format!("[ {time} ] (combat) 100 to B[X](Loki) - Gun - Hits");
+        let files = [
+            ("20260926_120000_1.txt", gamelog("A", &[&combat("2026.09.26 13:30:00")])),
+            ("20260926_120000_2.txt", gamelog("B", &[&combat("2026.09.26 11:30:00")])),
+            ("20260926_120000_3.txt", gamelog("C", &["[ 2026.09.26 13:30:00 ] (notify) Docking"])),
+            ("20260926_120000_4.txt", combat("2026.09.26 13:30:00")),
+            ("20260926_150000_5.txt", gamelog("E", &[&combat("2026.09.26 15:30:00")])),
+            ("notes.md", gamelog("F", &[&combat("2026.09.26 13:30:00")])),
+        ];
+        for (name, text) in &files {
+            std::fs::write(dir.join(name), text).unwrap();
+        }
+        let found = find_gamelogs(&dir, t("2026.09.26 13:00:00"), t("2026.09.26 14:00:00")).unwrap();
+        assert_eq!(found, [path_string(dir.join("20260926_120000_1.txt"))]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

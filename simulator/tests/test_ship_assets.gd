@@ -68,6 +68,8 @@ func test_ewar_texture() -> void:
 	var a := _assets(dir)
 	assert_eq(a.ewar_texture("neut").get_height(), 64)
 	assert_null(a.ewar_texture("scram"), "not on disk")
+	for type in CombatStats.EWAR_TYPES:
+		assert_true(ShipAssets.EWAR_TYPE_IDS.has(type), "icon type ID for %s" % type)
 
 
 func test_extract_brackets() -> void:
@@ -75,7 +77,7 @@ func test_extract_brackets() -> void:
 	var zip := ZIPPacker.new()
 	assert_eq(zip.open(zip_path), OK)
 	for name in ["Icons/items/Brackets/Frigate_32.png", "Icons/items/Brackets/readme.txt",
-			"Icons/items/Modules/gun.png", ShipAssets.EWAR_ICONS.scram, ShipAssets.EWAR_ICONS.ecm]:
+			"Icons/items/Modules/gun.png"]:
 		zip.start_file(name)
 		zip.write_file("x".to_utf8_buffer())
 		zip.close_file()
@@ -83,11 +85,6 @@ func test_extract_brackets() -> void:
 	var out := temp_dir()
 	assert_eq(ShipAssets.extract_brackets(zip_path, out), "")
 	assert_eq(Array(DirAccess.get_files_at(out)), ["frigate_32.png"])
-	var ewar := temp_dir()
-	assert_eq(ShipAssets.extract_brackets(zip_path, temp_dir(), ewar), "")
-	var got := Array(DirAccess.get_files_at(ewar))
-	got.sort()
-	assert_eq(got, ["ecm.png", "scram.png"])
 	assert_true(ShipAssets.extract_brackets(temp_dir().path_join("missing.zip"), out).begins_with("Cannot open"))
 
 

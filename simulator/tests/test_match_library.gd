@@ -64,14 +64,10 @@ func test_name_clash_gets_suffix() -> void:
 	assert_eq(MatchLibrary.list().size(), 3)
 
 
-func test_list_newest_first() -> void:
-	if OS.get_name() == "Windows":
-		return  # Ages the file with `touch`.
-	var old := MatchLibrary.add(_file("old.csv", "1"))
-	MatchLibrary.add(_file("new.csv", "2"))
-	# Modification times have 1 s resolution: age the first file instead of sleeping.
-	OS.execute("touch", ["-d", "2020-01-01", ProjectSettings.globalize_path(old)])
-	assert_eq(MatchLibrary.list().map(func(e): return e.name), ["new", "old"])
+func test_list_natural_name_order() -> void:
+	for n in ["m_10", "m_02", "m_1", "M_3"]:
+		MatchLibrary.add(_file(n + ".csv", n))
+	assert_eq(MatchLibrary.list().map(func(e): return e.name), ["m_1", "m_02", "M_3", "m_10"])
 
 
 func test_list_ignores_other_files() -> void:
