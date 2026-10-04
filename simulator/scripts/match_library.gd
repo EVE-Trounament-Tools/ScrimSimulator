@@ -10,7 +10,7 @@ extends RefCounted
 
 ## Overridable so tests never touch the real library.
 static var dir := "user://matches"
-## Where the release bundle keeps the demo match (`demo/` next to the executable, see
+## Where the release bundle keeps the demo library (`demo/` next to the executable, see
 ## `demo_source`). Overridable so tests never touch the real one.
 static var demo_dir := ""
 ## Audio formats Godot can load at runtime.
@@ -174,8 +174,10 @@ static func display_name(file: String) -> String:
 	return file
 
 
-## The demo match's CSV shipped with the release (in `demo_dir`, else `demo/` next to the
-## executable), or "" if there is none. Never found when run from source.
+## The demo library shipped with the release (`demo_dir`, else `demo/` next to the
+## executable): a copy of a library, its matches in the same layout as in `dir` (folders,
+## sidecars, audio, logs). "" if there is none or it holds no CSV. Never found when run from
+## source.
 static func demo_source() -> String:
 	var d := demo_dir
 	if d == "":
@@ -184,21 +186,54 @@ static func demo_source() -> String:
 		d = OS.get_executable_path().get_base_dir().path_join("demo")
 	if not DirAccess.dir_exists_absolute(d):
 		return ""
-	for file in DirAccess.get_files_at(d):
-		if file.get_extension().to_lower() == "csv":
-			return d.path_join(file)
+	for folder in [""] + _subdirs(d):
+		for file in DirAccess.get_files_at(d.path_join(folder)):
+			if file.get_extension().to_lower() == "csv":
+				return d
 	return ""
 
 
-## Adds the demo match (and its gamelogs) to the library the first time it is found; once added,
-## it is never added again, so removing it sticks.
+## Every directory inside `d`, at any depth, as paths relative to it.
+static func _subdirs(d: String) -> Array:
+	var out := []
+	for n in DirAccess.get_directories_at(d):
+		out.append(n)
+		for sub in _subdirs(d.path_join(n)):
+			out.append(n.path_join(sub))
+	return out
+
+
+## Copies the demo library (`demo_source`) into the library the first time it is found, keeping
+## any file already there; once added, it is never added again, so removing it sticks.
 static func add_demo() -> void:
 	if Settings.get_value("library/demo_added"):
 		return
 	var src := demo_source()
-	if src == "" or add(src) == "":
+	if src == "" or not _copy_tree(src, dir):
 		return
 	Settings.set_value("library/demo_added", true)
+
+
+## Copies everything in directory `src` into `dest` (made if missing), skipping files `dest`
+## already has. False if anything couldn't be copied.
+static func _copy_tree(src: String, dest: String) -> bool:
+	var ok := true
+	for folder in [""] + _subdirs(src):
+		var to_dir := dest.path_join(folder)
+		var err := DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(to_dir))
+		if err != OK:
+			push_error("Cannot create %s: %s" % [to_dir, error_string(err)])
+			ok = false
+			continue
+		for file in DirAccess.get_files_at(src.path_join(folder)):
+			var to := to_dir.path_join(file)
+			if FileAccess.file_exists(to):
+				continue
+			err = DirAccess.copy_absolute(src.path_join(folder).path_join(file), ProjectSettings.globalize_path(to))
+			if err != OK:
+				push_error("Cannot copy %s to %s: %s" % [file, to_dir, error_string(err)])
+				ok = false
+	return ok
 
 
 ## Copies `src` into library folder `folder` (made if missing) and returns the copy's path (""

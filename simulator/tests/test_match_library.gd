@@ -299,6 +299,17 @@ func test_removed_demo_stays_removed() -> void:
 	assert_eq(MatchLibrary.list(), [])
 
 
+func test_add_demo_copies_folders_and_audio() -> void:
+	var d := _demo_dir()
+	DirAccess.make_dir_recursive_absolute(d.path_join("Scrim/m.positions.logs"))
+	DirAccess.copy_absolute(d.path_join("Demo match.positions.csv"), d.path_join("Scrim/m.positions.csv"))
+	DirAccess.copy_absolute(write_wav(), d.path_join("Scrim/m.positions.wav"))
+	MatchLibrary.demo_dir = d
+	MatchLibrary.add_demo()
+	assert_eq(MatchLibrary.list().map(func(e): return [e.folder, e.name, e.audio]),
+		[["", "Demo match", false], ["Scrim", "m", true]])
+
+
 func test_missing_demo_is_noop() -> void:
 	MatchLibrary.demo_dir = temp_dir().path_join("nope")
 	MatchLibrary.add_demo()
