@@ -24,4 +24,4 @@
 - timeline shoulden't care about being podded, just ships dying
 add bars for armor, shield, and hull
 - For the ocr gui, I should need to just set a folder and the tool should look for the relevant logs, I shoulden't need to manually select the log files
-
+- display hp data

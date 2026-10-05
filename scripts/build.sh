@@ -164,7 +164,7 @@ package_ocr() { # <platform> <ocr exe path> <gui exe path>
 
 build_linux() {
     log "building scrim-positions (linux)"
-    cargo build --release -p overview --bin scrim-positions -p positions-gui -p glb-undraco --bin glb-undraco
+    cargo build --release -p overview --bin scrim-positions -p positions-gui --bin scrim-positions-gui -p glb-undraco --bin glb-undraco
     log "exporting simulator (linux)"
     export_simulator "Linux" "export/linux/scrim-simulator.x86_64"
     package_simulator linux simulator/export/linux/scrim-simulator.x86_64 target/release/glb-undraco
@@ -180,7 +180,7 @@ build_windows() {
         rustup target add "$WIN_TARGET"
     fi
     log "building scrim-positions (windows)"
-    cargo build --release -p overview --bin scrim-positions -p positions-gui -p glb-undraco --bin glb-undraco --target "$WIN_TARGET"
+    cargo build --release -p overview --bin scrim-positions -p positions-gui --bin scrim-positions-gui -p glb-undraco --bin glb-undraco --target "$WIN_TARGET"
     log "exporting simulator (windows)"
     export_simulator "Windows Desktop" "export/windows/scrim-simulator.exe"
     package_simulator windows simulator/export/windows/scrim-simulator.exe "target/$WIN_TARGET/release/glb-undraco.exe"
