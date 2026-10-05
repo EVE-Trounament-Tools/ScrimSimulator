@@ -169,6 +169,10 @@ var assets_dialog: ConfirmationDialog
 var bottom_panel: PanelContainer
 var roster_panel: PanelContainer
 var roster_table: RosterTable
+## Broadcast-style alternative to the roster (setting `display/broadcast_roster`).
+var broadcast_panel: BroadcastRoster
+var broadcast_button: Button
+var broadcast_on := false
 var info_panel: PanelContainer
 var info_label: Label
 var select_texture: Texture2D
@@ -211,6 +215,7 @@ func _ready() -> void:
 	add_child(assets)
 	models_on = Settings.get_value("display/ship_models")
 	smooth_on = Settings.get_value("display/smooth_motion")
+	broadcast_on = Settings.get_value("display/broadcast_roster")
 	for field in OVERLAY_FIELDS:
 		ship_overlay[field] = Settings.get_value("overlay/" + field)
 	get_window().content_scale_factor = Settings.get_value("display/ui_scale")
@@ -1603,6 +1608,14 @@ func _build_ui() -> void:
 	debug_button.pressed.connect(_open_all_debug_menu)
 	row.add_child(debug_button)
 
+	broadcast_button = Button.new()
+	broadcast_button.text = "Broadcast"
+	broadcast_button.toggle_mode = true
+	broadcast_button.button_pressed = broadcast_on
+	broadcast_button.tooltip_text = "Broadcast-style ship data panel instead of the roster table"
+	broadcast_button.toggled.connect(_set_broadcast_on)
+	row.add_child(broadcast_button)
+
 	sde_label = Label.new()
 	sde_label.modulate = Color(1, 1, 1, 0.6)
 	row.add_child(sde_label)
@@ -1840,7 +1853,16 @@ func _build_roster(layer: CanvasLayer) -> void:
 	roster_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	roster_panel.visible = false
 	layer.add_child(roster_panel)
-	var keep_above_bar := func(): roster_panel.offset_bottom = -bottom_panel.size.y
+	broadcast_panel = BroadcastRoster.new()
+	broadcast_panel.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
+	broadcast_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	broadcast_panel.visible = false
+	broadcast_panel.row_pressed.connect(_set_tracked)
+	layer.add_child(broadcast_panel)
+	var keep_above_bar := func():
+		roster_panel.offset_bottom = -bottom_panel.size.y
+		broadcast_panel.offset_top = -bottom_panel.size.y
+		broadcast_panel.offset_bottom = -bottom_panel.size.y
 	bottom_panel.resized.connect(keep_above_bar)
 	keep_above_bar.call()
 
@@ -1864,11 +1886,25 @@ func _fit_roster() -> void:
 	roster_panel.offset_right = 0.0
 
 
-## Rebuilds the roster from the loaded match's teams.
+## Shows the roster table or the broadcast panel (`broadcast_on`) while a match is open.
+func _apply_roster_visibility() -> void:
+	roster_panel.visible = data != null and not broadcast_on
+	broadcast_panel.visible = data != null and broadcast_on
+
+
+func _set_broadcast_on(on: bool) -> void:
+	broadcast_on = on
+	Settings.set_value("display/broadcast_roster", on)
+	broadcast_button.set_pressed_no_signal(on)
+	_apply_roster_visibility()
+
+
+## Rebuilds the roster and the broadcast panel from the loaded match's teams.
 func _refresh_roster() -> void:
 	roster_table.clear()
 	roster_buttons.clear()
-	roster_panel.visible = data != null
+	broadcast_panel.clear()
+	_apply_roster_visibility()
 	if data == null:
 		return
 	var pilots := ships.keys()
@@ -1892,6 +1928,18 @@ func _refresh_roster() -> void:
 			_style_roster_button(pilot)
 			roster_table.set_cell(pilot, "ship", data.tracks[pilot][0].ship_type)
 			roster_table.set_cell(pilot, "pilot", pilot_names.get(pilot, _short_name(pilot)))
+	# Broadcast panel: red down the left, blue down the right; unknown pilots are left out.
+	broadcast_panel.set_teams(_team_name(MatchData.Team.RED), TEAM_COLORS[MatchData.Team.RED],
+			_team_name(MatchData.Team.BLUE), TEAM_COLORS[MatchData.Team.BLUE])
+	for pilot in pilots:
+		var team: int = data.teams.get(pilot, MatchData.Team.UNKNOWN)
+		if team == MatchData.Team.UNKNOWN:
+			continue
+		var side := BroadcastRoster.Side.LEFT if team == MatchData.Team.RED else BroadcastRoster.Side.RIGHT
+		var button := broadcast_panel.add_row(side, pilot, TEAM_COLORS[team])
+		button.tooltip_text = "Centre the camera on %s" % _pilot_name(pilot)
+		broadcast_panel.set_cell(pilot, "ship", data.tracks[pilot][0].ship_type)
+		broadcast_panel.set_cell(pilot, "name", pilot_names.get(pilot, _short_name(pilot)))
 	_update_roster_cells()
 
 
@@ -1919,6 +1967,18 @@ func _update_roster_cells() -> void:
 			roster_table.set_cell(pilot, "speed", "—" if is_nan(motion.speed) else _fmt_speed(motion.speed))
 			roster_table.set_cell(pilot, "distance", "%.1f km" % motion.dist_km)
 		roster_buttons[pilot].modulate.a = 0.5 if dead else 1.0
+		if broadcast_panel.rows.has(pilot):
+			_update_broadcast_row(pilot)
+	broadcast_panel.set_clock(_fmt_time(time))
+
+
+## Copies `pilot`'s roster row (ship, speed, dimming) into the broadcast panel, with the
+## electronic warfare on it.
+func _update_broadcast_row(pilot: String) -> void:
+	for id in ["ship", "speed"]:
+		broadcast_panel.set_cell(pilot, id, roster_table.cell_text(pilot, id))
+	broadcast_panel.set_dimmed(pilot, roster_buttons[pilot].modulate.a < 1.0)
+	broadcast_panel.set_ewar(pilot, _ewar_icons(pilot, false) if combat_stats.has("ewar_in") else [])
 
 
 ## Roster icons for the electronic warfare on `pilot` (`outgoing`: by it) now: one per type, its

@@ -632,6 +632,38 @@ func test_roster_lists_teams() -> void:
 	assert_eq(m.roster_table.cell_text("blue", "pilot"), "blue")
 
 
+func test_broadcast_toggle() -> void:
+	var m := _main()
+	m.load_match(_match_csv())
+	assert_false(m.broadcast_panel.visible, "off by default")
+	m._set_broadcast_on(true)
+	assert_true(m.broadcast_panel.visible)
+	assert_false(m.roster_panel.visible)
+	assert_true(m.broadcast_button.button_pressed)
+	assert_true(Settings.get_value("display/broadcast_roster"))
+	assert_eq(m.broadcast_panel.rows.keys(), ["blue", "red"], "unknown pilots left out")
+	assert_eq(m.broadcast_panel.rows["red"].side, BroadcastRoster.Side.LEFT)
+	assert_eq(m.broadcast_panel.rows["blue"].side, BroadcastRoster.Side.RIGHT)
+	assert_eq(m.broadcast_panel.team_text(BroadcastRoster.Side.LEFT), "RED")
+	assert_eq(m.broadcast_panel.cell_text("blue", "ship"), "Test Hull")
+	m._seek(2.0)
+	m._process(0.0)
+	assert_eq(m.broadcast_panel.cell_text("blue", "speed"), "0 m/s")
+	assert_eq(m.broadcast_panel.clock.text, "00:02")
+	m._set_broadcast_on(false)
+	assert_false(m.broadcast_panel.visible)
+	assert_true(m.roster_panel.visible)
+
+
+func test_broadcast_setting_survives_reload() -> void:
+	Settings.set_value("display/broadcast_roster", true)
+	var m := _main()
+	assert_true(m.broadcast_button.button_pressed)
+	m.load_match(_match_csv())
+	assert_true(m.broadcast_panel.visible)
+	assert_false(m.roster_panel.visible)
+
+
 func test_roster_sorts_by_ship_type_and_abbreviates() -> void:
 	var m := _main()
 	m.load_match(write_csv([

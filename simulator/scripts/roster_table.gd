@@ -315,12 +315,18 @@ func cell_text(pilot: String, id: String) -> String:
 ## nothing when the items are the same as last time, so it is cheap to call every frame.
 func set_cell_icons(pilot: String, id: String, items: Array) -> void:
 	var cell := icon_box(pilot, id)
+	fill_icons(cell, items, cell.get_meta("color", Color.WHITE))
+
+
+## Fills `box` with `items` (see `set_cell_icons`); text items are drawn in `color`. Does nothing
+## when the items are the same as last time.
+static func fill_icons(box: HBoxContainer, items: Array, color: Color) -> void:
 	var signature := "\n".join(items.map(func(i): return "%s|%s|%s" % [i.key, i.texture != null, i.tooltip]))
-	if cell.get_meta("signature", "") == signature:
+	if box.get_meta("signature", "") == signature:
 		return
-	cell.set_meta("signature", signature)
-	for c in cell.get_children():
-		cell.remove_child(c)
+	box.set_meta("signature", signature)
+	for c in box.get_children():
+		box.remove_child(c)
 		c.queue_free()
 	for item in items:
 		var child: Control
@@ -336,12 +342,12 @@ func set_cell_icons(pilot: String, id: String, items: Array) -> void:
 			var label := Label.new()
 			label.text = item.text
 			label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-			label.add_theme_color_override("font_color", cell.get_meta("color", Color.WHITE))
+			label.add_theme_color_override("font_color", color)
 			child = label
 		child.tooltip_text = item.tooltip
 		child.mouse_filter = Control.MOUSE_FILTER_PASS
 		child.set_meta("key", item.key)
-		cell.add_child(child)
+		box.add_child(child)
 
 
 ## An `icons` cell: a clipping Control (so extra icons don't widen the row) around a row of icons.
