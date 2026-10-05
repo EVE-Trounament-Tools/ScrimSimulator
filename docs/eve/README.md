@@ -1,8 +1,9 @@
 # EVE observer window layout
 
 `core_char_observer.dat` is an EVE client character settings file: the window layout (overview,
-Local chat and the rest) for one observer. `docs/obs/scrim-recording.json` crops each capture to
-match this layout. If every observer uses this file, the OBS crops line up without any adjusting.
+Local chat, locked-target bar and the rest) for one observer. It was taken from a Thunderdome
+observer. `docs/obs/scrim-recording.json` crops each capture to match this layout. If every
+observer uses this file, the OBS crops line up without any adjusting.
 
 It was made for a client with these settings:
 
@@ -11,6 +12,11 @@ It was made for a client with these settings:
 - Default chat font size
 
 A different window size or UI scale moves the windows, and you'll have to redo the OBS crops.
+
+In this layout the locked targets sit at the top left of the screen, which is where the OBS
+Targets crops look for them. Each Targets source expects one block of brackets: three rows of three
+for Targets 1 and 2, and a column of two for Targets 3 (see [`docs/obs`](../obs/README.md)). Check
+in each client that its locked targets wrap into the shape its Targets source expects.
 
 ## Setup
 

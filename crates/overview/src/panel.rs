@@ -36,6 +36,11 @@ pub struct Scene {
     /// against a chat log (`scrim-positions --chat-log`). Not OCR'd by this crate.
     #[serde(default)]
     pub chat: Option<Rect>,
+    /// Locked-target blocks: each rect holds one contiguous grid of locked-target brackets
+    /// (shield/armor/hull rings) recorded at 1:1, for tracking ship HP — the OBS template uses two
+    /// 3x3 grids and one column of two. Not read by this crate yet.
+    #[serde(default)]
+    pub targets: Vec<Rect>,
 }
 
 impl Scene {

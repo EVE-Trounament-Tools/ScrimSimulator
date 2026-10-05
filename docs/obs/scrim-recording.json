@@ -8,7 +8,7 @@
             "id": "scene",
             "versioned_id": "scene",
             "settings": {
-                "id_counter": 4,
+                "id_counter": 7,
                 "custom_size": false,
                 "items": [
                     {
@@ -18,7 +18,7 @@
                         "locked": true,
                         "rot": 0.0,
                         "scale_ref": {
-                            "x": 2560.0,
+                            "x": 3712.0,
                             "y": 1600.0
                         },
                         "align": 5,
@@ -36,7 +36,7 @@
                             "y": 0.0
                         },
                         "pos_rel": {
-                            "x": -1.6,
+                            "x": -2.32,
                             "y": -1.0
                         },
                         "scale": {
@@ -73,7 +73,7 @@
                         "locked": true,
                         "rot": 0.0,
                         "scale_ref": {
-                            "x": 2560.0,
+                            "x": 3712.0,
                             "y": 1600.0
                         },
                         "align": 5,
@@ -91,7 +91,7 @@
                             "y": 0.0
                         },
                         "pos_rel": {
-                            "x": 0.0,
+                            "x": -0.72,
                             "y": -1.0
                         },
                         "scale": {
@@ -128,7 +128,7 @@
                         "locked": true,
                         "rot": 0.0,
                         "scale_ref": {
-                            "x": 2560.0,
+                            "x": 3712.0,
                             "y": 1600.0
                         },
                         "align": 5,
@@ -146,7 +146,7 @@
                             "y": 800.0
                         },
                         "pos_rel": {
-                            "x": 0.0,
+                            "x": -0.72,
                             "y": 0.0
                         },
                         "scale": {
@@ -183,7 +183,7 @@
                         "locked": true,
                         "rot": 0.0,
                         "scale_ref": {
-                            "x": 2560.0,
+                            "x": 3712.0,
                             "y": 1600.0
                         },
                         "align": 5,
@@ -201,7 +201,7 @@
                             "y": 1200.0
                         },
                         "pos_rel": {
-                            "x": -1.6,
+                            "x": -2.32,
                             "y": 0.5
                         },
                         "scale": {
@@ -219,6 +219,171 @@
                         "bounds_rel": {
                             "x": 1.6,
                             "y": 0.5
+                        },
+                        "scale_filter": "disable",
+                        "blend_method": "default",
+                        "blend_type": "normal",
+                        "show_transition": {
+                            "duration": 300
+                        },
+                        "hide_transition": {
+                            "duration": 300
+                        },
+                        "private_settings": {}
+                    },
+                    {
+                        "name": "Targets 1",
+                        "source_uuid": "5c1a0001-0000-4000-8000-00000000000e",
+                        "visible": true,
+                        "locked": true,
+                        "rot": 0.0,
+                        "scale_ref": {
+                            "x": 3712.0,
+                            "y": 1600.0
+                        },
+                        "align": 5,
+                        "bounds_type": 6,
+                        "bounds_align": 5,
+                        "bounds_crop": false,
+                        "crop_left": 0,
+                        "crop_top": 0,
+                        "crop_right": 0,
+                        "crop_bottom": 0,
+                        "id": 5,
+                        "group_item_backup": false,
+                        "pos": {
+                            "x": 2560.0,
+                            "y": 0.0
+                        },
+                        "pos_rel": {
+                            "x": 0.88,
+                            "y": -1.0
+                        },
+                        "scale": {
+                            "x": 1.0,
+                            "y": 1.0
+                        },
+                        "scale_rel": {
+                            "x": 1.0,
+                            "y": 1.0
+                        },
+                        "bounds": {
+                            "x": 576.0,
+                            "y": 928.0
+                        },
+                        "bounds_rel": {
+                            "x": 0.72,
+                            "y": 1.16
+                        },
+                        "scale_filter": "disable",
+                        "blend_method": "default",
+                        "blend_type": "normal",
+                        "show_transition": {
+                            "duration": 300
+                        },
+                        "hide_transition": {
+                            "duration": 300
+                        },
+                        "private_settings": {}
+                    },
+                    {
+                        "name": "Targets 2",
+                        "source_uuid": "5c1a0001-0000-4000-8000-00000000000f",
+                        "visible": true,
+                        "locked": true,
+                        "rot": 0.0,
+                        "scale_ref": {
+                            "x": 3712.0,
+                            "y": 1600.0
+                        },
+                        "align": 5,
+                        "bounds_type": 6,
+                        "bounds_align": 5,
+                        "bounds_crop": false,
+                        "crop_left": 0,
+                        "crop_top": 0,
+                        "crop_right": 0,
+                        "crop_bottom": 0,
+                        "id": 6,
+                        "group_item_backup": false,
+                        "pos": {
+                            "x": 3136.0,
+                            "y": 0.0
+                        },
+                        "pos_rel": {
+                            "x": 1.6,
+                            "y": -1.0
+                        },
+                        "scale": {
+                            "x": 1.0,
+                            "y": 1.0
+                        },
+                        "scale_rel": {
+                            "x": 1.0,
+                            "y": 1.0
+                        },
+                        "bounds": {
+                            "x": 576.0,
+                            "y": 928.0
+                        },
+                        "bounds_rel": {
+                            "x": 0.72,
+                            "y": 1.16
+                        },
+                        "scale_filter": "disable",
+                        "blend_method": "default",
+                        "blend_type": "normal",
+                        "show_transition": {
+                            "duration": 300
+                        },
+                        "hide_transition": {
+                            "duration": 300
+                        },
+                        "private_settings": {}
+                    },
+                    {
+                        "name": "Targets 3",
+                        "source_uuid": "5c1a0001-0000-4000-8000-000000000010",
+                        "visible": true,
+                        "locked": true,
+                        "rot": 0.0,
+                        "scale_ref": {
+                            "x": 3712.0,
+                            "y": 1600.0
+                        },
+                        "align": 5,
+                        "bounds_type": 6,
+                        "bounds_align": 5,
+                        "bounds_crop": false,
+                        "crop_left": 0,
+                        "crop_top": 0,
+                        "crop_right": 0,
+                        "crop_bottom": 0,
+                        "id": 7,
+                        "group_item_backup": false,
+                        "pos": {
+                            "x": 2560.0,
+                            "y": 928.0
+                        },
+                        "pos_rel": {
+                            "x": 0.88,
+                            "y": 0.16
+                        },
+                        "scale": {
+                            "x": 1.0,
+                            "y": 1.0
+                        },
+                        "scale_rel": {
+                            "x": 1.0,
+                            "y": 1.0
+                        },
+                        "bounds": {
+                            "x": 576.0,
+                            "y": 672.0
+                        },
+                        "bounds_rel": {
+                            "x": 0.72,
+                            "y": 0.84
                         },
                         "scale_filter": "disable",
                         "blend_method": "default",
@@ -257,7 +422,13 @@
                 "libobs.show_scene_item.3": [],
                 "libobs.hide_scene_item.3": [],
                 "libobs.show_scene_item.4": [],
-                "libobs.hide_scene_item.4": []
+                "libobs.hide_scene_item.4": [],
+                "libobs.show_scene_item.5": [],
+                "libobs.hide_scene_item.5": [],
+                "libobs.show_scene_item.6": [],
+                "libobs.hide_scene_item.6": [],
+                "libobs.show_scene_item.7": [],
+                "libobs.hide_scene_item.7": []
             },
             "canvas_uuid": "6c69626f-6273-4c00-9d88-c5136d61696e"
         },
@@ -273,8 +444,8 @@
                 "include_border": false,
                 "exclude_alpha": false,
                 "cut_top": 80,
-                "cut_left": 1240,
-                "cut_right": 0,
+                "cut_left": 1250,
+                "cut_right": 10,
                 "cut_bot": 370
             },
             "mixers": 0,
@@ -306,8 +477,8 @@
                 "include_border": false,
                 "exclude_alpha": false,
                 "cut_top": 80,
-                "cut_left": 1240,
-                "cut_right": 0,
+                "cut_left": 1250,
+                "cut_right": 10,
                 "cut_bot": 370
             },
             "mixers": 0,
@@ -339,8 +510,8 @@
                 "include_border": false,
                 "exclude_alpha": false,
                 "cut_top": 80,
-                "cut_left": 1240,
-                "cut_right": 0,
+                "cut_left": 1250,
+                "cut_right": 10,
                 "cut_bot": 370
             },
             "mixers": 0,
@@ -375,6 +546,105 @@
                 "cut_left": 1990,
                 "cut_right": 80,
                 "cut_bot": 50
+            },
+            "mixers": 0,
+            "sync": 0,
+            "flags": 0,
+            "volume": 1.0,
+            "balance": 0.5,
+            "enabled": true,
+            "muted": false,
+            "push-to-mute": false,
+            "push-to-mute-delay": 0,
+            "push-to-talk": false,
+            "push-to-talk-delay": 0,
+            "deinterlace_mode": 0,
+            "deinterlace_field_order": 0,
+            "monitoring_type": 0,
+            "private_settings": {},
+            "hotkeys": {}
+        },
+        {
+            "prev_ver": 537001984,
+            "name": "Targets 1",
+            "uuid": "5c1a0001-0000-4000-8000-00000000000e",
+            "id": "xcomposite_input",
+            "versioned_id": "xcomposite_input",
+            "settings": {
+                "capture_window": "",
+                "show_cursor": false,
+                "include_border": false,
+                "exclude_alpha": false,
+                "cut_top": 50,
+                "cut_left": 570,
+                "cut_right": 1350,
+                "cut_bot": 430
+            },
+            "mixers": 0,
+            "sync": 0,
+            "flags": 0,
+            "volume": 1.0,
+            "balance": 0.5,
+            "enabled": true,
+            "muted": false,
+            "push-to-mute": false,
+            "push-to-mute-delay": 0,
+            "push-to-talk": false,
+            "push-to-talk-delay": 0,
+            "deinterlace_mode": 0,
+            "deinterlace_field_order": 0,
+            "monitoring_type": 0,
+            "private_settings": {},
+            "hotkeys": {}
+        },
+        {
+            "prev_ver": 537001984,
+            "name": "Targets 2",
+            "uuid": "5c1a0001-0000-4000-8000-00000000000f",
+            "id": "xcomposite_input",
+            "versioned_id": "xcomposite_input",
+            "settings": {
+                "capture_window": "",
+                "show_cursor": false,
+                "include_border": false,
+                "exclude_alpha": false,
+                "cut_top": 50,
+                "cut_left": 570,
+                "cut_right": 1350,
+                "cut_bot": 430
+            },
+            "mixers": 0,
+            "sync": 0,
+            "flags": 0,
+            "volume": 1.0,
+            "balance": 0.5,
+            "enabled": true,
+            "muted": false,
+            "push-to-mute": false,
+            "push-to-mute-delay": 0,
+            "push-to-talk": false,
+            "push-to-talk-delay": 0,
+            "deinterlace_mode": 0,
+            "deinterlace_field_order": 0,
+            "monitoring_type": 0,
+            "private_settings": {},
+            "hotkeys": {}
+        },
+        {
+            "prev_ver": 537001984,
+            "name": "Targets 3",
+            "uuid": "5c1a0001-0000-4000-8000-000000000010",
+            "id": "xcomposite_input",
+            "versioned_id": "xcomposite_input",
+            "settings": {
+                "capture_window": "",
+                "show_cursor": false,
+                "include_border": false,
+                "exclude_alpha": false,
+                "cut_top": 50,
+                "cut_left": 570,
+                "cut_right": 1730,
+                "cut_bot": 770
             },
             "mixers": 0,
             "sync": 0,
@@ -430,11 +700,11 @@
     "scaling_off_y": 0.0,
     "modules": {},
     "resolution": {
-        "x": 2560,
+        "x": 3712,
         "y": 1600
     },
     "migration_resolution": {
-        "x": 2560,
+        "x": 3712,
         "y": 1600
     },
     "version": 2

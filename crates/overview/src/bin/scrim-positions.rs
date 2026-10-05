@@ -942,4 +942,16 @@ mod tests {
                 .unwrap();
         assert_eq!(with.chat.unwrap().y, 1200);
     }
+
+    #[test]
+    fn scene_target_blocks_are_optional() {
+        let without: Scene = serde_json::from_str(r#"{"panels": []}"#).unwrap();
+        assert!(without.targets.is_empty());
+        let with: Scene = serde_json::from_str(
+            r#"{"panels": [], "targets": [{"x": 2560, "y": 928, "w": 576, "h": 672}]}"#,
+        )
+        .unwrap();
+        assert_eq!(with.targets.len(), 1);
+        assert_eq!(with.targets[0].x, 2560);
+    }
 }
