@@ -1,8 +1,10 @@
 class_name MatchData
 extends RefCounted
 ## Per-pilot position tracks loaded from a `scrim-positions` CSV:
-## `t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m`, plus `eve_time` (each
-## tick's EVE time, ISO 8601 UTC) when it was made with `--chat-log` or `--t0`.
+## `t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m`, optionally
+## `shield,armor,hull` (remaining HP 0-1, blank while no observer had the pilot locked; not read
+## here yet), plus `eve_time` (each tick's EVE time, ISO 8601 UTC) when it was made with
+## `--chat-log` or `--t0`.
 ## Positions are metres in the observers' cube frame (0..100 km per axis).
 
 ## Samples further apart than this are treated as a gap: the ship is hidden in between.

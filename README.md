@@ -82,7 +82,10 @@ don't want the mp3, and press **Run**. Its output is shown as it works, and your
 remembered for next time. It looks for `scrim-positions` and `scene.json` next to itself.
 
 The CSV has one row per pilot per second:
-`t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m`.
+`t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m,shield,armor,hull`.
+`shield`, `armor` and `hull` are the pilot's remaining HP (0–1), read off the rings of the locked
+targets the OBS template records; they're blank while no observer has the pilot locked. Whose ring
+is whose comes from its label, read with Tesseract (on `PATH`, or `--tesseract`).
 
 ### One match, with EVE timestamps
 

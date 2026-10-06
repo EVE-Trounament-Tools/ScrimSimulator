@@ -29,6 +29,7 @@ pub mod panel;
 pub mod row;
 pub mod ship_types;
 pub mod solve;
+pub mod targets;
 pub mod track;
 pub mod util;
 pub mod value;

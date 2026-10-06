@@ -23,3 +23,7 @@ path = "src/bin/overview-track.rs"
 [[bin]]
 name = "scrim-positions"
 path = "src/bin/scrim-positions.rs"
+
+[[bin]]
+name = "targets-probe"
+path = "src/bin/targets-probe.rs"

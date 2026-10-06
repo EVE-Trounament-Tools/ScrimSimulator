@@ -65,5 +65,6 @@ scrim-positions --scene docs/obs/scene.json --chat-log Local_….txt match.mkv  
 The slots are a starting point. A panel must contain the overview's header row and its rows, and
 nothing below them that could be read as extra rows (a tab strip, another window). If your cropped
 capture doesn't fill its slot, shrink that panel's `rect` to fit. The same goes for `chat`: the
-closer it hugs the chat messages, the less else Tesseract has to read. Nothing reads `targets`
-yet; it records where the HP blocks are for when something does.
+closer it hugs the chat messages, the less else Tesseract has to read. `scrim-positions` finds
+the rings in each `targets` block on its own (they can be at any UI scale, and rows move as long
+names wrap), so a `targets` rect only has to contain its whole block.

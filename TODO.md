@@ -2,7 +2,6 @@
 - may bug when ship comes close enough that distance becomes m instead of km
 - bug where some ships seem to be moved out of bounds erroneously
 - gpu acceleration
-- update to record hp changes via locked targets. It should do this by defining 300px for each target and use that to test the shield, armor, and hull hp remaining (can reduce resolution if neede to fit in recording window). This will require updating the obs scene to collect this data
 - the ~/Videos/AG7/2026-10-04 05-58-36.mkv: finding the match with ScrimTrimmer step takes far too much time compared to triming a normal gamepaly vid with the scrimTrimmer
 
 ## Test data (resouces)

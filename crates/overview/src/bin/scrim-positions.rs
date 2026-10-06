@@ -21,19 +21,28 @@
 //! With `--combat-log` (and EVE times), every given EVE gamelog with combat during the match is
 //! cut down to the match and saved in `<video>.positions.logs/` next to the CSV, the folder the
 //! simulator reads a match's combat logs from.
+//!
+//! When the scene has `targets` blocks (locked-target brackets, `overview::targets`), every
+//! ring's shield/armor/hull is read each tick, its label is OCR'd with Tesseract to tell whose
+//! it is, and the CSV's `shield`, `armor` and `hull` columns carry each pilot's HP (0-1) wherever
+//! some observer had them locked.
 
 use anyhow::{bail, ensure, Context, Result};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Utc};
 use clap::Parser;
 use glyph::Font;
-use overview::layout::Layout;
+use overview::layout::{Layout, Rect};
 use overview::panel::{calibrate, crop_scaled, PanelSpec, Scene};
 use overview::row::{read_rows, RowReading};
+use overview::ship_types::ShipTypes;
 use overview::solve::{self, direction, infer_corners, solve_track, Fix};
+use overview::targets::{
+    label_image, match_label, ocr_label, read_rings, BlockGeometry, Candidate, Hp, Label, LabelCache, Ring,
+};
 use overview::track::{hampel_flags, Sample, Track, Tracker, CAPSULE};
 use overview::util::levenshtein;
 use rayon::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -82,6 +91,9 @@ struct Cli {
     /// when the accelerator isn't available.
     #[arg(long, env = "SCRIM_HWACCEL", value_name = "API")]
     hwaccel: Option<String>,
+    /// Tesseract executable, for reading locked targets' labels.
+    #[arg(long, env = "SCRIM_TESSERACT", default_value = "tesseract")]
+    tesseract: PathBuf,
     /// Python interpreter that runs the ScrimTrimmer bridge.
     #[arg(long, env = "SCRIM_PYTHON", default_value = "python3")]
     python: String,
@@ -307,7 +319,7 @@ fn main() -> Result<()> {
 
 /// OCR one match window of `video` and save its CSV, audio and combat logs as `<out_stem>.*`.
 fn process_match(cli: &Cli, scene: &Scene, font: &Font, video: &Path, out_stem: &str, window: &Window) -> Result<()> {
-    let eve_span = process_video(video, scene, font, cli.fps, cli.hwaccel.as_deref(), &cli.out, out_stem, window)
+    let eve_span = process_video(video, scene, font, cli, out_stem, window)
         .with_context(|| format!("processing {}", video.display()))?;
     if !cli.no_audio {
         save_audio(video, &cli.out, out_stem, window);
@@ -478,12 +490,11 @@ fn process_video(
     video: &Path,
     scene: &Scene,
     font: &Font,
-    fps: f64,
-    hwaccel: Option<&str>,
-    out: &Path,
+    cli: &Cli,
     out_stem: &str,
     window: &Window,
 ) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>> {
+    let (fps, hwaccel, out) = (cli.fps, cli.hwaccel.as_deref(), cli.out.as_path());
     let started = std::time::Instant::now();
     let batch_size = 2 * rayon::current_num_threads();
     // Decode on a background thread, one batch ahead, so ffmpeg keeps decoding while a batch is
@@ -498,28 +509,48 @@ fn process_video(
         decoder.height
     );
 
+    // Each panel calibrates on the first of the window's leading frames it can; one still
+    // failing after that (its header hidden all along, e.g. by a hover tooltip) falls back to
+    // another part of the video, since the client layout doesn't change between matches.
     let mut pending = Vec::new();
-    let panels = loop {
-        let Some(frame) = decoder.next_frame()? else {
-            bail!("video ended before every panel calibrated");
-        };
-        let attempt: Result<Vec<Panel>> = scene
-            .panels
-            .par_iter()
-            .map(|spec| {
-                let (scale, layout) = calibrate(&frame.image, spec, font)?;
-                Ok(Panel { spec, scale, layout })
-            })
+    let mut found: Vec<Option<(f32, Layout)>> = vec![None; scene.panels.len()];
+    let mut errors: Vec<String> = vec![String::new(); scene.panels.len()];
+    while found.iter().any(Option::is_none) && pending.len() < CALIBRATION_ATTEMPTS {
+        let Some(frame) = decoder.next_frame()? else { break };
+        let attempts: Vec<(usize, Result<(f32, Layout)>)> = (0..scene.panels.len())
+            .into_par_iter()
+            .filter(|&i| found[i].is_none())
+            .map(|i| (i, calibrate(&frame.image, &scene.panels[i], font)))
             .collect();
-        pending.push(frame);
-        match attempt {
-            Ok(p) => break p,
-            Err(e) if pending.len() < CALIBRATION_ATTEMPTS => {
-                eprintln!("  calibration failed on frame {}: {e:#}; retrying", pending.len() - 1);
+        for (i, attempt) in attempts {
+            match attempt {
+                Ok(fit) => found[i] = Some(fit),
+                Err(e) => errors[i] = format!("{e:#}"),
             }
-            Err(e) => return Err(e),
         }
-    };
+        pending.push(frame);
+    }
+    for (i, fit) in found.iter_mut().enumerate() {
+        if fit.is_none() {
+            let spec = &scene.panels[i];
+            eprintln!(
+                "  panel {} didn't calibrate in the first {} frames ({}); trying elsewhere in the video",
+                spec.name,
+                pending.len(),
+                errors[i]
+            );
+            *fit = Some(calibrate_elsewhere(video, window, spec, font, hwaccel)?);
+        }
+    }
+    let panels: Vec<Panel> = scene
+        .panels
+        .iter()
+        .zip(found)
+        .map(|(spec, fit)| {
+            let (scale, layout) = fit.expect("every panel calibrated");
+            Panel { spec, scale, layout }
+        })
+        .collect();
     for p in &panels {
         println!(
             "  panel {}: scale {:.4}, row pitch {:.2}",
@@ -528,6 +559,7 @@ fn process_video(
     }
 
     let mut trackers: Vec<Tracker> = panels.iter().map(|_| Tracker::new()).collect();
+    let mut targets = TargetReader::new(&scene.targets, &cli.tesseract);
     let mut times = Vec::new();
     loop {
         while pending.len() < batch_size {
@@ -553,6 +585,7 @@ fn process_video(
         for (&(f, p), r) in jobs.iter().zip(&rows) {
             trackers[p].observe(pending[f].t, r);
         }
+        targets.observe(&pending);
         times.extend(pending.iter().map(|f| f.t));
         pending.clear();
         eprint!("\r  {} frames ({:.0}s of video)", times.len(), times.last().unwrap_or(&0.0));
@@ -577,11 +610,12 @@ fn process_video(
 
     let solved: Vec<Vec<Fix>> =
         readings.iter().map(|r| solve_track(fit.corners, &r.distances)).collect();
+    let hp = targets.pilot_hp(&per_observer, &roster);
 
     let path = out.join(format!("{out_stem}.positions.csv"));
     std::fs::write(
         &path,
-        positions_csv(&per_observer, &roster, &readings, &solved, window.eve_origin),
+        positions_csv(&per_observer, &roster, &readings, &solved, &hp, window.eve_origin),
     )?;
     print_summary(&per_observer, &roster, &readings, &solved);
     let eve_span = match (window.eve_origin, times.first(), times.last()) {
@@ -599,6 +633,51 @@ fn process_video(
         started.elapsed().as_secs_f64()
     );
     Ok(eve_span)
+}
+
+/// How far apart, and how far either side of the match window, [`calibrate_elsewhere`] looks.
+const FALLBACK_STEP_S: f64 = 60.0;
+const FALLBACK_STEPS: usize = 30;
+/// How many frames [`calibrate_elsewhere`] calibrates on before keeping the best.
+const FALLBACK_FITS: usize = 5;
+
+/// Calibrate panel `spec` on frames from outside `window`: one frame every [`FALLBACK_STEP_S`],
+/// alternately before and after the window, nearest first. Of the first [`FALLBACK_FITS`] that
+/// calibrate, the one showing the longest list wins: a layout only reads a few rows past the
+/// last one its calibration frame showed (`Layout::list_bottom`), and between matches the
+/// overview may list only a handful of ships.
+fn calibrate_elsewhere(
+    video: &Path,
+    window: &Window,
+    spec: &PanelSpec,
+    font: &Font,
+    hwaccel: Option<&str>,
+) -> Result<(f32, Layout)> {
+    let mut fits: Vec<(f64, (f32, Layout))> = Vec::new();
+    let mut past_end = false;
+    'search: for k in 1..=FALLBACK_STEPS {
+        let step = k as f64 * FALLBACK_STEP_S;
+        let before = window.start_s - step;
+        let after = window.end_s.map(|e| e + step).filter(|_| !past_end);
+        for t in [Some(before).filter(|&t| t >= 0.0), after].into_iter().flatten() {
+            let mut decoder = videoin::Decoder::open_range_hw(video, Some(1.0), t, Some(t + 1.0), hwaccel)?;
+            let Some(frame) = decoder.next_frame()? else {
+                past_end |= t > window.start_s;
+                continue;
+            };
+            if let Ok(fit) = calibrate(&frame.image, spec, font) {
+                fits.push((t, fit));
+                if fits.len() >= FALLBACK_FITS {
+                    break 'search;
+                }
+            }
+        }
+    }
+    let Some((t, fit)) = fits.into_iter().max_by_key(|(_, (_, layout))| layout.list_bottom) else {
+        bail!("panel {:?} didn't calibrate anywhere within {FALLBACK_STEPS} minutes of the match", spec.name);
+    };
+    println!("  panel {} calibrated on the frame at {t:.0}s of the video", spec.name);
+    Ok(fit)
 }
 
 /// How many of each pilot's earliest three-observer ticks feed corner inference. Pilots start
@@ -756,6 +835,194 @@ fn observer_series(
     by_t.into_iter().zip(flags).map(|((t, d), f)| (t, (d, f))).collect()
 }
 
+/// One ring read in one frame, with its label when it was read.
+struct TargetSample {
+    t: f64,
+    hp: Hp,
+    label: Option<Label>,
+}
+
+/// Reads the scene's locked-target blocks frame by frame (`overview::targets`), and afterwards
+/// works out whose HP each ring was.
+struct TargetReader<'a> {
+    rects: &'a [Rect],
+    tesseract: &'a Path,
+    /// Each block's geometry, once a frame with a ring in it calibrated it.
+    geoms: Vec<Option<BlockGeometry>>,
+    cache: LabelCache,
+    /// Tesseract failed; rings are still read, but nothing can say whose they are.
+    ocr_failed: bool,
+    samples: Vec<TargetSample>,
+}
+
+impl<'a> TargetReader<'a> {
+    fn new(rects: &'a [Rect], tesseract: &'a Path) -> TargetReader<'a> {
+        TargetReader {
+            rects,
+            tesseract,
+            geoms: vec![None; rects.len()],
+            cache: LabelCache::new(rects.len()),
+            ocr_failed: false,
+            samples: Vec::new(),
+        }
+    }
+
+    fn block(&self, frame: &videoin::Frame, b: usize) -> image::RgbImage {
+        crop_scaled(&frame.image, self.rects[b], 1.0)
+    }
+
+    /// Read one batch of frames, in order: calibrate any block not yet calibrated, read every
+    /// ring, and OCR the labels of each block whose rings changed.
+    fn observe(&mut self, frames: &[videoin::Frame]) {
+        for frame in frames {
+            let todo: Vec<usize> = (0..self.rects.len()).filter(|&b| self.geoms[b].is_none()).collect();
+            if todo.is_empty() {
+                break;
+            }
+            let found: Vec<(usize, Option<BlockGeometry>)> =
+                todo.par_iter().map(|&b| (b, BlockGeometry::calibrate(&self.block(frame, b)))).collect();
+            for (b, geom) in found {
+                if let Some(g) = geom {
+                    println!(
+                        "  targets {}: ring scale {:.3}, {} column(s) (from t={:.0}s)",
+                        b + 1,
+                        g.scale,
+                        g.columns.len(),
+                        frame.t
+                    );
+                    self.geoms[b] = Some(g);
+                }
+            }
+        }
+
+        let jobs: Vec<(usize, usize)> = (0..frames.len())
+            .flat_map(|f| (0..self.rects.len()).filter(|&b| self.geoms[b].is_some()).map(move |b| (f, b)))
+            .collect();
+        let rings: Vec<Vec<Ring>> = jobs
+            .par_iter()
+            .map(|&(f, b)| read_rings(&self.block(&frames[f], b), self.geoms[b].as_ref().expect("calibrated")))
+            .collect();
+        let centers: Vec<Vec<(f32, f32)>> = rings.iter().map(|r| r.iter().map(|r| r.center).collect()).collect();
+
+        // Which jobs' labels to read: jobs are frame-major, so this walks the frames in order.
+        let mut reads = Vec::new();
+        for (j, &(f, b)) in jobs.iter().enumerate() {
+            if !self.ocr_failed && self.cache.needs_read(b, frames[f].t, &centers[j]) {
+                self.cache.plan(b, frames[f].t, &centers[j]);
+                reads.push(j);
+            }
+        }
+        let ocr: Vec<(usize, usize)> = reads.iter().flat_map(|&j| (0..rings[j].len()).map(move |i| (j, i))).collect();
+        let labels: Vec<Result<Label>> = ocr
+            .par_iter()
+            .map(|&(j, i)| {
+                let (f, b) = jobs[j];
+                let scale = self.geoms[b].as_ref().expect("calibrated").scale;
+                match label_image(&self.block(&frames[f], b), &centers[j], i, scale) {
+                    Some(img) => ocr_label(&img, self.tesseract),
+                    None => Ok(Label::default()),
+                }
+            })
+            .collect();
+        let mut by_job: HashMap<usize, Vec<Label>> = HashMap::new();
+        for (&(j, _), label) in ocr.iter().zip(labels) {
+            let label = label.unwrap_or_else(|e| {
+                if !self.ocr_failed {
+                    eprintln!("  warning: can't read locked targets' labels, so their HP is left out: {e:#}");
+                    self.ocr_failed = true;
+                }
+                Label::default()
+            });
+            by_job.entry(j).or_default().push(label);
+        }
+
+        for (j, &(f, b)) in jobs.iter().enumerate() {
+            let t = frames[f].t;
+            if let Some(labels) = by_job.remove(&j) {
+                self.cache.store(b, &centers[j], labels);
+            }
+            let labels = self.cache.labels(b, &centers[j]);
+            for (i, ring) in rings[j].iter().enumerate() {
+                self.samples.push(TargetSample { t, hp: ring.hp, label: labels.map(|l| l[i].clone()) });
+            }
+        }
+    }
+
+    /// Each roster pilot's HP per tick (keyed by `t.to_bits()`): every ring whose label matches
+    /// the pilot (`overview::targets::match_label`), the median per arc when several observers
+    /// had them locked, then a 3-tick running median to drop one-tick misreads (combat text
+    /// drawn across a ring).
+    fn pilot_hp(&self, per_observer: &[Vec<Track>], roster: &[Pilot]) -> Vec<BTreeMap<u64, Hp>> {
+        let mut per_pilot: Vec<BTreeMap<u64, Vec<Hp>>> = vec![BTreeMap::new(); roster.len()];
+        if self.samples.is_empty() {
+            return vec![BTreeMap::new(); roster.len()];
+        }
+        let ship_types = ShipTypes::builtin();
+        let distances: Vec<BTreeMap<u64, Vec<f64>>> = roster.iter().map(|p| pilot_distances(per_observer, p)).collect();
+        let mut candidates: HashMap<u64, Vec<(String, Vec<f64>)>> = HashMap::new();
+        let (mut matched, mut unmatched) = (0usize, 0usize);
+        for s in &self.samples {
+            let Some(label) = &s.label else { continue };
+            let key = s.t.to_bits();
+            let at_t = candidates.entry(key).or_insert_with(|| {
+                roster
+                    .iter()
+                    .zip(&distances)
+                    .map(|(p, d)| (ship_type_at(per_observer, p, s.t), d.get(&key).cloned().unwrap_or_default()))
+                    .collect()
+            });
+            let cands: Vec<Candidate> = roster
+                .iter()
+                .zip(at_t.iter())
+                .map(|(p, (ty, d))| Candidate { name: &p.name, ship_type: ty, ranges_m: d.clone() })
+                .collect();
+            match match_label(label, &cands, &ship_types) {
+                Some(i) => {
+                    per_pilot[i].entry(key).or_default().push(s.hp);
+                    matched += 1;
+                }
+                None => unmatched += 1,
+            }
+        }
+        let pilots = per_pilot.iter().filter(|m| !m.is_empty()).count();
+        println!(
+            "  locked targets: HP for {pilots} pilot(s) from {matched} ring readings; {unmatched} readings matched no pilot, {} had no label",
+            self.samples.iter().filter(|s| s.label.is_none()).count()
+        );
+        per_pilot.into_iter().map(|m| smooth_hp(&m)).collect()
+    }
+}
+
+/// A pilot's distance from each observer that read one, per tick (keyed by `t.to_bits()`).
+fn pilot_distances(per_observer: &[Vec<Track>], pilot: &Pilot) -> BTreeMap<u64, Vec<f64>> {
+    let mut out: BTreeMap<u64, Vec<f64>> = BTreeMap::new();
+    for &(o, i) in &pilot.members {
+        for s in &per_observer[o][i].samples {
+            if let Some(d) = s.distance_m {
+                out.entry(s.t.to_bits()).or_default().push(d);
+            }
+        }
+    }
+    out
+}
+
+/// The median of each arc across `hps`.
+fn median_hp(hps: &[Hp]) -> Hp {
+    let m = |f: fn(&Hp) -> f32| median(hps.iter().map(|h| f(h) as f64).collect()).unwrap_or_default() as f32;
+    Hp { shield: m(|h| h.shield), armor: m(|h| h.armor), hull: m(|h| h.hull) }
+}
+
+/// Per tick, the median of the readings, then of it and its neighbouring ticks.
+fn smooth_hp(readings: &BTreeMap<u64, Vec<Hp>>) -> BTreeMap<u64, Hp> {
+    let ticks: Vec<(u64, Hp)> = readings.iter().map(|(&t, v)| (t, median_hp(v))).collect();
+    (0..ticks.len())
+        .map(|k| {
+            let window: Vec<Hp> = ticks[k.saturating_sub(1)..(k + 2).min(ticks.len())].iter().map(|&(_, h)| h).collect();
+            (ticks[k].0, median_hp(&window))
+        })
+        .collect()
+}
+
 fn csv_field(s: &str) -> String {
     if s.contains([',', '"', '\n']) {
         format!("\"{}\"", s.replace('"', "\"\""))
@@ -765,17 +1032,19 @@ fn csv_field(s: &str) -> String {
 }
 
 /// One line per (tick, pilot) with a position fix. Speed is blank where no observer could read
-/// it. Direction is blank where the ship is stationary or too few fixes surround the tick. With
+/// it. Direction is blank where the ship is stationary or too few fixes surround the tick.
+/// Shield, armor and hull (`hp`, per pilot) are blank where no observer had the pilot locked. With
 /// `eve_origin` (the EVE time at `t` = 0), each line ends with its EVE time.
 fn positions_csv(
     per_observer: &[Vec<Track>],
     roster: &[Pilot],
     readings: &[PilotReadings],
     solved: &[Vec<Fix>],
+    hp: &[BTreeMap<u64, Hp>],
     eve_origin: Option<DateTime<Utc>>,
 ) -> String {
     let mut rows: Vec<(f64, String)> = Vec::new();
-    for ((pilot, r), fixes) in roster.iter().zip(readings).zip(solved) {
+    for (((pilot, r), fixes), hp) in roster.iter().zip(readings).zip(solved).zip(hp) {
         for (i, f) in fixes.iter().enumerate() {
             let mut line = format!(
                 "{:.3},{},{},{:.0},{:.0},{:.0},",
@@ -796,6 +1065,12 @@ fn positions_csv(
                 None => line.push_str(",,,"),
             }
             let _ = write!(line, ",{:.0}", f.residual_m);
+            match hp.get(&f.t.to_bits()) {
+                Some(h) => {
+                    let _ = write!(line, ",{:.3},{:.3},{:.3}", h.shield, h.armor, h.hull);
+                }
+                None => line.push_str(",,,"),
+            }
             if let Some(origin) = eve_origin {
                 let _ = write!(line, ",{}", eve_time(origin, f.t));
             }
@@ -805,7 +1080,8 @@ fn positions_csv(
     }
     // Tick-major like the old wide CSV; the sort is stable, so pilots stay in roster order.
     rows.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut out = String::from("t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m");
+    let mut out =
+        String::from("t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m,shield,armor,hull");
     out.push_str(if eve_origin.is_some() { ",eve_time\n" } else { "\n" });
     out.extend(rows.into_iter().map(|(_, l)| l));
     out
@@ -941,6 +1217,19 @@ mod tests {
             serde_json::from_str(r#"{"panels": [], "chat": {"x": 0, "y": 1200, "w": 1280, "h": 400}}"#)
                 .unwrap();
         assert_eq!(with.chat.unwrap().y, 1200);
+    }
+
+    #[test]
+    fn hp_takes_the_median_across_observers_and_ticks() {
+        let hp = |s: f32| Hp { shield: s, armor: 1.0, hull: 1.0 };
+        let mut readings: BTreeMap<u64, Vec<Hp>> = BTreeMap::new();
+        for (t, v) in [(0.0f64, vec![hp(0.9)]), (1.0, vec![hp(0.9), hp(0.2), hp(0.8)]), (2.0, vec![hp(0.0)]), (3.0, vec![hp(0.8)])] {
+            readings.insert(t.to_bits(), v);
+        }
+        let smooth = smooth_hp(&readings);
+        let at = |t: f64| smooth[&t.to_bits()].shield;
+        // Tick 1's median is 0.8; tick 2's lone 0.0 is a one-tick dip, smoothed away.
+        assert_eq!([at(0.0), at(1.0), at(2.0), at(3.0)], [0.9, 0.8, 0.8, 0.8]);
     }
 
     #[test]
