@@ -96,3 +96,18 @@ func test_damage_highlight() -> void:
 	assert_false(b.is_damaged("b"))
 	b.set_damaged("b", true)
 	assert_true(b.is_damaged("b"))
+
+
+func test_dead_row_greyed_out() -> void:
+	var b := _panel()
+	b.add_row(L, "a", Color.RED)
+	var name: Label = b.rows["a"].labels.name
+	assert_false(b.is_dead("a"))
+	b.set_dead("a", true)
+	assert_true(b.is_dead("a"))
+	assert_eq(name.get_theme_color("font_color"), BroadcastRoster.DEAD_COLOR)
+	assert_eq(b.rows["a"].labels.ship.get_theme_color("font_color"), BroadcastRoster.DEAD_COLOR)
+	assert_almost(b.rows["a"].button.modulate.a, BroadcastRoster.DEAD_ALPHA)
+	b.set_dead("a", false)
+	assert_eq(name.get_theme_color("font_color"), Color.RED)
+	assert_eq(b.rows["a"].button.modulate.a, 1.0)

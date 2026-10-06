@@ -29,6 +29,9 @@ const CELL_GAP := 6
 const BAR_H := 8.0
 ## Row background while its ship takes damage.
 const DAMAGE_COLOR := Color(0.9, 0.15, 0.1, 0.35)
+## Text of a dead ship's row, which is also faded to `DEAD_ALPHA`.
+const DEAD_COLOR := Color(0.5, 0.5, 0.5)
+const DEAD_ALPHA := 0.6
 const CENTRE_W := 170.0
 const CLOCK_COLOR := Color(1.0, 0.9, 0.3)
 const BACKGROUND := Color(0.04, 0.05, 0.07, 0.92)
@@ -36,8 +39,8 @@ const BACKGROUND := Color(0.04, 0.05, 0.07, 0.92)
 ## Side -> { team: Label, points: Label, rows: VBoxContainer }.
 var sides := {}
 var clock: Label
-## pilot -> { side, button, cells (HBoxContainer), labels: { column id -> Label or `HpBar` },
-## ewar (HBoxContainer), damage (ColorRect behind the cells, shown while taking damage) }.
+## pilot -> { side, color, dead, button, cells (HBoxContainer), labels: { column id -> Label or
+## `HpBar` }, ewar (HBoxContainer), damage (ColorRect behind the cells, shown while taking damage) }.
 var rows := {}
 
 
@@ -206,7 +209,8 @@ func add_row(side: int, pilot: String, color: Color) -> Button:
 	var size := cells.get_combined_minimum_size()
 	button.custom_minimum_size = Vector2(size.x, maxf(size.y, RosterTable.ICON_PX) + 2.0)
 	rows[pilot] = {
-		"side": side, "button": button, "cells": cells, "labels": labels, "ewar": ewar, "damage": damage,
+		"side": side, "color": color, "dead": false, "button": button, "cells": cells, "labels": labels,
+		"ewar": ewar, "damage": damage,
 	}
 	return button
 
@@ -244,8 +248,20 @@ func is_damaged(pilot: String) -> bool:
 	return rows[pilot].damage.visible
 
 
-func set_dimmed(pilot: String, on: bool) -> void:
-	rows[pilot].button.modulate.a = 0.5 if on else 1.0
+## Greys out `pilot`'s row (their ship died) or gives it back its team colour.
+func set_dead(pilot: String, on: bool) -> void:
+	var row: Dictionary = rows[pilot]
+	if row.dead == on:
+		return
+	row.dead = on
+	row.button.modulate.a = DEAD_ALPHA if on else 1.0
+	for id in row.labels:
+		if row.labels[id] is Label:
+			row.labels[id].add_theme_color_override("font_color", DEAD_COLOR if on else row.color)
+
+
+func is_dead(pilot: String) -> bool:
+	return rows[pilot].dead
 
 
 func set_clock(text: String) -> void:

@@ -2010,19 +2010,23 @@ func _update_roster_cells() -> void:
 		roster_table.set_cell_hp(pilot, "hp", hp)
 		roster_table.set_row_damaged(pilot, hit)
 		if broadcast_panel.rows.has(pilot):
-			_update_broadcast_row(pilot)
-			broadcast_panel.set_hp(pilot, hp)
-			broadcast_panel.set_damaged(pilot, hit)
+			_update_broadcast_row(pilot, dead, hp, hit)
 	broadcast_panel.set_clock(_fmt_time(time))
 
 
-## Copies `pilot`'s roster row (ship, speed, dimming) into the broadcast panel, with the
-## electronic warfare on it.
-func _update_broadcast_row(pilot: String) -> void:
-	for id in ["ship", "speed"]:
-		broadcast_panel.set_cell(pilot, id, roster_table.cell_text(pilot, id))
-	broadcast_panel.set_dimmed(pilot, roster_buttons[pilot].modulate.a < 1.0)
-	broadcast_panel.set_ewar(pilot, _ewar_icons(pilot, false) if combat_stats.has("ewar_in") else [])
+## Copies `pilot`'s roster row (ship, speed, `hp`, taking damage: `hit`) into the broadcast panel,
+## with the electronic warfare on it. Ships that died (out of bounds: `dead`, or podded) grey out
+## their row and keep the hull they lost.
+func _update_broadcast_row(pilot: String, dead: bool, hp: Vector3, hit: bool) -> void:
+	var lost := data.lost_hull(pilot, time)
+	dead = dead or not lost.is_empty()
+	broadcast_panel.set_cell(pilot, "ship", lost if not lost.is_empty() else roster_table.cell_text(pilot, "ship"))
+	broadcast_panel.set_cell(pilot, "speed", "—" if dead else roster_table.cell_text(pilot, "speed"))
+	broadcast_panel.set_dead(pilot, dead)
+	broadcast_panel.set_hp(pilot, MatchData.NAN_HP if dead else hp)
+	broadcast_panel.set_damaged(pilot, hit and not dead)
+	var ewar := combat_stats.has("ewar_in") and not dead
+	broadcast_panel.set_ewar(pilot, _ewar_icons(pilot, false) if ewar else [])
 
 
 ## Roster icons for the electronic warfare on `pilot` (`outgoing`: by it) now: one per type, its

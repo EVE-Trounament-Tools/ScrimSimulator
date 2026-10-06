@@ -689,6 +689,30 @@ func test_hp_shown_in_both_rosters() -> void:
 	assert_true(is_nan(HpBar.get_fraction(m.broadcast_panel.rows["blue"].labels.hull)))
 
 
+func test_broadcast_row_greyed_out_once_podded() -> void:
+	var rows := []
+	for t in 7:
+		rows.append(row(t, "red", "Test Hull" if t < 3 else "Capsule", on_line(7, 0.5)) + [1, 1, 1])
+		rows.append(row(t, "blue", "Test Hull", on_line(0, 0.5)) + [1, 1, 1])
+	var m := _main()
+	m.load_match(write_csv(rows, DEFAULT_HEADER + ",shield,armor,hull"))
+	m._set_playing(false)
+	m._seek(2.0)
+	m._process(0.0)
+	assert_false(m.broadcast_panel.is_dead("red"))
+	m._seek(4.0)
+	m._process(0.0)
+	assert_true(m.broadcast_panel.is_dead("red"))
+	assert_eq(m.broadcast_panel.cell_text("red", "ship"), "Test Hull", "keeps the hull it lost")
+	assert_eq(m.broadcast_panel.cell_text("red", "speed"), "—")
+	assert_true(is_nan(HpBar.get_fraction(m.broadcast_panel.rows["red"].labels.hull)))
+	assert_eq(m.roster_table.cell_text("red", "ship"), "Capsule", "roster table unchanged")
+	assert_false(m.broadcast_panel.is_dead("blue"))
+	m._seek(1.0)
+	m._process(0.0)
+	assert_false(m.broadcast_panel.is_dead("red"), "alive again when scrubbed back")
+
+
 func test_hp_column_hidden_without_hp() -> void:
 	var m := _main()
 	m.load_match(_match_csv())

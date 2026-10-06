@@ -356,6 +356,18 @@ func hp_at(pilot: String, t: float) -> Vector3:
 	return sample(pilot, t).get("hp", NAN_HP)
 
 
+## The hull `pilot` lost if they are in a capsule at match time `t` (their latest sample at or
+## before `t` is one, after a hull), else "".
+func lost_hull(pilot: String, t: float) -> String:
+	var track: Array = tracks[pilot]
+	var i := track.bsearch_custom(t + start_time, func(s, v): return s.t <= v) - 1
+	if i < 0 or track[i].ship_type != CAPSULE:
+		return ""
+	while i >= 0 and track[i].ship_type == CAPSULE:
+		i -= 1
+	return track[i].ship_type if i >= 0 else ""
+
+
 ## Fraction w in [0, 1] along a->b (a inside, b outside) where the segment hits the sphere of
 ## radius `r` around the centre.
 static func _boundary_crossing(a: Vector3, b: Vector3, r: float) -> float:

@@ -332,6 +332,22 @@ func test_capsule_change_is_a_death_event() -> void:
 	assert_eq(d.events[0].pos, C + X * 2.0)
 
 
+func test_lost_hull_is_the_hull_before_the_capsule() -> void:
+	var d := _load([
+		row(10, "a", "Venture", C),
+		row(11, "a", "Venture", C + X),
+		row(12, "a", "Capsule", C + X * 2.0),
+		row(13, "a", "Capsule", C + X * 3.0),
+		row(10, "pod", "Capsule", C),
+	])
+	assert_eq(d.lost_hull("a", 1.5), "")
+	assert_eq(d.lost_hull("a", 2.0), "Venture")
+	assert_eq(d.lost_hull("a", 2.5), "Venture")
+	assert_eq(d.lost_hull("a", 100.0), "Venture", "after the track ends")
+	assert_eq(d.lost_hull("a", -5.0), "", "before the track starts")
+	assert_eq(d.lost_hull("pod", 1.0), "", "never had a hull")
+
+
 func test_starting_in_a_capsule_is_not_a_death() -> void:
 	var d := _load([row(0, "a", "Capsule", C), row(1, "a", "Capsule", C + X)])
 	assert_eq(d.events, [])
