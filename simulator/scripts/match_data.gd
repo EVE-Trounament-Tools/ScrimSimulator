@@ -2,8 +2,7 @@ class_name MatchData
 extends RefCounted
 ## Per-pilot position tracks loaded from a `scrim-positions` CSV:
 ## `t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m`, optionally
-## `shield,armor,hull` (remaining HP 0-1, blank while no observer had the pilot locked; not read
-## here yet), plus `eve_time` (each tick's EVE time, ISO 8601 UTC) when it was made with
+## `shield,armor,hull` (remaining HP 0-1, blank while no observer had the pilot locked), plus `eve_time` (each tick's EVE time, ISO 8601 UTC) when it was made with
 ## `--chat-log` or `--t0`.
 ## Positions are metres in the observers' cube frame (0..100 km per axis).
 
@@ -27,11 +26,22 @@ const LINE_TOLERANCE_M := 10000.0
 const MJD_DISTANCE_M := 100000.0
 const MJD_TOLERANCE_M := 15000.0
 const CAPSULE := "Capsule"
+## Shield, armor and hull of a pilot whose HP isn't known.
+const NAN_HP := Vector3(NAN, NAN, NAN)
+## A pilot is taking damage when a layer reads lower than its previous reading and more than
+## `DAMAGE_MIN_DROP` below its highest reading in the previous `DAMAGE_WINDOW_S` (ring reads
+## jitter by about 0.02), and stays so for `DAMAGE_HOLD_S` after.
+const DAMAGE_MIN_DROP := 0.03
+## Smallest fall from the previous reading that counts as lower (not a repeat of the same value).
+const DAMAGE_STEP := 0.005
+const DAMAGE_WINDOW_S := 3.0
+const DAMAGE_HOLD_S := 2.0
 
 enum Event { DEATH, BOUNDARY, MJD }
 
 ## pilot name -> Array of { t: float, pos: Vector3 (metres), ship_type: String, speed: float
-## (m/s as read from the overview; NAN if the CSV has none) }, sorted by t.
+## (m/s as read from the overview; NAN if the CSV has none), hp: Vector3 (remaining shield, armor,
+## hull 0-1; `NAN_HP` when blank) }, sorted by t.
 ## A sample its ship micro jumped to also has `mjd: true`; with an `eve_time` column, every sample
 ## has `eve_time: String`.
 var tracks: Dictionary = {}
@@ -44,6 +54,10 @@ var deaths: Dictionary = {}
 ## pos: Vector3 (metres), ship_type: String (hull lost / flown) }; MJDs add `to_pos`, where the
 ## ship landed (`pos` is where it jumped from).
 var events: Array = []
+## Whether any sample has HP.
+var has_hp := false
+## pilot name -> match times (sorted) at which an HP reading showed a hit (see `DAMAGE_MIN_DROP`).
+var damage_times: Dictionary = {}
 ## Lowercase ship type -> published hull radius in metres (from `ShipSizes`); unknown types
 ## count as points.
 var radii: Dictionary = {}
@@ -91,6 +105,7 @@ static func load_csv(path: String, ship_radii := {}, move_threshold_m := 0.0, ke
 	var t_max := -INF
 	var speed_col: int = col.get("speed_mps", -1)
 	var eve_col: int = col.get("eve_time", -1)
+	var hp_cols: Array = ["shield", "armor", "hull"].map(func(c): return col.get(c, -1))
 	while not f.eof_reached():
 		var row := f.get_csv_line()
 		if row.size() < header.size():
@@ -105,7 +120,10 @@ static func load_csv(path: String, ship_radii := {}, move_threshold_m := 0.0, ke
 			"pos": Vector3(float(x), float(row[col["y_m"]]), float(row[col["z_m"]])),
 			"ship_type": row[col["ship_type"]],
 			"speed": _parse_speed(row[speed_col]) if speed_col >= 0 else NAN,
+			"hp": _parse_hp(row, hp_cols),
 		}
+		if not is_nan(s.hp.x):
+			data.has_hp = true
 		if eve_col >= 0:
 			s.eve_time = row[eve_col]
 			if t < t_min:
@@ -134,6 +152,7 @@ static func load_csv(path: String, ship_radii := {}, move_threshold_m := 0.0, ke
 	data._find_mjds()
 	data._find_deaths()
 	data._find_events()
+	data._find_damage()
 	return data
 
 
@@ -162,6 +181,19 @@ func match_time_of(eve_unix: float) -> float:
 static func _parse_speed(cell: String) -> float:
 	cell = cell.strip_edges()
 	return NAN if cell.is_empty() else float(cell)
+
+
+## Shield, armor and hull cells of `row` -> Vector3, or `NAN_HP` when any is blank or missing.
+static func _parse_hp(row: PackedStringArray, cols: Array) -> Vector3:
+	var hp := NAN_HP
+	for i in 3:
+		if cols[i] < 0:
+			return NAN_HP
+		var cell := row[cols[i]].strip_edges()
+		if cell.is_empty():
+			return NAN_HP
+		hp[i] = float(cell)
+	return hp
 
 
 ## CSV time of the sample before the earliest move of any ship (beyond `threshold_m` from its
@@ -278,6 +310,52 @@ func _find_events() -> void:
 	events.sort_custom(func(a, b): return a.t < b.t)
 
 
+## Fills `damage_times`: each known-HP sample with a layer lower than in the previous known reading
+## and more than `DAMAGE_MIN_DROP` below that layer's highest known reading in the previous
+## `DAMAGE_WINDOW_S`.
+func _find_damage() -> void:
+	damage_times.clear()
+	if not has_hp:
+		return
+	for pilot in tracks:
+		var track: Array = tracks[pilot]
+		var hits := PackedFloat64Array()
+		for i in track.size():
+			var b: Dictionary = track[i]
+			if is_nan(b.hp.x):
+				continue
+			var top := Vector3(-INF, -INF, -INF)
+			var prev := NAN_HP
+			var j := i - 1
+			while j >= 0 and b.t - track[j].t <= DAMAGE_WINDOW_S:
+				if not is_nan(track[j].hp.x):
+					top = top.max(track[j].hp)
+					if is_nan(prev.x):
+						prev = track[j].hp
+				j -= 1
+			for k in 3:
+				if b.hp[k] < prev[k] - DAMAGE_STEP and top[k] - b.hp[k] > DAMAGE_MIN_DROP:
+					hits.append(b.t - start_time)
+					break
+		if not hits.is_empty():
+			damage_times[pilot] = hits
+
+
+## Whether `pilot` took a hit (see `damage_times`) in the `DAMAGE_HOLD_S` up to match time `t`.
+func taking_damage(pilot: String, t: float) -> bool:
+	var hits: PackedFloat64Array = damage_times.get(pilot, PackedFloat64Array())
+	if hits.is_empty():
+		return false
+	var i := hits.bsearch(t, false)  # first hit after t
+	return i > 0 and t - hits[i - 1] < DAMAGE_HOLD_S
+
+
+## `pilot`'s remaining shield, armor and hull (0-1) at match time `t`: those of the latest sample
+## at or before `t`, `NAN_HP` when unknown.
+func hp_at(pilot: String, t: float) -> Vector3:
+	return sample(pilot, t).get("hp", NAN_HP)
+
+
 ## Fraction w in [0, 1] along a->b (a inside, b outside) where the segment hits the sphere of
 ## radius `r` around the centre.
 static func _boundary_crossing(a: Vector3, b: Vector3, r: float) -> float:
@@ -294,7 +372,7 @@ static func _boundary_crossing(a: Vector3, b: Vector3, r: float) -> float:
 
 ## Interpolated state of `pilot` at match time `t` (seconds since start), or an empty
 ## Dictionary when the pilot has no data then (before first / after last sample, or in a gap).
-## Ship type and speed aren't interpolated: they're those of the latest sample at or before `t`.
+## Ship type, speed and HP aren't interpolated: they're those of the latest sample at or before `t`.
 func sample(pilot: String, t: float) -> Dictionary:
 	var track: Array = tracks[pilot]
 	t += start_time
@@ -310,15 +388,15 @@ func sample(pilot: String, t: float) -> Dictionary:
 		return {}
 	if b.get("mjd", false):
 		# Micro jumps are instant: hold the take-off point until the landing sample.
-		return {"t": t, "pos": a.pos, "ship_type": a.ship_type, "speed": a.speed}
+		return {"t": t, "pos": a.pos, "ship_type": a.ship_type, "speed": a.speed, "hp": a.hp}
 	var w: float = (t - a.t) / (b.t - a.t)
 	if not smooth:
-		return {"t": t, "pos": a.pos.lerp(b.pos, w), "ship_type": a.ship_type, "speed": a.speed}
+		return {"t": t, "pos": a.pos.lerp(b.pos, w), "ship_type": a.ship_type, "speed": a.speed, "hp": a.hp}
 	var pre := _neighbour(track, i - 2, a, b, a.get("mjd", false))
 	var post := _neighbour(track, i + 1, b, a, i + 1 < track.size() and track[i + 1].get("mjd", false))
 	var pos: Vector3 = a.pos.cubic_interpolate_in_time(
 			b.pos, pre.pos, post.pos, w, b.t - a.t, pre.t - a.t, post.t - a.t)
-	return {"t": t, "pos": pos, "ship_type": a.ship_type, "speed": a.speed}
+	return {"t": t, "pos": pos, "ship_type": a.ship_type, "speed": a.speed, "hp": a.hp}
 
 
 ## Spline control point beyond `end` (away from `other`): `track[j]` if it exists and isn't

@@ -12,6 +12,8 @@ const DEFAULTS := {
 	"display/ui_scale": 1.0,
 	# Show the broadcast-style ship data panel instead of the roster table.
 	"display/broadcast_roster": false,
+	# Highlight roster rows of ships taking damage (HP dropping).
+	"display/damage_highlight": false,
 	# Match start detection: ignore position changes up to this many metres (overview jitter).
 	"match/ignore_jitter": false,
 	"match/jitter_threshold_m": 500.0,

@@ -173,6 +173,12 @@ tracking or guidance disruptors, target painters, or remote sensor boosters and 
 computers, so those never show. EWAR icons are fetched once from CCP's image server the first
 time they're shown and kept in `sde/assets/ewar/` (until then, or offline, they show as text).
 
+When the CSV has `shield`/`armor`/`hull`, the roster's **HP** column and the broadcast panel show
+each pilot's remaining shield, armor and hull as bars (grey while no observer has the pilot
+locked). **Damage** (bottom bar, or Settings) highlights the rows of ships whose HP is dropping:
+a layer lower than its last reading and more than 3% below its best of the previous 3 s, held for
+2 s.
+
 Right-click a pilot → **Get Damage Breakdown** opens a window of the damage coming in on that pilot
 from each attacker: pilot, ship and DPS (over the last 10 s, like the roster), highest first, with
 the total. It follows the replay as it plays or is scrubbed. The windows can be moved and closed,

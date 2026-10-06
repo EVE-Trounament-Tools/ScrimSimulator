@@ -664,6 +664,72 @@ func test_broadcast_setting_survives_reload() -> void:
 	assert_false(m.roster_panel.visible)
 
 
+## Stationary blue (corner 0) and red (corner 7) with HP: red takes a hit at 3 s; blue's HP is
+## blank from 2 s.
+func _hp_csv() -> String:
+	var rows := []
+	for t in 7:
+		var red := Vector3(1, 1, 1) if t < 3 else Vector3(0.5, 1, 1)
+		rows.append(row(t, "red", "Test Hull", on_line(7, 0.5)) + [red.x, red.y, red.z])
+		rows.append(row(t, "blue", "Test Hull", on_line(0, 0.5)) + ([1, 1, 1] if t < 2 else ["", "", ""]))
+	return write_csv(rows, DEFAULT_HEADER + ",shield,armor,hull")
+
+
+func test_hp_shown_in_both_rosters() -> void:
+	var m := _main()
+	m.load_match(_hp_csv())
+	assert_true("hp" in m.roster_table.visible_ids())
+	m._set_playing(false)
+	m._seek(4.0)
+	m._process(0.0)
+	var bars: HBoxContainer = m.roster_table.rows["red"].labels["hp"]
+	assert_eq(bars.get_children().map(HpBar.get_fraction), [0.5, 1.0, 1.0])
+	assert_eq(HpBar.get_fraction(m.broadcast_panel.rows["red"].labels.shield), 0.5)
+	assert_true(is_nan(HpBar.get_fraction(m.roster_table.rows["blue"].labels["hp"].get_child(0))), "blank: unknown")
+	assert_true(is_nan(HpBar.get_fraction(m.broadcast_panel.rows["blue"].labels.hull)))
+
+
+func test_hp_column_hidden_without_hp() -> void:
+	var m := _main()
+	m.load_match(_match_csv())
+	assert_false("hp" in m.roster_table.visible_ids())
+	assert_true(m.damage_button.disabled)
+	m.load_match(_hp_csv())
+	assert_false(m.damage_button.disabled)
+
+
+func test_damage_highlight_toggle() -> void:
+	var m := _main()
+	m.load_match(_hp_csv())
+	m._set_playing(false)
+	m._seek(3.5)
+	m._process(0.0)
+	assert_false(m.roster_table.is_row_damaged("red"), "off by default")
+	m._set_damage_on(true)
+	assert_true(Settings.get_value("display/damage_highlight"))
+	assert_true(m.damage_button.button_pressed)
+	assert_true(m.damage_setting.button_pressed)
+	assert_true(m.roster_table.is_row_damaged("red"))
+	assert_true(m.broadcast_panel.is_damaged("red"))
+	assert_false(m.roster_table.is_row_damaged("blue"))
+	m._seek(6.5)
+	m._process(0.0)
+	assert_false(m.roster_table.is_row_damaged("red"), "steady again")
+	m._seek(3.5)
+	m._process(0.0)
+	m._set_damage_on(false)
+	assert_false(m.roster_table.is_row_damaged("red"))
+	assert_false(m.broadcast_panel.is_damaged("red"))
+
+
+func test_damage_setting_survives_reload() -> void:
+	Settings.set_value("display/damage_highlight", true)
+	var m := _main()
+	assert_true(m.damage_on)
+	assert_true(m.damage_button.button_pressed)
+	assert_true(m.damage_setting.button_pressed)
+
+
 func test_roster_sorts_by_ship_type_and_abbreviates() -> void:
 	var m := _main()
 	m.load_match(write_csv([

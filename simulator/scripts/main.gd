@@ -173,6 +173,10 @@ var roster_table: RosterTable
 var broadcast_panel: BroadcastRoster
 var broadcast_button: Button
 var broadcast_on := false
+## Highlight roster rows of ships taking damage (setting `display/damage_highlight`).
+var damage_button: Button
+var damage_setting: CheckBox
+var damage_on := false
 var info_panel: PanelContainer
 var info_label: Label
 var select_texture: Texture2D
@@ -216,6 +220,7 @@ func _ready() -> void:
 	models_on = Settings.get_value("display/ship_models")
 	smooth_on = Settings.get_value("display/smooth_motion")
 	broadcast_on = Settings.get_value("display/broadcast_roster")
+	damage_on = Settings.get_value("display/damage_highlight")
 	for field in OVERLAY_FIELDS:
 		ship_overlay[field] = Settings.get_value("overlay/" + field)
 	get_window().content_scale_factor = Settings.get_value("display/ui_scale")
@@ -303,6 +308,8 @@ func load_match(path: String) -> bool:
 	if not ships.has(selected):
 		selected = ""
 	_update_file_label()
+	roster_table.set_column_available("hp", data.has_hp)
+	_update_damage_controls()
 	_refresh_roster()
 	_select(selected)
 	print("Loaded %s: %d pilots, %.0f s" % [path, ships.size(), data.duration])
@@ -1616,6 +1623,14 @@ func _build_ui() -> void:
 	broadcast_button.toggled.connect(_set_broadcast_on)
 	row.add_child(broadcast_button)
 
+	damage_button = Button.new()
+	damage_button.text = "Damage"
+	damage_button.toggle_mode = true
+	damage_button.button_pressed = damage_on
+	damage_button.toggled.connect(_set_damage_on)
+	row.add_child(damage_button)
+	_update_damage_controls()
+
 	sde_label = Label.new()
 	sde_label.modulate = Color(1, 1, 1, 0.6)
 	row.add_child(sde_label)
@@ -1748,6 +1763,12 @@ func _build_settings(layer: CanvasLayer) -> void:
 	overlay_button.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	overlay_button.pressed.connect(func(): overlay_popup.popup_centered())
 	box.add_child(overlay_button)
+
+	damage_setting = CheckBox.new()
+	damage_setting.text = "Highlight ships taking damage in the roster (HP dropping)"
+	damage_setting.button_pressed = damage_on
+	damage_setting.toggled.connect(_set_damage_on)
+	box.add_child(damage_setting)
 
 	var smooth_setting := CheckBox.new()
 	smooth_setting.text = "Smooth ship movement between position samples (instead of straight lines)"
@@ -1899,6 +1920,22 @@ func _set_broadcast_on(on: bool) -> void:
 	_apply_roster_visibility()
 
 
+func _set_damage_on(on: bool) -> void:
+	damage_on = on
+	Settings.set_value("display/damage_highlight", on)
+	damage_button.set_pressed_no_signal(on)
+	damage_setting.set_pressed_no_signal(on)
+	_update_roster_cells()
+
+
+## The damage highlight needs HP: its button is disabled for a match without any.
+func _update_damage_controls() -> void:
+	var has_hp := data != null and data.has_hp
+	damage_button.disabled = not has_hp
+	damage_button.tooltip_text = ("Highlight ships taking damage (HP dropping) in the roster" if has_hp
+			else "This match has no HP data")
+
+
 ## Rebuilds the roster and the broadcast panel from the loaded match's teams.
 func _refresh_roster() -> void:
 	roster_table.clear()
@@ -1943,8 +1980,9 @@ func _refresh_roster() -> void:
 	_update_roster_cells()
 
 
-## Refreshes each roster row's live columns: current hull, speed, distance from centre, and the
-## combat-log rates and electronic warfare. Pilots off grid show dashes; dead ones are dimmed.
+## Refreshes each roster row's live columns: current hull, speed, distance from centre, HP, and the
+## combat-log rates and electronic warfare, and highlights ships taking damage (`damage_on`).
+## Pilots off grid show dashes and unknown HP; dead ones are dimmed.
 func _update_roster_cells() -> void:
 	if data == null:
 		return
@@ -1967,8 +2005,14 @@ func _update_roster_cells() -> void:
 			roster_table.set_cell(pilot, "speed", "—" if is_nan(motion.speed) else _fmt_speed(motion.speed))
 			roster_table.set_cell(pilot, "distance", "%.1f km" % motion.dist_km)
 		roster_buttons[pilot].modulate.a = 0.5 if dead else 1.0
+		var hp := MatchData.NAN_HP if dead else data.hp_at(pilot, time)
+		var hit := damage_on and not dead and data.taking_damage(pilot, time)
+		roster_table.set_cell_hp(pilot, "hp", hp)
+		roster_table.set_row_damaged(pilot, hit)
 		if broadcast_panel.rows.has(pilot):
 			_update_broadcast_row(pilot)
+			broadcast_panel.set_hp(pilot, hp)
+			broadcast_panel.set_damaged(pilot, hit)
 	broadcast_panel.set_clock(_fmt_time(time))
 
 

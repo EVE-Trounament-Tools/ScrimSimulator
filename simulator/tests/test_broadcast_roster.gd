@@ -1,5 +1,6 @@
 extends "res://tests/test_case.gd"
-## BroadcastRoster: mirrored sides, placeholder points, and the capped EWAR icons.
+## BroadcastRoster: mirrored sides, placeholder points, HP bars, damage highlight and the capped
+## EWAR icons.
 
 const L := BroadcastRoster.Side.LEFT
 const R := BroadcastRoster.Side.RIGHT
@@ -70,3 +71,28 @@ func test_clear_and_click() -> void:
 	b.clear()
 	assert_true(b.rows.is_empty())
 	assert_eq(b.sides[R].rows.get_child_count(), 0)
+
+
+func test_hp_bars() -> void:
+	var b := _panel()
+	b.add_row(L, "a", Color.RED)
+	var labels: Dictionary = b.rows["a"].labels
+	for id in ["shield", "armor", "hull"]:
+		assert_true(is_nan(HpBar.get_fraction(labels[id])), "unknown until set")
+	b.set_hp("a", Vector3(0.5, 1.0, 0.0))
+	assert_eq(HpBar.get_fraction(labels.shield), 0.5)
+	assert_eq(HpBar.get_fraction(labels.armor), 1.0)
+	assert_eq(HpBar.get_fraction(labels.hull), 0.0)
+	assert_eq(labels.shield.tooltip_text, "Shield: 50%")
+	assert_almost(labels.shield.get_child(0).anchor_right, 0.5)
+	b.set_hp("a", MatchData.NAN_HP)
+	assert_eq(labels.hull.color, HpBar.UNKNOWN)
+	assert_false(labels.hull.get_child(0).visible)
+
+
+func test_damage_highlight() -> void:
+	var b := _panel()
+	b.add_row(R, "b", Color.BLUE)
+	assert_false(b.is_damaged("b"))
+	b.set_damaged("b", true)
+	assert_true(b.is_damaged("b"))

@@ -2,8 +2,8 @@ class_name BroadcastRoster
 extends PanelContainer
 ## Tournament-broadcast style ship data: one team down each side, mirrored about a centre column
 ## with the match clock. Each row shows points, pilot, speed, shield/armor/hull bars, ship type
-## and the electronic warfare on the ship (nearest the centre, at most `MAX_EWAR_ICONS`).
-## Points and the hit point bars are placeholders for now.
+## and the electronic warfare on the ship (nearest the centre, at most `MAX_EWAR_ICONS`). Rows can
+## be highlighted while their ship takes damage. Points are a placeholder for now.
 
 ## A row was clicked.
 signal row_pressed(pilot: String)
@@ -11,7 +11,7 @@ signal row_pressed(pilot: String)
 enum Side { LEFT, RIGHT }
 
 ## id -> header title, alignment and width (px), in left-side order (the right side is mirrored).
-## `bar` columns hold a placeholder hit point bar.
+## `bar` columns hold an `HpBar`.
 const COLUMNS := {
 	"pts": {"title": "PTS", "align": HORIZONTAL_ALIGNMENT_LEFT, "width": 36},
 	"name": {"title": "NAME", "align": HORIZONTAL_ALIGNMENT_LEFT, "width": 140},
@@ -27,7 +27,8 @@ const EWAR_SEPARATION := 2
 const EWAR_W := MAX_EWAR_ICONS * RosterTable.ICON_PX + (MAX_EWAR_ICONS - 1) * EWAR_SEPARATION
 const CELL_GAP := 6
 const BAR_H := 8.0
-const BAR_COLOR := Color(0.75, 0.75, 0.75, 0.8)
+## Row background while its ship takes damage.
+const DAMAGE_COLOR := Color(0.9, 0.15, 0.1, 0.35)
 const CENTRE_W := 170.0
 const CLOCK_COLOR := Color(1.0, 0.9, 0.3)
 const BACKGROUND := Color(0.04, 0.05, 0.07, 0.92)
@@ -35,8 +36,8 @@ const BACKGROUND := Color(0.04, 0.05, 0.07, 0.92)
 ## Side -> { team: Label, points: Label, rows: VBoxContainer }.
 var sides := {}
 var clock: Label
-## pilot -> { side, button, cells (HBoxContainer), labels: { column id -> Label or bar },
-## ewar (HBoxContainer) }.
+## pilot -> { side, button, cells (HBoxContainer), labels: { column id -> Label or `HpBar` },
+## ewar (HBoxContainer), damage (ColorRect behind the cells, shown while taking damage) }.
 var rows := {}
 
 
@@ -174,6 +175,12 @@ func add_row(side: int, pilot: String, color: Color) -> Button:
 	button.size_flags_horizontal = _toward_centre(side)
 	button.pressed.connect(func(): row_pressed.emit(pilot))
 	sides[side].rows.add_child(button)
+	var damage := ColorRect.new()
+	damage.color = DAMAGE_COLOR
+	damage.visible = false
+	damage.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	damage.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	button.add_child(damage)
 	var cells := _cells(side)
 	cells.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	button.add_child(cells)
@@ -182,7 +189,7 @@ func add_row(side: int, pilot: String, color: Color) -> Button:
 	for id in column_ids(side):
 		var cell: Control
 		if COLUMNS[id].get("bar", false):
-			cell = _bar(COLUMNS[id].width)
+			cell = HpBar.make(COLUMNS[id].width, BAR_H, id.capitalize())
 		elif id == "ewar":
 			ewar = HBoxContainer.new()
 			ewar.add_theme_constant_override("separation", EWAR_SEPARATION)
@@ -198,21 +205,10 @@ func add_row(side: int, pilot: String, color: Color) -> Button:
 	labels.pts.text = "0"
 	var size := cells.get_combined_minimum_size()
 	button.custom_minimum_size = Vector2(size.x, maxf(size.y, RosterTable.ICON_PX) + 2.0)
-	rows[pilot] = {"side": side, "button": button, "cells": cells, "labels": labels, "ewar": ewar}
+	rows[pilot] = {
+		"side": side, "button": button, "cells": cells, "labels": labels, "ewar": ewar, "damage": damage,
+	}
 	return button
-
-
-## A placeholder hit point bar, full.
-static func _bar(width: float) -> Control:
-	var holder := CenterContainer.new()
-	holder.custom_minimum_size.x = width
-	holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var rect := ColorRect.new()
-	rect.color = BAR_COLOR
-	rect.custom_minimum_size = Vector2(width, BAR_H)
-	rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	holder.add_child(rect)
-	return holder
 
 
 func set_cell(pilot: String, id: String, text: String) -> void:
@@ -229,6 +225,23 @@ func set_ewar(pilot: String, items: Array) -> void:
 	var row: Dictionary = rows[pilot]
 	var color: Color = row.labels.ship.get_theme_color("font_color")
 	RosterTable.fill_icons(row.ewar, items.slice(0, MAX_EWAR_ICONS), color)
+
+
+## Shows `pilot`'s remaining shield, armor and hull (`hp` x, y, z: 0-1, NAN when unknown).
+func set_hp(pilot: String, hp: Vector3) -> void:
+	var labels: Dictionary = rows[pilot].labels
+	HpBar.set_fraction(labels.shield, hp.x)
+	HpBar.set_fraction(labels.armor, hp.y)
+	HpBar.set_fraction(labels.hull, hp.z)
+
+
+## Highlights `pilot`'s row (taking damage) or not.
+func set_damaged(pilot: String, on: bool) -> void:
+	rows[pilot].damage.visible = on
+
+
+func is_damaged(pilot: String) -> bool:
+	return rows[pilot].damage.visible
 
 
 func set_dimmed(pilot: String, on: bool) -> void:

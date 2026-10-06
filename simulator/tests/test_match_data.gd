@@ -499,3 +499,80 @@ func test_smooth_sample_respects_gaps() -> void:
 	var s: Vector3 = d.sample("p", 1.0).pos
 	assert_true(s.is_finite())
 	assert_almost(d.sample("p", 12.0).pos, Vector3(20, 80, 20))
+
+
+# --- HP ------------------------------------------------------------------------
+
+const HP_HEADER := "t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m,shield,armor,hull"
+
+
+## A stationary sample of pilot "A" at `t` with HP `hp` ("" for blank cells).
+func _hp_row(t: float, hp: Variant) -> Array:
+	var cells: Array = ["", "", ""] if hp is String else [hp.x, hp.y, hp.z]
+	return row(t, "A", "Rifter", C) + cells
+
+
+func _load_hp(hps: Array) -> MatchData:
+	var rows := []
+	for i in hps.size():
+		rows.append(_hp_row(i, hps[i]))
+	return MatchData.load_csv(write_csv(rows, HP_HEADER), {}, 0.0, true)
+
+
+func test_hp_parsed() -> void:
+	var d := _load_hp([Vector3(1, 1, 1), "", Vector3(0.5, 0.25, 1)])
+	assert_true(d.has_hp)
+	assert_eq(d.hp_at("A", 0.0), Vector3(1, 1, 1))
+	assert_true(is_nan(d.hp_at("A", 1.0).x), "blank: unknown")
+	assert_true(is_nan(d.hp_at("A", 1.5).y), "between samples: the earlier one's")
+	assert_eq(d.hp_at("A", 2.0), Vector3(0.5, 0.25, 1))
+	assert_true(is_nan(d.hp_at("A", 5.0).z), "after the track: unknown")
+
+
+func test_hp_mid_interval_holds_earlier_sample() -> void:
+	var d := _load_hp([Vector3(1, 1, 1), Vector3(0, 0.5, 1)])
+	assert_eq(d.hp_at("A", 0.9), Vector3(1, 1, 1))
+	d.smooth = true
+	assert_eq(d.hp_at("A", 0.9), Vector3(1, 1, 1))
+
+
+func test_no_hp_columns() -> void:
+	var d := _load([row(0, "A", "Rifter", C), row(1, "A", "Rifter", C)])
+	assert_false(d.has_hp)
+	assert_true(is_nan(d.hp_at("A", 0.0).x))
+	assert_false(d.taking_damage("A", 1.0))
+
+
+func test_all_hp_blank() -> void:
+	assert_false(_load_hp(["", ""]).has_hp)
+
+
+func test_taking_damage_on_drop_and_held() -> void:
+	var full := Vector3(1, 1, 1)
+	var d := _load_hp([full, full, Vector3(0.95, 1, 1), Vector3(0.95, 1, 1), Vector3(0.95, 1, 1),
+		Vector3(0.95, 1, 1), Vector3(0.95, 1, 1)])
+	assert_false(d.taking_damage("A", 1.0))
+	assert_false(d.taking_damage("A", 1.9))
+	assert_true(d.taking_damage("A", 2.0))
+	assert_eq(d.damage_times["A"], PackedFloat64Array([2.0]), "one hit, not repeated while HP holds")
+	assert_true(d.taking_damage("A", 2.0 + MatchData.DAMAGE_HOLD_S - 0.1), "held after the hit")
+	assert_false(d.taking_damage("A", 2.0 + MatchData.DAMAGE_HOLD_S), "steady again")
+
+
+func test_damage_ignores_jitter() -> void:
+	var d := _load_hp([Vector3(0, 0.7, 1), Vector3(0, 0.68, 1), Vector3(0, 0.7, 1), Vector3(0, 0.68, 1)])
+	assert_false(d.damage_times.has("A"))
+
+
+func test_slow_damage_caught_over_window() -> void:
+	var d := _load_hp([Vector3(0, 0.9, 1), Vector3(0, 0.89, 1), Vector3(0, 0.88, 1), Vector3(0, 0.86, 1)])
+	assert_eq(d.damage_times.get("A", PackedFloat64Array()), PackedFloat64Array([3.0]))
+
+
+func test_damage_not_compared_across_long_blank() -> void:
+	var rows := [_hp_row(0, Vector3(1, 1, 1))]
+	for t in range(1, 5):
+		rows.append(_hp_row(t, ""))
+	rows.append(_hp_row(5, Vector3(0.5, 1, 1)))
+	var d := MatchData.load_csv(write_csv(rows, HP_HEADER), {}, 0.0, true)
+	assert_false(d.damage_times.has("A"), "older than the window")
