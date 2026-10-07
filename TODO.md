@@ -21,6 +21,10 @@
   - The official Linux builds have no debug symbols, so the backtrace is just addresses. Next step: build
     Godot 4.6 from source with `debug_symbols=yes` to see where it crashes, then work around it or
     report it upstream.
+  - Getting worse as of v2.2.0: crashed in 5 of 6 CI runs on the tag (all 3 `deploy-web` attempts,
+    the `test` run and its rerun; only the `deploy-web` rerun got through), each time at the same
+    point. The `test` workflow for v2.2.0 is still red because of it. `test.yml` has no retry, so
+    it could at least get the same retry as `deploy-web.yml`.
 
 ## Test data (resouces)
 
