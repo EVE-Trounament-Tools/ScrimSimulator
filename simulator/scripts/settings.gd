@@ -31,6 +31,15 @@ const DEFAULTS := {
 	"overlay/distance": false,
 	"overlay/speed": false,
 	"overlay/icon": true,
+	# Source -> target lines in space (debug menu), per `CombatStats.LINK_KINDS` kind.
+	"links/shooting": true,
+	"links/shooting_color": Color(1.0, 0.3, 0.25),
+	"links/tackle": true,
+	"links/tackle_color": Color(1.0, 0.85, 0.2),
+	"links/neut": true,
+	"links/neut_color": Color(0.75, 0.4, 1.0),
+	"links/ewar": true,
+	"links/ewar_color": Color(0.3, 0.85, 1.0),
 }
 
 static var _cfg: ConfigFile

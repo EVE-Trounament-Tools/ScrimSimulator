@@ -88,6 +88,16 @@ const BEACON_JUMP_KM := 5.0
 const VECTOR_SECONDS := 3.0
 ## A movement vector's arrowhead is this fraction of its length.
 const ARROW_FRACTION := 0.08
+## Activity lines (shooting, tackle, …), in screen pixels: space between the lines of different
+## kinds joining the same two ships, dash and gap length, how fast the dashes flow from source to
+## target (px/s, wall clock so they move while paused), and the arrowhead at the target.
+const LINK_SPACING_PX := 4.0
+const LINK_DASH_PX := 14.0
+const LINK_GAP_PX := 8.0
+const LINK_FLOW_PX_S := 40.0
+const LINK_HEAD_PX := 9.0
+## Alpha at a dash's tail; its head is opaque, so direction shows in a still frame too.
+const LINK_TAIL_ALPHA := 0.3
 
 var data: MatchData
 var match_path := ""
@@ -118,6 +128,10 @@ var pilot_names: Dictionary = Settings.get_value("names/pilots").duplicate()
 ## pilot -> { vector: bool, spheres: [{ radius_km, color }] } from the debug menus; kept when the
 ## same match reloads.
 var debug := {}
+## `CombatStats.LINK_KINDS` kind -> { on, color }: which activity lines are drawn (from Settings).
+var links := {}
+## Every activity line, in world space.
+var links_mesh: MeshInstance3D
 ## Movement vectors end where the ship will be this many seconds from now.
 var vector_seconds := VECTOR_SECONDS
 
@@ -241,6 +255,8 @@ func _ready() -> void:
 	mjd_on = Settings.get_value("display/mjd_spoolup")
 	for field in OVERLAY_FIELDS:
 		ship_overlay[field] = Settings.get_value("overlay/" + field)
+	for kind in CombatStats.LINK_KINDS:
+		links[kind] = {"on": Settings.get_value("links/" + kind), "color": Settings.get_value("links/%s_color" % kind)}
 	get_window().content_scale_factor = Settings.get_value("display/ui_scale")
 	_build_environment()
 	_overlay_unit = _units_per_px(1.0)
@@ -249,6 +265,9 @@ func _ready() -> void:
 	_build_boundary()
 	ships_root = Node3D.new()
 	add_child(ships_root)
+	links_mesh = _lines_mesh()
+	links_mesh.visible = true
+	add_child(links_mesh)
 	_build_measure()
 	_build_audio()
 	_build_ui()
@@ -559,6 +578,7 @@ func _process(delta: float) -> void:
 				audio_player.seek(time)
 	_update_ships()
 	_update_vectors()
+	_update_links()
 	_update_mjd_trails()
 	_update_mjd_spool()
 	if tracked != "" and ships[tracked].node.visible:
@@ -1353,6 +1373,74 @@ static func _arrow_points(from: Vector3, to: Vector3) -> Array:
 	return [from, to, to, to - (dir - side * 0.5) * head, to, to - (dir + side * 0.5) * head]
 
 
+## Redraws the activity lines active now (`CombatStats.links_at`) between visible ships: dashes
+## flowing from source to target in the kind's colour, each fading in from its tail, with an
+## arrowhead short of the target. Kinds joining the same two ships are drawn side by side.
+func _update_links() -> void:
+	var lines: ImmediateMesh = links_mesh.mesh
+	lines.clear_surfaces()
+	var active := combat_stats.links_at(time)
+	if active.is_empty():
+		return
+	var flow := Time.get_ticks_msec() / 1000.0 * LINK_FLOW_PX_S
+	var began := false
+	for l in active:
+		var state: Dictionary = links.get(l.kind, {})
+		if not state.get("on", false) or not ships.has(l.source) or not ships.has(l.target):
+			continue
+		var a: Node3D = ships[l.source].node
+		var b: Node3D = ships[l.target].node
+		if not a.visible or not b.visible:
+			continue
+		var mid := (a.position + b.position) / 2.0
+		var px := _units_per_px(camera.global_position.distance_to(mid))
+		var along := b.position - a.position
+		var length := along.length()
+		if length < px:
+			continue
+		var dir := along / length
+		var side := dir.cross(camera.global_position - mid).normalized()
+		var offset := side * (CombatStats.LINK_KINDS.find(l.kind) - 1.5) * LINK_SPACING_PX * px
+		var from := a.position + offset + dir * _icon_clearance(a) * 0.6
+		var to := b.position + offset - dir * _icon_clearance(b)
+		var span := (to - from).dot(dir)
+		if span <= 0.0:
+			continue
+		if not began:
+			lines.surface_begin(Mesh.PRIMITIVE_LINES)
+			began = true
+		var color: Color = state.color
+		var tail := Color(color, LINK_TAIL_ALPHA)
+		var period := (LINK_DASH_PX + LINK_GAP_PX) * px
+		var d := fmod(flow * px, period) - period
+		while d < span:
+			var d0 := maxf(d, 0.0)
+			var d1 := minf(d + LINK_DASH_PX * px, span)
+			if d1 > d0:
+				lines.surface_set_color(tail.lerp(color, (d0 - d) / (LINK_DASH_PX * px)))
+				lines.surface_add_vertex(from + dir * d0)
+				lines.surface_set_color(tail.lerp(color, (d1 - d) / (LINK_DASH_PX * px)))
+				lines.surface_add_vertex(from + dir * d1)
+			d += period
+		var head := LINK_HEAD_PX * px
+		var wing := side * head * 0.5
+		lines.surface_set_color(color)
+		for p in [to, to - dir * head + wing, to, to - dir * head - wing]:
+			lines.surface_add_vertex(p)
+	if began:
+		lines.surface_end()
+
+
+func _set_link(kind: String, on: bool) -> void:
+	links[kind].on = on
+	Settings.set_value("links/" + kind, on)
+
+
+func _set_link_color(kind: String, color: Color) -> void:
+	links[kind].color = color
+	Settings.set_value("links/%s_color" % kind, color)
+
+
 func _set_vector(pilot: String, on: bool) -> void:
 	_debug(pilot).vector = on
 	_apply_debug(pilot)
@@ -1397,6 +1485,7 @@ func _open_all_debug_menu() -> void:
 func _refresh_all_debug_menu() -> void:
 	var all_on := not ships.is_empty() and ships.keys().all(func(p): return _debug(p).vector)
 	all_debug_menu.show_state("Debug — all ships", all_on, [])
+	all_debug_menu.show_links(links)
 
 
 ## The two debug menus; their signals change `debug` and redraw the overlays.
@@ -1426,6 +1515,8 @@ func _build_debug_menus(layer: CanvasLayer) -> void:
 	all_debug_menu.spheres_cleared.connect(_clear_spheres)
 	all_debug_menu.vector_seconds_changed.connect(func(sec): vector_seconds = sec)
 	all_debug_menu.beacon_range_toggled.connect(_set_beacon_range)
+	all_debug_menu.link_toggled.connect(_set_link)
+	all_debug_menu.link_color_changed.connect(_set_link_color)
 
 
 ## Opens a new damage breakdown window for `pilot` with its top-left corner near `at` (kept on

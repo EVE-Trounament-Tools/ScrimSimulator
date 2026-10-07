@@ -2,8 +2,8 @@ class_name DebugMenu
 extends OpaquePopup
 ## Debug overlay controls: a movement vector and range spheres for one ship (plus renaming its
 ## pilot), or (`all_ships`)
-## the same for every ship at once, plus the vector projection time and the beacons' jump
-## range. Emits what the user picked; `main.gd` owns the state and calls `show_state` to redraw.
+## the same for every ship at once, plus the vector projection time, the beacons' jump
+## range and which source -> target activity lines are drawn, in what colour. Emits what the user picked; `main.gd` owns the state and calls `show_state` to redraw.
 
 signal vector_toggled(on: bool)
 signal sphere_added(radius_km: float, color: Color)
@@ -11,6 +11,10 @@ signal sphere_removed(index: int)
 signal spheres_cleared
 signal vector_seconds_changed(seconds: float)
 signal beacon_range_toggled(centre: bool, on: bool)
+## An activity line kind (`CombatStats.LINK_KINDS`) shown or hidden (all-ships menu only).
+signal link_toggled(kind: String, on: bool)
+## An activity line kind recoloured (all-ships menu only).
+signal link_color_changed(kind: String, color: Color)
 ## "Rename pilot…" pressed (per-ship menu only).
 signal rename_requested
 ## "Get Damage Breakdown" pressed (per-ship menu only).
@@ -18,6 +22,12 @@ signal damage_breakdown_requested
 
 const DEFAULT_RADIUS_KM := 10.0
 const DEFAULT_COLOR := Color(0.3, 1.0, 0.75)
+const LINK_TITLES := {
+	"shooting": "Shooting",
+	"tackle": "Tackle (scram / point / web)",
+	"neut": "Neuts / nos",
+	"ewar": "EWAR",
+}
 
 var all_ships: bool
 var title_label: Label
@@ -35,6 +45,9 @@ var clear_button: Button
 var seconds_spin: SpinBox
 var corner_check: CheckBox
 var centre_check: CheckBox
+## Activity line kind -> its CheckBox / ColorPickerButton (all-ships menu only).
+var link_checks := {}
+var link_colors := {}
 
 
 func _init(all := false) -> void:
@@ -123,6 +136,25 @@ func _init(all := false) -> void:
 		centre_check.toggled.connect(func(on): beacon_range_toggled.emit(true, on))
 		box.add_child(centre_check)
 
+		box.add_child(HSeparator.new())
+		var links_title := Label.new()
+		links_title.text = "Activity lines (from combat logs)"
+		box.add_child(links_title)
+		for kind in CombatStats.LINK_KINDS:
+			var row := HBoxContainer.new()
+			box.add_child(row)
+			var check := CheckBox.new()
+			check.text = LINK_TITLES[kind]
+			check.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			check.toggled.connect(func(on): link_toggled.emit(kind, on))
+			row.add_child(check)
+			var picker := ColorPickerButton.new()
+			picker.custom_minimum_size = Vector2(40, 0)
+			picker.color_changed.connect(func(c): link_color_changed.emit(kind, c))
+			row.add_child(picker)
+			link_checks[kind] = check
+			link_colors[kind] = picker
+
 
 ## Fills the menu: `title`, the vector checkbox, and (per-ship menu) a row per sphere in
 ## `spheres` ({ radius_km, color }) and whether the damage breakdown has data (`has_damage`).
@@ -154,6 +186,14 @@ func show_state(title: String, vector_on: bool, spheres: Array, has_damage := fa
 		remove.tooltip_text = "Remove this sphere"
 		remove.pressed.connect(func(): sphere_removed.emit(i))
 		row.add_child(remove)
+
+
+## Sets the activity line rows from `state` (kind -> { on, color }) without emitting.
+func show_links(state: Dictionary) -> void:
+	for kind in state:
+		if link_checks.has(kind):
+			link_checks[kind].set_pressed_no_signal(state[kind].on)
+			link_colors[kind].color = state[kind].color
 
 
 ## Pops up with its top-left corner at `pos` (embedder coordinates).

@@ -64,6 +64,7 @@ const DEFAULT_BRACKET := "frigate"
 const EWAR_TYPE_IDS := {
 	"scram": 447,  # Warp Scrambler I
 	"disrupt": 3242,  # Warp Disruptor I
+	"web": 526,  # Stasis Webifier I
 	"neut": 533,  # Small Energy Neutralizer I
 	"nos": 530,  # Small Energy Nosferatu I
 	"ecm": 1957,  # Multispectral ECM I

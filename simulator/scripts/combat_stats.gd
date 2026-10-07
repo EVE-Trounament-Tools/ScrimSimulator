@@ -16,6 +16,7 @@ const EWAR_IDS := ["ewar_in", "ewar_out"]
 const EWAR_TYPES := {
 	"scram": {"title": "Warp scramble", "short": "Scram", "cycle_s": 5.0},
 	"disrupt": {"title": "Warp disruption", "short": "Disr", "cycle_s": 5.0},
+	"web": {"title": "Stasis webifier", "short": "Web", "cycle_s": 5.0},
 	"neut": {"title": "Energy neutralizer", "short": "Neut", "cycle_s": 12.0},
 	"nos": {"title": "Energy nosferatu", "short": "Nos", "cycle_s": 6.0},
 	"ecm": {"title": "ECM jam", "short": "ECM", "cycle_s": 20.0},
@@ -32,7 +33,12 @@ const SIZE_CYCLES := {"neut": [6.0, 12.0, 24.0], "nos": [3.0, 6.0, 12.0]}
 const EWAR_KEYWORDS := [
 	["tracking disrupt", "td"], ["guidance disrupt", "gd"], ["dampen", "damp"],
 	["painter", "tp"], ["sensor boost", "rsb"], ["tracking comp", "rtc"],
+	["webif", "web"], ["stasis", "web"],
 ]
+## Kinds of source -> target line drawn in space, in display order.
+const LINK_KINDS := ["shooting", "tackle", "neut", "ewar"]
+## A hit (or miss) keeps its shooting line up this long; closer hits make one span.
+const SHOT_HOLD_S := 4.0
 ## Gaps between repeats of the same module on the same target count as its cycle only within this
 ## fraction of the expected one: overheating shortens it, shorter gaps are several modules.
 const CYCLE_MIN_FRACTION := 0.6
@@ -47,6 +53,9 @@ var _ewar := {}
 var _has := {}
 ## Target pilot -> source pilot -> damage { t, sum } (as in `_series`).
 var _dmg_by_source := {}
+## `LINK_KINDS` kind -> Array of { source, target, t0, t1 }: spans when the source was doing that
+## to the target.
+var _links := {}
 
 
 ## Merges `logs` (synced `CombatLog`s) into per-pilot series.
@@ -55,8 +64,15 @@ static func from_logs(logs: Array) -> CombatStats:
 	var rates := {}  # pilot -> rate id -> [[t, amount], …]
 	var hits := {}  # target -> source -> [[t, amount], …]
 	var casts := {}  # [source, target, type, weapon] key -> { source, target, type, weapon, times }
+	var shots := {}  # "source|target" -> [source, target, times]
+	var spans := {}  # "kind|source|target" -> [kind, source, target, [[t0, t1], …]]
 	for e in merge(logs):
 		_add_rates(rates, e)
+		if e.kind == CombatLog.Kind.DAMAGE or e.kind == CombatLog.Kind.MISS:
+			var pair := "%s|%s" % [e.source_pilot, e.target_pilot]
+			if not shots.has(pair):
+				shots[pair] = [e.source_pilot, e.target_pilot, []]
+			shots[pair][2].append(e.t)
 		if e.kind == CombatLog.Kind.DAMAGE and not is_nan(e.amount):
 			if not hits.has(e.target_pilot):
 				hits[e.target_pilot] = {}
@@ -83,13 +99,42 @@ static func from_logs(logs: Array) -> CombatStats:
 		var times: Array = c.times
 		times.sort()
 		var cycle := estimate_cycle(c.type, c.weapon, times)
+		var kind := link_kind(c.type)
 		for t in times:
 			stats._add_ewar(c.source, "out", {"type": c.type, "other": c.target, "t0": t, "t1": t + cycle})
 			stats._add_ewar(c.target, "in", {"type": c.type, "other": c.source, "t0": t, "t1": t + cycle})
+			_add_span(spans, kind, c.source, c.target, t, t + cycle)
+	for s in shots.values():
+		for t in s[2]:
+			_add_span(spans, "shooting", s[0], s[1], t, t + SHOT_HOLD_S)
+	for s in spans.values():
+		if not stats._links.has(s[0]):
+			stats._links[s[0]] = []
+		for span in _fold(s[3]):
+			stats._links[s[0]].append({"source": s[1], "target": s[2], "t0": span[0], "t1": span[1]})
 	for pilot in stats._ewar:
 		for dir in stats._ewar[pilot]:
 			stats._ewar[pilot][dir].sort_custom(func(a, b): return a.t0 < b.t0)
 	return stats
+
+
+static func _add_span(spans: Dictionary, kind: String, source: String, target: String, t0: float, t1: float) -> void:
+	var key := "%s|%s|%s" % [kind, source, target]
+	if not spans.has(key):
+		spans[key] = [kind, source, target, []]
+	spans[key][3].append([t0, t1])
+
+
+## `spans` ([[t0, t1], …]) sorted and with overlapping ones merged.
+static func _fold(spans: Array) -> Array:
+	spans.sort_custom(func(a, b): return a[0] < b[0])
+	var out := []
+	for s in spans:
+		if not out.is_empty() and s[0] <= out[-1][1]:
+			out[-1][1] = maxf(out[-1][1], s[1])
+		else:
+			out.append([s[0], s[1]])
+	return out
 
 
 ## Entries of every log in `logs`, once each, with both pilots known and a match time. An event in
@@ -176,6 +221,16 @@ static func ewar_type(e: Dictionary) -> String:
 	return ""
 
 
+## The `LINK_KINDS` line an ewar `type` (an `EWAR_TYPES` key) is drawn as.
+static func link_kind(type: String) -> String:
+	match type:
+		"scram", "disrupt", "web":
+			return "tackle"
+		"neut", "nos":
+			return "neut"
+	return "ewar"
+
+
 ## Expected cycle time (s) of a `type` module named `weapon`: its usual one, or the median gap
 ## between `times` (sorted match times of its repeats on one target) that look like one cycle.
 static func estimate_cycle(type: String, weapon: String, times: Array) -> float:
@@ -256,4 +311,15 @@ func ewar_at(pilot: String, outgoing: bool, t: float) -> Dictionary:
 	for type in out:
 		for row in out[type]:
 			row.cycles = counts["%s|%s" % [type, row.pilot]]
+	return out
+
+
+## Source -> target lines active at match time `t`: Array of { kind (one of `LINK_KINDS`), source,
+## target }, one per kind and pair.
+func links_at(t: float) -> Array:
+	var out := []
+	for kind in LINK_KINDS:
+		for span in _links.get(kind, []):
+			if span.t0 <= t and t < span.t1:
+				out.append({"kind": kind, "source": span.source, "target": span.target})
 	return out

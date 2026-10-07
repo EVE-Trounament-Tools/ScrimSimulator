@@ -99,6 +99,7 @@ func test_ewar_type() -> void:
 		"Tracking Disruptor II": "td", "Guidance Disruptor II": "gd",
 		"Remote Sensor Dampener II": "damp", "Target Painter II": "tp",
 		"Remote Sensor Booster II": "rsb", "Remote Tracking Computer II": "rtc",
+		"Stasis Webifier II": "web", "Fleeting Compact Stasis Webifier": "web",
 	}
 	for weapon in named:
 		assert_eq(CombatStats.ewar_type(_e(K.OTHER, "A", "B", 0.0, NAN, weapon)), named[weapon], weapon)
@@ -144,3 +145,38 @@ func test_ewar_at() -> void:
 	assert_eq(s.ewar_at("A", false, 4.5).ecm, [{"pilot": "B", "cycles": 1}])
 	assert_eq(s.ewar_at("B", true, 22.5), {}, "the 20 s jam ended")
 	assert_eq(s.ewar_at("D", true, 1.0), {}, "unknown pilot")
+
+
+func test_link_kind() -> void:
+	for type in ["scram", "disrupt", "web"]:
+		assert_eq(CombatStats.link_kind(type), "tackle", type)
+	for type in ["neut", "nos"]:
+		assert_eq(CombatStats.link_kind(type), "neut", type)
+	for type in ["ecm", "td", "gd", "damp", "tp", "rsb", "rtc"]:
+		assert_eq(CombatStats.link_kind(type), "ewar", type)
+
+
+func test_links_at() -> void:
+	var s := CombatStats.from_logs([_log([
+		_e(K.DAMAGE, "A", "B", 1.0, 100.0, "Gun"),
+		_e(K.DAMAGE, "A", "B", 3.0, 100.0, "Gun"),
+		_e(K.MISS, "B", "A", 2.0, NAN, "Gun"),
+		_e(K.SCRAM, "A", "B", 0.0, NAN, "Warp scramble"),
+		_e(K.SCRAM, "A", "B", 5.0, NAN, "Warp scramble"),
+		_e(K.NOS, "C", "A", 1.0, 10.0, "Small Energy Nosferatu II"),
+		_e(K.OTHER, "C", "B", 1.0, NAN, "Target Painter II"),
+	])])
+	assert_eq(s.links_at(2.5), [
+		{"kind": "shooting", "source": "A", "target": "B"},
+		{"kind": "shooting", "source": "B", "target": "A"},
+		{"kind": "tackle", "source": "A", "target": "B"},
+		{"kind": "neut", "source": "C", "target": "A"},
+		{"kind": "ewar", "source": "C", "target": "B"},
+	])
+	assert_eq(s.links_at(6.5), [
+		{"kind": "shooting", "source": "A", "target": "B"},
+		{"kind": "tackle", "source": "A", "target": "B"},
+	], "hits 2 s apart hold until 3 + 4 s; scram cycles chain into one")
+	assert_eq(s.links_at(7.5), [{"kind": "tackle", "source": "A", "target": "B"}])
+	assert_eq(s.links_at(10.5), [], "last scram cycle ended at 10 s")
+	assert_eq(s.links_at(-1.0), [])

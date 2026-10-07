@@ -1722,3 +1722,35 @@ func test_beacon_jump_ranges() -> void:
 	var centre: Node3D = m.beacon_ranges_centre.get_child(0)
 	assert_almost(centre.position, Vector3.ONE * Main.CUBE / 2.0)
 	assert_almost(centre.get_child(1).mesh.radius, Main.BEACON_JUMP_KM)
+
+
+func test_activity_lines() -> void:
+	var m := _main()
+	m.load_match(_match_csv())
+	m._set_playing(false)
+	var gamelog := CombatLog.new()
+	gamelog.entries = [{
+		"eve_unix": 1005.0, "t": 5.0, "kind": CombatLog.Kind.DAMAGE, "text": "",
+		"source": "blue", "target": "late", "source_ship": "", "target_ship": "",
+		"source_pilot": "blue", "target_pilot": "late", "amount": 100.0, "weapon": "Gun", "quality": "",
+	}]
+	m.combat_stats = CombatStats.from_logs([gamelog])
+	var lines: ImmediateMesh = m.links_mesh.mesh
+	m._seek(6.0)
+	m._process(0.0)
+	assert_eq(lines.get_surface_count(), 1, "blue shooting late")
+	m._seek(12.0)
+	m._process(0.0)
+	assert_eq(lines.get_surface_count(), 0, "the shot has long passed")
+	m._seek(6.0)
+	m._refresh_all_debug_menu()
+	assert_true(m.all_debug_menu.link_checks.shooting.button_pressed, "on by default")
+	m.all_debug_menu.link_checks.shooting.button_pressed = false
+	assert_false(Settings.get_value("links/shooting"))
+	m._process(0.0)
+	assert_eq(lines.get_surface_count(), 0, "shooting hidden")
+	m.all_debug_menu.link_color_changed.emit("tackle", Color.GREEN)
+	assert_eq(Settings.get_value("links/tackle_color"), Color.GREEN)
+	var again := _main()
+	assert_false(again.links.shooting.on, "kept across restarts")
+	assert_eq(again.links.tackle.color, Color.GREEN)
