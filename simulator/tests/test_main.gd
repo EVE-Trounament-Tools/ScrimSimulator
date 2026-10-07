@@ -242,6 +242,7 @@ func test_audio_follows_playback() -> void:
 	m._set_speed(2.0)
 	assert_eq(m.audio_player.pitch_scale, 2.0)
 	assert_eq(m.audio_pitch.pitch_scale, 0.5, "pitch kept")
+	assert_eq(m.audio_player.playback_type, AudioServer.PLAYBACK_TYPE_STREAM, "bus effect runs on web")
 	m._toggle_play()
 	assert_false(m.audio_player.playing)
 	m._set_speed(1.0)

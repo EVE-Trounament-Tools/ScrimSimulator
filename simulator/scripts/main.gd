@@ -1962,6 +1962,8 @@ func _build_audio() -> void:
 	audio_pitch.pitch_scale = 1.0
 	audio_player = AudioStreamPlayer.new()
 	audio_player.bus = AUDIO_BUS
+	# Web defaults to sample playback, which skips bus effects (and so the pitch fix).
+	audio_player.playback_type = AudioServer.PLAYBACK_TYPE_STREAM
 	add_child(audio_player)
 
 
