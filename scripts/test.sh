@@ -11,6 +11,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 GODOT="${GODOT:-godot}"
 
+# The demo match is public: no real names, no legal ships.
+python3 scripts/check_demo_data.py
+
 # A clean checkout has no .godot/ import cache; class_name lookups (MatchData, ...) need it.
 if [[ ! -d simulator/.godot ]]; then
     echo "==> importing Godot project"

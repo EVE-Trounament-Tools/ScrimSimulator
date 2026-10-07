@@ -122,7 +122,7 @@ EOF
 }
 
 # Shipped in the simulator bundle and added to its match library on first run.
-DEMO_CSV="resouces/demo/match_03.positions.csv"
+DEMO_CSV="resouces/demo/demo.positions.csv"
 DEMO_NAME="Demo match"
 
 new_stage() { # <bundle name>: an empty dist/<name>/

@@ -13,7 +13,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 GODOT="${GODOT:-godot}"
-CSV="$ROOT/resouces/demo/match_03.positions.csv"
+CSV="$ROOT/resouces/demo/demo.positions.csv"
 OUT="$ROOT/docs/media"
 WIDTH=1600
 HEIGHT=900

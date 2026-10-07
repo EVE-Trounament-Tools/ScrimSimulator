@@ -209,8 +209,8 @@ static func _set_other(e: Dictionary, outgoing: bool, name: String, ship: String
 		e.source_ship = ship
 
 
-## "Loki [ALPHA] [Kelto Ruvan] -" -> ["Loki", "Kelto Ruvan"]; "you" / "you!" -> ["", ""];
-## a bare "Guardian" (no pilot shown) -> ["Guardian", "Guardian"].
+## "Hulk [ALPHA] [Kelto Ruvan] -" -> ["Hulk", "Kelto Ruvan"]; "you" / "you!" -> ["", ""];
+## a bare "Venture" (no pilot shown) -> ["Venture", "Venture"].
 static func _ship_and_name(s: String) -> Array:
 	s = s.strip_edges()
 	if s == "you" or s == "you!":

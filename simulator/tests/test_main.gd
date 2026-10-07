@@ -296,11 +296,11 @@ func test_drop_audio_onto_open_match() -> void:
 func _logged_match() -> Array:
 	var rows := []
 	for t in [0, 2, 4, 6]:
-		rows.append(row(t, "Halvard Ostberg", "Deimos", C + X * 1000.0 * t) + ["2026-10-03T14:03:%02d.000Z" % (14 + t)])
+		rows.append(row(t, "Halvard Ostberg", "Skiff", C + X * 1000.0 * t) + ["2026-10-03T14:03:%02d.000Z" % (14 + t)])
 	var path := MatchLibrary.add(write_csv(rows, DEFAULT_HEADER + ",eve_time"))
 	var gamelog := temp_dir().path_join("20261003_124532_1.txt")
 	var f := FileAccess.open(gamelog, FileAccess.WRITE)
-	f.store_string("  Listener: Halvard Ostbergte\n[ 2026.10.03 14:03:16 ] (combat) 204 to Someone[X](Magus) - Test Railgun - Hits\n")
+	f.store_string("  Listener: Halvard Ostbergte\n[ 2026.10.03 14:03:16 ] (combat) 204 to Someone[X](Endurance) - Test Railgun - Hits\n")
 	f.close()
 	return [path, gamelog]
 
@@ -333,7 +333,7 @@ func test_menu_adds_combat_logs() -> void:
 func _timed_match(minute: int, folder := "") -> String:
 	var rows := []
 	for t in [0, 2, 4, 6]:
-		rows.append(row(t, "Halvard Ostberg", "Deimos", C + X * 1000.0 * t) + ["2026-10-03T14:%02d:%02d.000Z" % [minute, t]])
+		rows.append(row(t, "Halvard Ostberg", "Skiff", C + X * 1000.0 * t) + ["2026-10-03T14:%02d:%02d.000Z" % [minute, t]])
 	return MatchLibrary.add(write_csv(rows, DEFAULT_HEADER + ",eve_time"), folder)
 
 
@@ -343,7 +343,7 @@ func _day_log(minutes: Array) -> String:
 	var f := FileAccess.open(gamelog, FileAccess.WRITE)
 	f.store_string("  Listener: Halvard Ostberg\n")
 	for minute in minutes:
-		f.store_string("[ 2026.10.03 14:%02d:02 ] (combat) 204 to Someone[X](Magus) - Test Railgun - Hits\n" % minute)
+		f.store_string("[ 2026.10.03 14:%02d:02 ] (combat) 204 to Someone[X](Endurance) - Test Railgun - Hits\n" % minute)
 	f.close()
 	return gamelog
 
