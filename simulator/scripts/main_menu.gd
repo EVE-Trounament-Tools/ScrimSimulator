@@ -1,9 +1,9 @@
 class_name MainMenu
 extends PanelContainer
 ## Full-screen start menu: pick a match from the `MatchLibrary`, add a new CSV or a whole scrim
-## folder to it, rename or remove one, attach audio or combat logs (EVE gamelogs) to one, sort
-## matches into folders (right-click for all of these, or drag to move). Covers the viewer until a
-## match is chosen.
+## folder to it, rename or remove one, attach audio to one, add combat logs (EVE gamelogs) to the
+## matches of a folder, sort matches into folders (right-click for all of these, or drag to
+## move). Covers the viewer until a match is chosen.
 
 ## The library path of the match to open.
 signal match_chosen(path: String)
@@ -396,25 +396,47 @@ func add_audio(src: String) -> void:
 	audio_changed.emit(path)
 
 
-## Saves the parts of EVE gamelogs `srcs` logged during the selected match as its combat logs
-## (`MatchLibrary.add_log`). Each must be a gamelog with combat during the match, which needs a
-## CSV with EVE times; the others are skipped and named in the error line.
+## Saves the parts of EVE gamelogs `srcs` logged during each match of the `log_targets` as its
+## combat logs (`MatchLibrary.add_log`), so one day-long gamelog reaches every match it covers.
+## Matches without EVE times are skipped; gamelogs with combat during none of the matches are
+## named in the error line.
 func add_logs(srcs: PackedStringArray) -> void:
-	var path := selected_path()
-	if path == "":
+	var targets := log_targets()
+	if targets.is_empty():
 		return
-	var data := MatchData.load_csv(path, {}, 0.0, true)
-	if data == null or not data.has_eve_time():
-		show_error("Can't add combat logs: this match has no EVE times (make its CSV with --chat-log or --t0)")
+	var added := {}
+	var timed := false
+	for path: String in targets:
+		var data := MatchData.load_csv(path, {}, 0.0, true)
+		if data == null or not data.has_eve_time():
+			continue
+		timed = true
+		var changed := false
+		for src in srcs:
+			if MatchLibrary.add_log(path, src, data) != "":
+				added[src] = true
+				changed = true
+		if changed:
+			logs_changed.emit(path)
+	if not timed:
+		show_error("Can't add combat logs: no match here has EVE times (make its CSV with --chat-log or --t0)")
 		return
-	var failed := []
-	for src in srcs:
-		if MatchLibrary.add_log(path, src, data) == "":
-			failed.append(src.get_file())
-	show_error("" if failed.is_empty() else "Not added (not a gamelog, or no combat during this match): %s" % ", ".join(failed))
+	var failed := Array(srcs).filter(func(src): return not added.has(src)).map(func(src): return src.get_file())
+	show_error("" if failed.is_empty() else "Not added (not a gamelog, or no combat during any match here): %s" % ", ".join(failed))
 	refresh()
-	if failed.size() < srcs.size():
-		logs_changed.emit(path)
+
+
+## The matches added gamelogs are checked against: every match in the selected folder (its
+## subfolders included), or in the selected match's folder (just the library's top-level matches
+## for a match outside any folder). Empty if nothing is selected.
+func log_targets() -> Array:
+	var meta := _selected_meta()
+	match meta.get("kind"):
+		"match":
+			return MatchLibrary.matches_in(meta.folder)
+		"folder":
+			return MatchLibrary.matches_in(meta.rel)
+	return []
 
 
 ## Deletes the selected match's combat logs.
@@ -517,6 +539,9 @@ func open_context_menu(at: Vector2) -> void:
 			context_menu.add_item("New folder…", MenuItem.NEW_FOLDER)
 			context_menu.add_item("Add match…", MenuItem.ADD_MATCH)
 			context_menu.add_item("Add folder…", MenuItem.ADD_FOLDER)
+			context_menu.add_item("Add combat logs…", MenuItem.ADD_LOGS)
+			context_menu.set_item_disabled(context_menu.get_item_index(MenuItem.ADD_LOGS),
+				MatchLibrary.matches_in(meta.rel).is_empty())
 			context_menu.add_separator()
 			_add_move_submenu(meta)
 			context_menu.add_item("Rename…", MenuItem.RENAME)
@@ -550,7 +575,7 @@ func _on_context_item(id: int) -> void:
 		MenuItem.REMOVE_AUDIO:
 			remove_audio_selected()
 		MenuItem.ADD_LOGS:
-			if selected_path() != "":
+			if not log_targets().is_empty():
 				logs_dialog.popup_centered_ratio(0.6)
 		MenuItem.REMOVE_LOGS:
 			remove_logs_selected()
