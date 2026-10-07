@@ -58,8 +58,9 @@ var _dmg_by_source := {}
 var _links := {}
 
 
-## Merges `logs` (synced `CombatLog`s) into per-pilot series.
-static func from_logs(logs: Array) -> CombatStats:
+## Merges `logs` (synced `CombatLog`s) into per-pilot series. Entries by or on a pilot in `cutoff`
+## (pilot -> match time, e.g. when it was podded) after its time are left out.
+static func from_logs(logs: Array, cutoff := {}) -> CombatStats:
 	var stats := CombatStats.new()
 	var rates := {}  # pilot -> rate id -> [[t, amount], …]
 	var hits := {}  # target -> source -> [[t, amount], …]
@@ -67,6 +68,8 @@ static func from_logs(logs: Array) -> CombatStats:
 	var shots := {}  # "source|target" -> [source, target, times]
 	var spans := {}  # "kind|source|target" -> [kind, source, target, [[t0, t1], …]]
 	for e in merge(logs):
+		if e.t > cutoff.get(e.source_pilot, INF) or e.t > cutoff.get(e.target_pilot, INF):
+			continue
 		_add_rates(rates, e)
 		if e.kind == CombatLog.Kind.DAMAGE or e.kind == CombatLog.Kind.MISS:
 			var pair := "%s|%s" % [e.source_pilot, e.target_pilot]

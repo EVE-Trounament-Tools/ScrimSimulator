@@ -92,7 +92,7 @@ func test_load() -> void:
 	var samples := 0
 	for pilot in d.tracks:
 		samples += d.tracks[pilot].size()
-	assert_eq(samples, 11092)
+	assert_eq(samples, 8811, "pods' tracks end where they died")
 	assert_eq(d.eve_start, "2026-10-03T14:03:14.000Z", "countdown's first number")
 	assert_eq(d.eve_end, "2026-10-03T14:12:58.000Z", "the second before WF")
 
@@ -124,10 +124,10 @@ func test_deaths() -> void:
 	var d := _load()
 	var dead := d.deaths.keys()
 	dead.sort()
-	assert_eq(dead, ["Amarr Citizen 5054432", "Caldari Citizen 8777524", "Caldari Citizen 9942864"])
+	assert_eq(dead, ["Amarr Citizen 5054432", "Caldari Citizen 9942864"])
 	assert_almost(d.deaths["Amarr Citizen 5054432"].t, 221.832, 1e-2)
 	assert_almost(d.deaths["Caldari Citizen 9942864"].t, 196.951, 1e-2)
-	assert_almost(d.deaths["Caldari Citizen 8777524"].t, 419.578, 1e-2)
+	assert_true(d.podded.has("Caldari Citizen 8777524"), "its pod flew out, but pods aren't tracked")
 	assert_eq(_ship_at(d, "Amarr Citizen 5054432", d.deaths["Amarr Citizen 5054432"].t), "Prospect")
 	assert_eq(_ship_at(d, "Caldari Citizen 9942864", d.deaths["Caldari Citizen 9942864"].t), "Venture")
 
@@ -212,7 +212,7 @@ func test_viewer_loads_demo() -> void:
 	assert_eq(m.ships.size(), PILOTS)
 	assert_eq(m.timeline.max_value, 575.0)
 	assert_eq(m.file_label.text,
-		"match_03.positions.csv — 20 pilots (blue 10 / red 9 / unknown 1), 3 out of bounds")
+		"match_03.positions.csv — 20 pilots (blue 10 / red 9 / unknown 1), 2 out of bounds")
 
 
 # --- combat log --------------------------------------------------------------------

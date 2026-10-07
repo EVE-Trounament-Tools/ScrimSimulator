@@ -425,7 +425,7 @@ func _load_combat_logs() -> void:
 
 ## Rebuilds `combat_stats` from `data.combat_logs`; roster columns without data are hidden.
 func _apply_combat_stats() -> void:
-	combat_stats = CombatStats.from_logs(data.combat_logs)
+	combat_stats = CombatStats.from_logs(data.combat_logs, data.podded)
 	for id in CombatStats.RATE_IDS + CombatStats.EWAR_IDS:
 		roster_table.set_column_available(id, combat_stats.has(id))
 	_update_roster_cells()

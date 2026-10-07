@@ -353,6 +353,34 @@ func test_starting_in_a_capsule_is_not_a_death() -> void:
 	assert_eq(d.events, [])
 
 
+func test_pod_stays_where_it_died() -> void:
+	var d := _load([
+		row(10, "a", "Venture", C),
+		row(11, "a", "Venture", C + X),
+		row(12, "a", "Capsule", C + X * 2.0),
+		row(13, "a", "Capsule", C + X * 200000.0),  # warps off past the boundary
+		row(10, "b", "Venture", C - X),
+		row(20, "b", "Venture", C - X * 2.0),
+	])
+	assert_eq(_kinds(d), [MatchData.Event.DEATH], "the pod leaving isn't a boundary crossing")
+	assert_eq(d.podded, {"a": 2.0})
+	assert_eq(d.tracks["a"].size(), 3, "nothing after the pod is kept")
+	for t in [2.0, 3.0, 10.0]:
+		var s := d.sample("a", t)
+		assert_eq(s.pos, C + X * 2.0, "held at %s" % t)
+		assert_eq(s.ship_type, "Capsule")
+		assert_true(is_nan(s.speed) and is_nan(s.hp.x), "nothing known of the pod")
+	assert_eq(d.sample("a", 10.5), {}, "after the match ends")
+	assert_eq(d.lost_hull("a", 10.0), "Venture")
+
+
+func test_starting_in_a_capsule_is_still_tracked() -> void:
+	var d := _load([row(0, "a", "Capsule", C), row(1, "a", "Capsule", C + X), row(2, "a", "Venture", C)])
+	assert_eq(d.podded, {})
+	assert_eq(d.sample("a", 1.0).pos, C + X)
+	assert_eq(d.sample("a", 3.0), {})
+
+
 func test_boundary_crossing_is_an_event() -> void:
 	var d := _load([
 		row(10, "early", "x", C),
@@ -446,9 +474,9 @@ func test_sample_holds_take_off_point_through_mjd() -> void:
 func _sample_data() -> MatchData:
 	return _load([
 		row(100, "p", "Rifter", Vector3(0, 0, 0)),
-		row(102, "p", "Capsule", Vector3(20, 0, 0)),
-		row(110, "p", "Capsule", Vector3(20, 80, 0)),  # 8 s gap > MAX_GAP_S
-		row(114, "p", "Capsule", Vector3(20, 80, 40)),
+		row(102, "p", "Rifter", Vector3(20, 0, 0)),
+		row(110, "p", "Rifter", Vector3(20, 80, 0)),  # 8 s gap > MAX_GAP_S
+		row(114, "p", "Rifter", Vector3(20, 80, 40)),
 	])
 
 
