@@ -3,7 +3,9 @@
 //! `scene.json`, see `overview::panel`). Each panel is OCR'd and tracked independently, and the
 //! per-observer tracks are merged into one roster by pilot name. Each pilot's three distances per
 //! tick are then trilaterated (`overview::solve`): the observers sit on three unknown corners of a
-//! 100 km cube that every pilot starts inside, and the corners are inferred from the data.
+//! 100 km cube that every pilot starts inside, and the corners are inferred from the data. The
+//! observers don't move during a video, so with several matches every match is OCR'd first and
+//! the corners are inferred once from all of them.
 //! Speed is the overview's own Velocity column. Direction is the slope of the solved positions,
 //! because the overview shows speed only as a scalar.
 //!
@@ -35,7 +37,7 @@ use overview::layout::{Layout, Rect};
 use overview::panel::{calibrate, crop_scaled, PanelSpec, Scene};
 use overview::row::{read_rows, RowReading};
 use overview::ship_types::ShipTypes;
-use overview::solve::{self, direction, infer_corners, solve_track, Fix};
+use overview::solve::{self, direction, infer_corners, solve_track, Fix, Reading};
 use overview::targets::{
     label_image, match_label, ocr_label, read_rings, BlockGeometry, Candidate, Hp, Label, LabelCache, Ring,
 };
@@ -63,6 +65,10 @@ struct Cli {
     /// Don't extract the processed window's audio to `<video>.mp3`.
     #[arg(long)]
     no_audio: bool,
+    /// Also write each pilot's raw per-tick distances and speed to `<video>.readings.csv`
+    /// (`t,pilot,d_a,d_b,d_c,speed_mps`), the input to corner inference, for offline analysis.
+    #[arg(long)]
+    dump_readings: bool,
     /// EVE gamelog (`Documents/EVE/logs/Gamelogs/*.txt`), or a folder of them (repeatable).
     /// Each log with combat during the match is trimmed to it and saved in
     /// `<video>.positions.logs/`. Needs EVE times (`--chat-log` or `--t0`).
@@ -300,14 +306,41 @@ fn main() -> Result<()> {
         .with_context(|| format!("finding the match in {}", video.display()))?;
         let stem = output_stem(&video.file_stem().unwrap_or_default().to_string_lossy());
         let n = windows.len();
+        // The observers don't move during a video, so every match is OCR'd first and the
+        // corners are inferred once from all of them: a match whose start can't tell the
+        // corners apart borrows the evidence of the others.
+        let mut reads: Vec<(Option<usize>, MatchRead)> = Vec::new();
         for (i, window) in windows {
             let Some(i) = i else {
-                process_match(&cli, &scene, &font, video, &stem, &window)?;
+                reads.push((None, read_match(&cli, &scene, &font, video, &stem, window)?));
                 continue;
             };
             println!("== match {i}/{n} of {}", video.display());
             // One bad match shouldn't lose the others.
-            if let Err(e) = process_match(&cli, &scene, &font, video, &format!("{stem}_{i:02}"), &window) {
+            match read_match(&cli, &scene, &font, video, &format!("{stem}_{i:02}"), window) {
+                Ok(m) => reads.push((Some(i), m)),
+                Err(e) => {
+                    eprintln!("  error: match {i}: {e:#}");
+                    failed += 1;
+                }
+            }
+        }
+        if reads.is_empty() {
+            continue;
+        }
+        let pilots: Vec<Vec<Reading>> =
+            reads.iter().flat_map(|(_, m)| m.readings.iter().map(PilotReadings::for_inference)).collect();
+        let fit = infer_corners(&pilots);
+        println!("== {}: observers, from {} match(es)", video.display(), reads.len());
+        let names: Vec<&str> = scene.panels.iter().map(|p| p.name.as_str()).collect();
+        print_corners(&names, &fit);
+        for (i, m) in &reads {
+            let Some(i) = i else {
+                write_match(&cli, video, m, fit.corners)?;
+                continue;
+            };
+            println!("== match {i}/{n} of {}", video.display());
+            if let Err(e) = write_match(&cli, video, m, fit.corners) {
                 eprintln!("  error: match {i}: {e:#}");
                 failed += 1;
             }
@@ -317,10 +350,16 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// OCR one match window of `video` and save its CSV, audio and combat logs as `<out_stem>.*`.
-fn process_match(cli: &Cli, scene: &Scene, font: &Font, video: &Path, out_stem: &str, window: &Window) -> Result<()> {
-    let eve_span = process_video(video, scene, font, cli, out_stem, window)
-        .with_context(|| format!("processing {}", video.display()))?;
+/// OCR one match window of `video`, up to the per-pilot readings; outputs are named `<out_stem>.*`.
+fn read_match(cli: &Cli, scene: &Scene, font: &Font, video: &Path, out_stem: &str, window: Window) -> Result<MatchRead> {
+    process_video(video, scene, font, cli, out_stem, window)
+        .with_context(|| format!("processing {}", video.display()))
+}
+
+/// Solve an OCR'd match with the observers at `corners` and save its CSV, audio and combat logs.
+fn write_match(cli: &Cli, video: &Path, m: &MatchRead, corners: [solve::V3; 3]) -> Result<()> {
+    let eve_span = solve_match(m, corners, &cli.out)?;
+    let (out_stem, window) = (m.out_stem.as_str(), &m.window);
     if !cli.no_audio {
         save_audio(video, &cli.out, out_stem, window);
     }
@@ -486,14 +525,25 @@ struct Panel<'a> {
     layout: Layout,
 }
 
+/// One match, OCR'd and merged into pilots, waiting for the observers' corners to be solved.
+struct MatchRead {
+    out_stem: String,
+    window: Window,
+    per_observer: Vec<Vec<Track>>,
+    roster: Vec<Pilot>,
+    readings: Vec<PilotReadings>,
+    hp: Vec<BTreeMap<u64, Hp>>,
+    times: Vec<f64>,
+}
+
 fn process_video(
     video: &Path,
     scene: &Scene,
     font: &Font,
     cli: &Cli,
     out_stem: &str,
-    window: &Window,
-) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>> {
+    window: Window,
+) -> Result<MatchRead> {
     let (fps, hwaccel, out) = (cli.fps, cli.hwaccel.as_deref(), cli.out.as_path());
     let started = std::time::Instant::now();
     let batch_size = 2 * rayon::current_num_threads();
@@ -539,7 +589,7 @@ fn process_video(
                 pending.len(),
                 errors[i]
             );
-            *fit = Some(calibrate_elsewhere(video, window, spec, font, hwaccel)?);
+            *fit = Some(calibrate_elsewhere(video, &window, spec, font, hwaccel)?);
         }
     }
     let panels: Vec<Panel> = scene
@@ -593,31 +643,35 @@ fn process_video(
     eprintln!();
 
     let per_observer: Vec<Vec<Track>> = trackers.into_iter().map(Tracker::finish).collect();
-    let names: Vec<&str> = panels.iter().map(|p| p.spec.name.as_str()).collect();
     let roster = build_roster(&per_observer, times.len());
 
     let readings: Vec<PilotReadings> =
         roster.iter().map(|p| pilot_readings(&per_observer, p, &times)).collect();
-    let starts: Vec<[f64; 3]> = readings
-        .iter()
-        .flat_map(|r| r.distances.iter().take(CORNER_FIT_TICKS).map(|&(_, d)| d))
-        .collect();
-    if starts.is_empty() {
+    if readings.iter().all(|r| r.distances.is_empty()) {
         bail!("no pilot was seen by all three observers in the same tick");
     }
-    let fit = infer_corners(&starts);
-    print_corners(&names, &fit);
-
-    let solved: Vec<Vec<Fix>> =
-        readings.iter().map(|r| solve_track(fit.corners, &r.distances)).collect();
+    if cli.dump_readings {
+        let path = out.join(format!("{out_stem}.readings.csv"));
+        std::fs::write(&path, readings_csv(&roster, &readings))?;
+        println!("  wrote {}", path.display());
+    }
     let hp = targets.pilot_hp(&per_observer, &roster);
+    println!("  read {} frames in {:.0}s", times.len(), started.elapsed().as_secs_f64());
+    Ok(MatchRead { out_stem: out_stem.to_string(), window, per_observer, roster, readings, hp, times })
+}
+
+/// Solve every pilot's track with the observers at `corners`, write `<out_stem>.positions.csv`,
+/// and return the EVE times of its first and last rows (when known).
+fn solve_match(m: &MatchRead, corners: [solve::V3; 3], out: &Path) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>> {
+    let MatchRead { out_stem, window, per_observer, roster, readings, hp, times } = m;
+    let solved: Vec<Vec<Fix>> = readings.iter().map(|r| solve_track(corners, &r.distances)).collect();
 
     let path = out.join(format!("{out_stem}.positions.csv"));
     std::fs::write(
         &path,
-        positions_csv(&per_observer, &roster, &readings, &solved, &hp, window.eve_origin),
+        positions_csv(per_observer, roster, readings, &solved, hp, window.eve_origin),
     )?;
-    print_summary(&per_observer, &roster, &readings, &solved);
+    print_summary(per_observer, roster, readings, &solved);
     let eve_span = match (window.eve_origin, times.first(), times.last()) {
         (Some(origin), Some(&first), Some(&last)) => {
             println!("  EVE time {} -> {}", eve_time(origin, first), eve_time(origin, last));
@@ -626,12 +680,7 @@ fn process_video(
         }
         _ => None,
     };
-    println!(
-        "  wrote {} ({} frames in {:.0}s)",
-        path.display(),
-        times.len(),
-        started.elapsed().as_secs_f64()
-    );
+    println!("  wrote {} ({} frames)", path.display(), times.len());
     Ok(eve_span)
 }
 
@@ -680,25 +729,29 @@ fn calibrate_elsewhere(
     Ok(fit)
 }
 
-/// How many of each pilot's earliest three-observer ticks feed corner inference. Pilots start
-/// inside the cube, but later in a match they may not be.
-const CORNER_FIT_TICKS: usize = 10;
-
-/// How close (relative) the best other-shaped corner triple may score before the choice is
-/// reported as ambiguous.
-const CORNER_AMBIGUITY_RATIO: f64 = 1.5;
-
 /// Seconds either side of a fix used to fit its direction.
 const DIRECTION_HALF_WINDOW_S: f64 = 3.0;
 
 fn print_corners(names: &[&str], fit: &solve::CornerFit) {
-    let mut line = String::from("  observer corners (km):");
-    for (n, c) in names.iter().zip(fit.corners) {
-        let _ = write!(line, " {n}=({:.0},{:.0},{:.0})", c[0] / 1e3, c[1] / 1e3, c[2] / 1e3);
+    let fmt = |corners: [solve::V3; 3]| {
+        let mut s = String::new();
+        for (n, c) in names.iter().zip(corners) {
+            let _ = write!(s, " {n}=({:.0},{:.0},{:.0})", c[0] / 1e3, c[1] / 1e3, c[2] / 1e3);
+        }
+        s
+    };
+    let speed = fit.cost.speed_err.map_or("n/a".to_string(), |e| format!("{e:.3}"));
+    println!(
+        "  observer corners (km):{}  fit cost {:.0} m (start {:.0} m, speed error {speed}), next shape {:.0} m",
+        fmt(fit.corners),
+        fit.score,
+        fit.cost.start_m,
+        fit.runner_up
+    );
+    if let Some(next) = fit.runner_up_corners {
+        println!("  next shape (km):{}", fmt(next));
     }
-    let _ = write!(line, "  fit cost {:.0} m, next shape {:.0} m", fit.score, fit.runner_up);
-    println!("{line}");
-    if fit.runner_up < fit.score * CORNER_AMBIGUITY_RATIO {
+    if fit.is_ambiguous() {
         eprintln!("  warning: corner choice is ambiguous; another observer layout fits almost as well");
     }
 }
@@ -708,6 +761,28 @@ fn print_corners(names: &[&str], fit: &solve::CornerFit) {
 struct PilotReadings {
     distances: Vec<(f64, [f64; 3])>,
     speed: BTreeMap<u64, f64>,
+}
+
+/// `--dump-readings` output: one row per pilot per tick with all three distances.
+fn readings_csv(roster: &[Pilot], readings: &[PilotReadings]) -> String {
+    let mut csv = String::from("t,pilot,d_a,d_b,d_c,speed_mps\n");
+    for (pilot, r) in roster.iter().zip(readings) {
+        for &(t, [a, b, c]) in &r.distances {
+            let speed = r.speed.get(&t.to_bits()).map_or(String::new(), |v| format!("{v:.0}"));
+            let _ = writeln!(csv, "{t:.3},{},{a:.0},{b:.0},{c:.0},{speed}", pilot.name);
+        }
+    }
+    csv
+}
+
+impl PilotReadings {
+    /// This pilot's distance ticks with their speeds, as corner inference takes them.
+    fn for_inference(&self) -> Vec<Reading> {
+        self.distances
+            .iter()
+            .map(|&(t, d)| Reading { t, d, speed_mps: self.speed.get(&t.to_bits()).copied() })
+            .collect()
+    }
 }
 
 /// Collect a pilot's distance triples and speeds per tick. Speed is the median of the observers'

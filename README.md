@@ -107,6 +107,10 @@ The saved `match.mp3` covers the same window, so it starts with the data.
 - More than one CD→WF in the video: pick one with `--match N`, or process each with `--match all`
   into its own `match_01.positions.csv`, `match_01.mp3`, `match_01.positions.logs/`, … (the GUI
   does this).
+  The observers must stay put for the whole video: which cube corners they sit on is worked out
+  once from all its matches, so a match whose start alone can't tell (everyone far from every
+  observer) uses the others' evidence. Record observers that move to new corners in separate
+  videos.
 - `--t0 HH:MM:SS` gives the EVE time at video second 0 yourself, skipping the chat OCR.
 - `--tournament` uses the tournament system messages ("30 seconds until match start",
   "Match completed!") instead.
