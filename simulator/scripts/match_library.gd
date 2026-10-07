@@ -599,8 +599,8 @@ static func load_audio(path: String) -> AudioStream:
 
 
 ## The match's saved edits: `{ teams: { pilot -> Team }, team_names: { Team -> String },
-## log_pilots: { gamelog file name -> pilot } }` (the last overrides who a gamelog is attributed
-## to), each present only if saved. {} when there is no (readable) sidecar.
+## log_pilots: { gamelog file name -> pilot }, ruleset: `Ruleset` id }` (`log_pilots` overrides
+## who a gamelog is attributed to), each present only if saved. {} when there is no (readable) sidecar.
 static func load_meta(path: String) -> Dictionary:
 	var file := meta_path(path)
 	if not FileAccess.file_exists(file):
@@ -623,6 +623,8 @@ static func load_meta(path: String) -> Dictionary:
 		out.log_pilots = {}
 		for log_file in parsed.log_pilots:
 			out.log_pilots[log_file] = str(parsed.log_pilots[log_file])
+	if parsed.get("ruleset") is String:
+		out.ruleset = parsed.ruleset
 	return out
 
 

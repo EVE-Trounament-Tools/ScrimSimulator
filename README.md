@@ -179,6 +179,17 @@ locked). **Damage** (bottom bar, or Settings) highlights the rows of ships whose
 a layer lower than its last reading and more than 3% below its best of the previous 3 s, held for
 2 s.
 
+The broadcast panel scores the match under a tournament ruleset (picker in the bottom bar, saved
+per match; the newest by default). Each row's **PTS** is its ship's points, inflated by the
+hull's per-copy rate when a team fields the same ship more than once. A team's score is the points
+of every enemy ship lost (podded or out of bounds), plus whatever the enemy fleet leaves of the
+points cap as a head start. Rulesets live in `simulator/rulesets/` and are generated from that
+year's comp calculator sheet:
+
+```sh
+scripts/ruleset_from_sheet.py <google sheet id> --id ATXXII --name "Alliance Tournament XXII" --order 22
+```
+
 Right-click a pilot → **Get Damage Breakdown** opens a window of the damage coming in on that pilot
 from each attacker: pilot, ship and DPS (over the last 10 s, like the roster), highest first, with
 the total. It follows the replay as it plays or is scrubbed. The windows can be moved and closed,
@@ -237,10 +248,10 @@ SDE/model download controls. Resize the window to see more of the arena.
 | `crates/overview` | Overview parsing, tracking and trilateration; the `scrim-positions` and `overview-track` binaries |
 | `third_party/ScrimTrimmer` | Submodule: finds a match and its EVE time in a recording + chat log (`--chat-log`) |
 | `crates/glb-undraco` | Converts the model gallery's Draco-compressed GLBs into ones Godot can load |
-| `simulator/` | The Godot replay viewer (`scripts/`, headless tests in `tests/`) |
+| `simulator/` | The Godot replay viewer (`scripts/`, headless tests in `tests/`, points rulesets in `rulesets/`) |
 | `docs/` | Design document, the OBS template and the EVE observer window layout |
 | `resouces/` | Demo match and OCR sample images |
-| `scripts/` | Build, test and README GIF scripts; the ScrimTrimmer bridge |
+| `scripts/` | Build, test and README GIF scripts; the ScrimTrimmer bridge; the ruleset importer |
 
 ### Run from source
 

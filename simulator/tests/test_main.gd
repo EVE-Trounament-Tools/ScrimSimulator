@@ -624,6 +624,7 @@ func test_short_name() -> void:
 
 func test_roster_lists_teams() -> void:
 	var m := _main()
+	m._set_broadcast_on(false)
 	assert_false(m.roster_panel.visible, "hidden until a match loads")
 	m.load_match(_match_csv())
 	assert_true(m.roster_panel.visible)
@@ -635,11 +636,13 @@ func test_roster_lists_teams() -> void:
 func test_broadcast_toggle() -> void:
 	var m := _main()
 	m.load_match(_match_csv())
-	assert_false(m.broadcast_panel.visible, "off by default")
-	m._set_broadcast_on(true)
-	assert_true(m.broadcast_panel.visible)
+	assert_true(m.broadcast_panel.visible, "on by default")
 	assert_false(m.roster_panel.visible)
 	assert_true(m.broadcast_button.button_pressed)
+	m._set_broadcast_on(false)
+	assert_false(Settings.get_value("display/broadcast_roster"))
+	m._set_broadcast_on(true)
+	assert_true(m.broadcast_panel.visible)
 	assert_true(Settings.get_value("display/broadcast_roster"))
 	assert_eq(m.broadcast_panel.rows.keys(), ["blue", "red"], "unknown pilots left out")
 	assert_eq(m.broadcast_panel.rows["red"].side, BroadcastRoster.Side.LEFT)
@@ -656,12 +659,54 @@ func test_broadcast_toggle() -> void:
 
 
 func test_broadcast_setting_survives_reload() -> void:
-	Settings.set_value("display/broadcast_roster", true)
+	Settings.set_value("display/broadcast_roster", false)
 	var m := _main()
-	assert_true(m.broadcast_button.button_pressed)
+	assert_false(m.broadcast_button.button_pressed)
 	m.load_match(_match_csv())
-	assert_true(m.broadcast_panel.visible)
-	assert_false(m.roster_panel.visible)
+	assert_false(m.broadcast_panel.visible)
+	assert_true(m.roster_panel.visible)
+
+
+## Two Abaddons each (40 points apiece) for blue (corner 0) and red (corner 7); blue's "b2" is
+## podded at 4 s, red's "r2" leaves the arena at 3 s.
+func _points_csv() -> String:
+	var rows := []
+	for t in 7:
+		rows.append(row(t, "b1", "Abaddon", on_line(0, 0.5)))
+		rows.append(row(t, "b2", "Abaddon" if t < 4 else "Capsule", on_line(0, 0.6)))
+		rows.append(row(t, "r1", "Abaddon", on_line(7, 0.5)))
+		rows.append(row(t, "r2", "Abaddon", on_line(7, 0.6) if t < 3 else C + X * 130000))
+	return write_csv(rows)
+
+
+func test_broadcast_points() -> void:
+	var m := _main()
+	m.load_match(MatchLibrary.add(_points_csv()))
+	assert_eq(m.ruleset_id, Ruleset.latest_id())
+	var L := BroadcastRoster.Side.LEFT  # red
+	var R := BroadcastRoster.Side.RIGHT  # blue
+	assert_eq(m.broadcast_panel.cell_text("b1", "pts"), "44", "two Abaddons inflate each other")
+	m._seek(0.0)
+	m._process(0.0)
+	# Each 88-point fleet hands the other 112 of the 200-point cap.
+	var start := m.score.score(MatchData.Team.RED, 0.0)
+	assert_eq(m.broadcast_panel.points_text(L), "%d" % start)
+	assert_eq(m.broadcast_panel.points_text(R), "%d" % m.score.score(MatchData.Team.BLUE, 0.0))
+	m._seek(6.0)
+	m._process(0.0)
+	assert_eq(m.broadcast_panel.points_text(L), "%d" % (start + 44), "red scores the podded b2")
+	assert_eq(m.broadcast_panel.points_text(R), "%d" % (start + 44), "blue scores r2 leaving the arena")
+
+
+func test_ruleset_saved_with_match() -> void:
+	var path := MatchLibrary.add(_points_csv())
+	MatchLibrary.save_meta(path, {"ruleset": "nope"})
+	var m := _main()
+	m.load_match(path)
+	assert_eq(m.ruleset_id, Ruleset.latest_id(), "unknown ruleset falls back to the newest")
+	assert_eq(m.ruleset_option.get_item_metadata(m.ruleset_option.selected), m.ruleset_id)
+	m._set_ruleset("ATXXII")
+	assert_eq(MatchLibrary.load_meta(path).ruleset, "ATXXII")
 
 
 ## Stationary blue (corner 0) and red (corner 7) with HP: red takes a hit at 3 s; blue's HP is

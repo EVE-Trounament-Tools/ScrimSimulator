@@ -111,3 +111,10 @@ func test_dead_row_greyed_out() -> void:
 	b.set_dead("a", false)
 	assert_eq(name.get_theme_color("font_color"), Color.RED)
 	assert_eq(b.rows["a"].button.modulate.a, 1.0)
+
+
+func test_set_points() -> void:
+	var b := _panel()
+	b.set_points(L, "123")
+	assert_eq(b.points_text(L), "123")
+	assert_eq(b.points_text(R), "0")

@@ -3,7 +3,8 @@ extends PanelContainer
 ## Tournament-broadcast style ship data: one team down each side, mirrored about a centre column
 ## with the match clock. Each row shows points, pilot, speed, shield/armor/hull bars, ship type
 ## and the electronic warfare on the ship (nearest the centre, at most `MAX_EWAR_ICONS`). Rows can
-## be highlighted while their ship takes damage. Points are a placeholder for now.
+## be highlighted while their ship takes damage. Points (team score, each ship's value) are set
+## by the caller.
 
 ## A row was clicked.
 signal row_pressed(pilot: String)
@@ -159,6 +160,10 @@ func team_text(side: int) -> String:
 
 func points_text(side: int) -> String:
 	return sides[side].points.text
+
+
+func set_points(side: int, text: String) -> void:
+	sides[side].points.text = text
 
 
 func clear() -> void:

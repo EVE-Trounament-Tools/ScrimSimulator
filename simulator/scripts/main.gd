@@ -103,6 +103,10 @@ var team_names := {}
 ## Gamelog file name -> pilot it belongs to, where the listener's name doesn't pick the right one
 ## (see `CombatLog.sync`); saved like `team_overrides`.
 var log_pilots := {}
+## Id of the `Ruleset` the match's points follow (default the newest); saved like `team_overrides`.
+var ruleset_id := ""
+## Team points under `ruleset_id` (null without a match or ruleset).
+var score: MatchScore
 ## What the open match's gamelogs say about each pilot (roster combat columns).
 var combat_stats := CombatStats.new()
 ## CSV pilot name -> display name, for every match (setting `names/pilots`).
@@ -175,6 +179,8 @@ var broadcast_button: Button
 var broadcast_on := false
 ## Highlight roster rows of ships taking damage (setting `display/damage_highlight`).
 var damage_button: Button
+## Picks `ruleset_id`; item metadata is the ruleset id.
+var ruleset_option: OptionButton
 var damage_setting: CheckBox
 var damage_on := false
 var info_panel: PanelContainer
@@ -283,6 +289,10 @@ func load_match(path: String) -> bool:
 		team_overrides = meta.get("teams", {})
 		team_names = meta.get("team_names", {})
 		log_pilots = meta.get("log_pilots", {})
+		ruleset_id = meta.get("ruleset", "")
+		if Ruleset.load_id(ruleset_id) == null:
+			ruleset_id = Ruleset.latest_id()
+		_select_ruleset_option()
 		debug.clear()
 		for w in breakdown_windows.duplicate():
 			w.queue_free()
@@ -392,7 +402,7 @@ func _apply_combat_stats() -> void:
 ## Saves this match's team swaps and names (and gamelog attributions), if it is in the library.
 func _save_meta() -> void:
 	if MatchLibrary.contains(match_path):
-		var meta := {"teams": team_overrides, "team_names": team_names}
+		var meta := {"teams": team_overrides, "team_names": team_names, "ruleset": ruleset_id}
 		if not log_pilots.is_empty():
 			meta.log_pilots = log_pilots
 		MatchLibrary.save_meta(match_path, meta)
@@ -1631,6 +1641,14 @@ func _build_ui() -> void:
 	row.add_child(damage_button)
 	_update_damage_controls()
 
+	ruleset_option = OptionButton.new()
+	ruleset_option.tooltip_text = "Ruleset the broadcast panel's points follow"
+	for id in Ruleset.available():
+		ruleset_option.add_item(Ruleset.load_id(id).name)
+		ruleset_option.set_item_metadata(ruleset_option.item_count - 1, id)
+	ruleset_option.item_selected.connect(func(i): _set_ruleset(ruleset_option.get_item_metadata(i)))
+	row.add_child(ruleset_option)
+
 	sde_label = Label.new()
 	sde_label.modulate = Color(1, 1, 1, 0.6)
 	row.add_child(sde_label)
@@ -1977,7 +1995,44 @@ func _refresh_roster() -> void:
 		button.tooltip_text = "Centre the camera on %s" % _pilot_name(pilot)
 		broadcast_panel.set_cell(pilot, "ship", data.tracks[pilot][0].ship_type)
 		broadcast_panel.set_cell(pilot, "name", pilot_names.get(pilot, _short_name(pilot)))
+	_refresh_score()
 	_update_roster_cells()
+
+
+## Recomputes `score` for the current teams and `ruleset_id`, and shows each ship's points.
+func _refresh_score() -> void:
+	var rules := Ruleset.load_id(ruleset_id)
+	score = MatchScore.new(data, rules) if data != null and rules != null else null
+	for pilot in broadcast_panel.rows:
+		if score == null or not score.values.has(pilot):
+			broadcast_panel.set_cell(pilot, "pts", "—")
+			continue
+		var ship: String = score.fielded[pilot]
+		broadcast_panel.set_cell(pilot, "pts", "%d" % score.values[pilot])
+		var label: Label = broadcast_panel.rows[pilot].labels.pts
+		label.mouse_filter = Control.MOUSE_FILTER_PASS
+		if not rules.knows(ship):
+			label.tooltip_text = "%s isn't in %s: 0 points" % [ship, rules.name]
+		else:
+			var extra: int = score.values[pilot] - rules.base_points(ship)
+			label.tooltip_text = "%s: %d points%s (%s)" % [ship, rules.base_points(ship),
+					" + %d inflation" % extra if extra > 0 else "", rules.name]
+
+
+func _set_ruleset(id: String) -> void:
+	ruleset_id = id
+	_select_ruleset_option()
+	_save_meta()
+	_refresh_score()
+	_update_roster_cells()
+
+
+func _select_ruleset_option() -> void:
+	if ruleset_option == null:
+		return
+	for i in ruleset_option.item_count:
+		if ruleset_option.get_item_metadata(i) == ruleset_id:
+			ruleset_option.select(i)
 
 
 ## Refreshes each roster row's live columns: current hull, speed, distance from centre, HP, and the
@@ -2012,6 +2067,9 @@ func _update_roster_cells() -> void:
 		if broadcast_panel.rows.has(pilot):
 			_update_broadcast_row(pilot, dead, hp, hit)
 	broadcast_panel.set_clock(_fmt_time(time))
+	for side in [BroadcastRoster.Side.LEFT, BroadcastRoster.Side.RIGHT]:
+		var team := MatchData.Team.RED if side == BroadcastRoster.Side.LEFT else MatchData.Team.BLUE
+		broadcast_panel.set_points(side, "%d" % score.score(team, time) if score != null else "0")
 
 
 ## Copies `pilot`'s roster row (ship, speed, `hp`, taking damage: `hit`) into the broadcast panel,
