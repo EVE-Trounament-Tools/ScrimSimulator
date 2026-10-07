@@ -5,6 +5,23 @@
 - the ~/Videos/AG7/2026-10-04 05-58-36.mkv: finding the match with ScrimTrimmer step takes far too much time compared to triming a normal gamepaly vid with the scrimTrimmer
 - hp tracking will break with even a tiny change to the setup, need a way to correct for this or a more robust way to calculate it from the image data
 
+## CI
+- Godot segfaults intermittently in the headless test suite on small machines, during
+  `test_main::test_ship_menu_damage_breakdown_windows` (the first `damage_button.pressed` opens a
+  `DamageBreakdown` window). It shows up as exit code 134/139 in the test step of `test.yml` (every
+  tag since v1.0.1) and `deploy-web.yml` (which now retries the tests up to 3 times on a crash).
+  - Reproduce: `taskset -c 0,1 godot --headless --path simulator --script res://tests/run_tests.gd -- test_main`
+    (prefix `stdbuf -o0`, or output to a file is buffered and the last lines before the crash are lost).
+    Crashes in roughly 1 run of 2–3 when limited to 2 CPUs; never seen with all cores.
+  - Tried:
+    - The test alone, with every other `test_main` test disabled: never crashes (0/8).
+    - Every test up to and including it, the later ones disabled: no crash in 8 runs.
+    - A standalone loop opening and closing 300 `DamageBreakdown` windows (and plain `Window`s): no crash.
+    - Godot 4.6.3 instead of 4.6: still crashes (5/10).
+  - The official Linux builds have no debug symbols, so the backtrace is just addresses. Next step: build
+    Godot 4.6 from source with `debug_symbols=yes` to see where it crashes, then work around it or
+    report it upstream.
+
 ## Test data (resouces)
 
 
