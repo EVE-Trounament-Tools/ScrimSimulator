@@ -374,6 +374,8 @@ func _show_menu() -> void:
 
 
 func _on_menu_match_chosen(path: String) -> void:
+	if OS.has_feature("web") and not await WebLibrary.fetch_match(path):
+		return
 	if not load_match(path):
 		menu.show_error("Failed to load %s — is it a scrim-positions CSV?" % path.get_file())
 

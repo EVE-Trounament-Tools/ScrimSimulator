@@ -316,6 +316,12 @@ git tag -a v0.2.0 -m v0.2.0 && git push origin v0.2.0
 `.github/workflows/test.yml` runs both test suites for the tag and fails if the commit isn't on
 `master`.
 
+## Hosting the simulator as a website
+
+`web/` holds a Cloudflare Worker that serves the simulator's web build to whitelisted EVE
+characters, with a shared match library, per-character settings and server-side ship models.
+It is deployed on every version tag; see [web/README.md](web/README.md) for setup.
+
 ## Credits
 
 - Ship sizes: CCP's Static Data Export. Bracket icons: CCP's Image Export Collection. EWAR

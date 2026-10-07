@@ -1,0 +1,26 @@
+# Scrim Simulator website: EVE SSO login, the shared match library, per-character settings, the
+# server-side asset mirror and the Godot web build, all behind one Worker (see web/README.md).
+name = "scrim-simulator"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "scrim-simulator"
+# Set to the id printed by `wrangler d1 create scrim-simulator`.
+database_id = "c6a38e43-3765-4c01-abd2-999e54bbfdc7"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "scrim-simulator"
+
+[vars]
+# Largest single upload (audio files are the big ones). Free-plan Workers accept up to 100 MB.
+MAX_UPLOAD_BYTES = "100000000"
+
+# Secrets (wrangler secret put <NAME>; locally in .dev.vars):
+#   EVE_CLIENT_ID, EVE_CLIENT_SECRET  EVE developer application (callback https://<host>/auth/callback)
+#   ADMIN_CHAR_IDS                    comma-separated character IDs that may manage the whitelist
+# Local development only (.dev.vars, never set in production):
+#   DEV_LOGIN_CHAR                    "<id>:<name>" — /auth/dev logs in as this character on localhost

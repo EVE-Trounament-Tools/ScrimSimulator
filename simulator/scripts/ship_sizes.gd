@@ -44,6 +44,8 @@ func _ready() -> void:
 
 ## `sde/` next to the project when run from source, next to the executable when exported.
 static func data_dir() -> String:
+	if OS.has_feature("web"):
+		return "user://sde"
 	if OS.has_feature("editor"):
 		return ProjectSettings.globalize_path("res://sde")
 	return OS.get_executable_path().get_base_dir().path_join("sde")
@@ -86,6 +88,9 @@ func ship(ship_type: String) -> Dictionary:
 
 ## Startup entry point: load what's cached, then prompt for or check for updates.
 func start(auto_update: bool) -> void:
+	if OS.has_feature("web"):
+		WebAssets.start_sizes(self)
+		return
 	if not is_loaded():
 		needs_download.emit("Ship sizes come from EVE's Static Data Export, which isn't downloaded yet.")
 	elif auto_update:
@@ -110,6 +115,9 @@ func _set_status(text: String) -> void:
 # --- full download -------------------------------------------------------------
 
 func full_download() -> void:
+	if OS.has_feature("web"):
+		WebAssets.start_sizes(self)
+		return
 	if busy:
 		return
 	busy = true
@@ -207,6 +215,9 @@ func _finish_parse(out: Dictionary) -> void:
 
 ## Brings the cache up to the latest SDE build using the per-build change lists and ESI.
 func check_update() -> void:
+	if OS.has_feature("web"):
+		WebAssets.start_sizes(self)
+		return
 	if busy or not is_loaded():
 		return
 	busy = true

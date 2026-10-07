@@ -3,9 +3,11 @@
 # match) and, as a separate download, the scrim-positions OCR tool.
 #
 #   scripts/build.sh [linux|windows|all]    (default: all)
+#   scripts/build.sh web                    (the website's build; not part of all)
 #
 # Output: dist/scrim-simulator-<version>-<platform>-x86_64.zip
 #         dist/scrim-positions-<version>-<platform>-x86_64.zip
+#         dist/web/ (web: the Godot web export the website serves, see web/README.md)
 # Runs on Ubuntu; Windows is cross-compiled (needs `mingw-w64`). Godot and its export templates
 # are downloaded into .cache/ / the user's Godot data dir if not already present. Override the
 # Godot binary with $GODOT.
@@ -28,8 +30,8 @@ cd "$ROOT"
 
 TARGET="${1:-all}"
 case "$TARGET" in
-    linux|windows|all) ;;
-    *) echo "usage: $0 [linux|windows|all]" >&2; exit 2 ;;
+    linux|windows|all|web) ;;
+    *) echo "usage: $0 [linux|windows|all|web]" >&2; exit 2 ;;
 esac
 
 VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo "v0.0.0")"
@@ -187,8 +189,17 @@ build_windows() {
     package_ocr windows "target/$WIN_TARGET/release/scrim-positions.exe" "target/$WIN_TARGET/release/scrim-positions-gui.exe"
 }
 
+build_web() {
+    log "exporting simulator (web)"
+    rm -rf simulator/export/web "$DIST/web"
+    export_simulator "Web" "export/web/index.html"
+    mkdir -p "$DIST/web"
+    cp -r simulator/export/web/. "$DIST/web/"
+}
+
 ensure_godot
 mkdir -p "$DIST"
+[[ "$TARGET" == web ]] && build_web
 [[ "$TARGET" == linux || "$TARGET" == all ]] && build_linux
 [[ "$TARGET" == windows || "$TARGET" == all ]] && build_windows
 log "done ($VERSION)"

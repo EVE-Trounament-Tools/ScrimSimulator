@@ -1,0 +1,124 @@
+name: deploy-web
+
+# Publishes the website (web/README.md) for every version tag on master: the Godot web build goes
+# to R2 under builds/<tag>/, the Worker and its D1 migrations are deployed, and the site switches
+# to the new build. Needs the CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID secrets and the
+# D1_DATABASE_ID variable; without them (e.g. on a fork) the deploy job is skipped.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency: deploy-web
+
+env:
+  GODOT_TAG: 4.6-stable
+
+jobs:
+  master:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check tagged commit is on master
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          git fetch --no-tags origin master
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "::error::${GITHUB_REF_NAME} ($GITHUB_SHA) is not on master"
+            exit 1
+          fi
+
+  build:
+    needs: master
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git describe needs tags
+
+      - name: Cache Godot and export templates
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/godot
+            ~/.local/share/godot/export_templates
+          key: godot-4.6-stable
+
+      # Downloads Godot and its export templates into the cache if missing.
+      - name: Build web export
+        run: scripts/build.sh web
+
+      - name: Simulator tests
+        run: GODOT="$PWD/.cache/godot/Godot_v${GODOT_TAG}_linux.x86_64" scripts/test.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/worker/package-lock.json
+
+      - name: Worker tests
+        working-directory: web/worker
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: dist/web/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      D1_DATABASE_ID: ${{ vars.D1_DATABASE_ID }}
+    steps:
+      - name: Check deploy settings
+        id: settings
+        run: |
+          if [[ -z "$CLOUDFLARE_API_TOKEN" || -z "$CLOUDFLARE_ACCOUNT_ID" || -z "$D1_DATABASE_ID" ]]; then
+            echo "::notice::Cloudflare secrets or D1_DATABASE_ID not set; not deploying"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.settings.outputs.ok == 'true'
+
+      - uses: actions/download-artifact@v4
+        if: steps.settings.outputs.ok == 'true'
+        with:
+          name: web
+          path: dist/web
+
+      - uses: actions/setup-node@v4
+        if: steps.settings.outputs.ok == 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/worker/package-lock.json
+
+      - name: Deploy
+        if: steps.settings.outputs.ok == 'true'
+        working-directory: web/worker
+        env:
+          BUILD: ${{ github.ref_name }}
+        run: |
+          npm ci
+          sed -i "s/^database_id = .*/database_id = \"$D1_DATABASE_ID\"/" wrangler.toml
+          for f in ../../dist/web/*; do
+            npx wrangler r2 object put "scrim-simulator/builds/$BUILD/$(basename "$f")" --remote --file "$f"
+          done
+          npx wrangler d1 migrations apply DB --remote
+          npx wrangler deploy
+          # Switch over last, once the build and the Worker serving it are both in place.
+          npx wrangler d1 execute DB --remote --command \
+            "INSERT INTO kv (key, value) VALUES ('current_build', '$BUILD') ON CONFLICT (key) DO UPDATE SET value = excluded.value"

@@ -58,10 +58,15 @@ static func set_value(key: String, value: Variant) -> void:
 	var err := _cfg.save(path)
 	if err != OK:
 		push_error("Cannot save %s: %s" % [path, error_string(err)])
+	if OS.has_feature("web"):
+		WebSettings.changed(_cfg)
 
 
 static func _load() -> void:
 	if _cfg != null:
 		return
 	_cfg = ConfigFile.new()
+	if OS.has_feature("web"):
+		WebSettings.load_into(_cfg)
+		return
 	_cfg.load(path)  # Missing file is fine: defaults apply.

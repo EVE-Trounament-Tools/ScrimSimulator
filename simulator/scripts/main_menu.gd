@@ -226,6 +226,8 @@ func _init() -> void:
 	var blank := Image.create_empty(img.get_width(), img.get_height(), false, Image.FORMAT_RGBA8)
 	blank_icon = ImageTexture.create_from_image(blank)
 
+	if OS.has_feature("web"):
+		WebLibrary.attach(self)
 	refresh()
 
 
@@ -263,6 +265,8 @@ func refresh() -> void:
 			_select(matches[0].get_metadata(0))
 	empty_label.visible = entries.is_empty() and folders.is_empty()
 	_update_buttons()
+	if OS.has_feature("web"):
+		WebLibrary.local_changed()
 
 
 ## Selects the item whose metadata is `meta` (by its path or folder), revealing it; false if

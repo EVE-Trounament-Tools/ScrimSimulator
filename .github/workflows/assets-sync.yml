@@ -1,0 +1,79 @@
+name: assets-sync
+
+# Keeps the website's asset mirror (served from /assets/, see web/README.md) up to date: runs the
+# simulator's own SDE and ship model downloaders once, here, via tools/web_assets.gd, and copies
+# what changed to R2. simulator/sde/ is kept in the Actions cache between runs, so only new
+# SDE builds and changed models are downloaded again. Needs the CLOUDFLARE_ACCOUNT_ID,
+# R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY secrets (an R2 API token with write access).
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1" # Mondays
+
+concurrency: assets-sync
+
+env:
+  GODOT_TAG: 4.6-stable
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build glb-undraco
+        run: cargo build --release -p glb-undraco
+
+      - name: Cache Godot
+        id: godot-cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/godot
+          key: godot-${{ env.GODOT_TAG }}-linux
+
+      - name: Download Godot
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .cache/godot
+          curl -fL -o .cache/godot/godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_TAG}/Godot_v${GODOT_TAG}_linux.x86_64.zip"
+          unzip -o -q .cache/godot/godot.zip -d .cache/godot
+          rm .cache/godot/godot.zip
+
+      - name: Restore SDE and models
+        uses: actions/cache/restore@v4
+        with:
+          path: simulator/sde
+          key: sde-${{ github.run_id }}
+          restore-keys: sde-
+
+      - name: Build mirror
+        run: |
+          GODOT="$PWD/.cache/godot/Godot_v${GODOT_TAG}_linux.x86_64"
+          "$GODOT" --headless --path simulator --import >/dev/null 2>&1 || true
+          "$GODOT" --headless --path simulator -s tools/web_assets.gd -- "$PWD/mirror"
+          du -sh mirror
+
+      - name: Save SDE and models
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: simulator/sde
+          key: sde-${{ github.run_id }}
+
+      - name: Upload to R2
+        env:
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+        run: |
+          sudo apt-get update && sudo apt-get install -y rclone
+          # --checksum: only files whose contents changed are sent.
+          rclone copy mirror r2:scrim-simulator/assets --checksum --transfers 8 --stats-one-line -v

@@ -120,6 +120,9 @@ func has_model(type_id: int) -> bool:
 
 ## Startup entry point; does nothing unless ship models are switched on.
 func start(enabled: bool, auto_update: bool) -> void:
+	if OS.has_feature("web"):
+		WebAssets.start_assets(self, enabled)
+		return
 	if not enabled:
 		_set_status(_summary())
 	elif not is_loaded():
@@ -479,6 +482,8 @@ func _model_worker(queue: Array, state: Dictionary, exe: String) -> void:
 
 ## Runs `glb-undraco` on a thread so the frame loop keeps going. True on success.
 func _decode(exe: String, src: String, dst: String) -> bool:
+	if OS.has_feature("web"):  # The site's mirror serves models already decoded.
+		return DirAccess.rename_absolute(src, dst) == OK
 	var t := Thread.new()
 	t.start(func(): return OS.execute(exe, [src, dst], [], true))
 	while t.is_alive():
@@ -489,6 +494,8 @@ func _decode(exe: String, src: String, dst: String) -> bool:
 ## The `glb-undraco` helper: next to the executable when exported, the cargo build output when
 ## run from source. "" if it can't be found.
 static func undraco_path() -> String:
+	if OS.has_feature("web"):  # Not needed: see `_decode`.
+		return "web"
 	var exe := "glb-undraco" + (".exe" if OS.get_name() == "Windows" else "")
 	var candidates := []
 	if OS.has_feature("editor"):
