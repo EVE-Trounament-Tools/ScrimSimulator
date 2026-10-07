@@ -83,6 +83,10 @@ remembered for next time. It looks for `scrim-positions` and `scene.json` next t
 
 The CSV has one row per pilot per second:
 `t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m,shield,armor,hull`.
+Positions are a smoothed track, not each second's distances solved on their own: the overview
+rounds distances to whole km, which near the observers' plane would throw a ship many km about.
+`residual_m` is how far, on average, the three distances at the smoothed position differ from
+what the overview showed (around 0.2 km is normal).
 `shield`, `armor` and `hull` are the pilot's remaining HP (0–1), read off the rings of the locked
 targets the OBS template records; they're blank while no observer has the pilot locked. Whose ring
 is whose comes from its label, read with Tesseract (on `PATH`, or `--tesseract`).
@@ -107,6 +111,10 @@ The saved `match.mp3` covers the same window, so it starts with the data.
 - More than one CD→WF in the video: pick one with `--match N`, or process each with `--match all`
   into its own `match_01.positions.csv`, `match_01.mp3`, `match_01.positions.logs/`, … (the GUI
   does this).
+  The observers must stay put for the whole video: which cube corners they sit on is worked out
+  once from all its matches, so a match whose start alone can't tell (everyone far from every
+  observer) uses the others' evidence. Record observers that move to new corners in separate
+  videos.
 - `--t0 HH:MM:SS` gives the EVE time at video second 0 yourself, skipping the chat OCR.
 - `--tournament` uses the tournament system messages ("30 seconds until match start",
   "Match completed!") instead.
@@ -203,8 +211,21 @@ and several can be open at once, one per pilot.
 
 Added matches are copied into the simulator's own library
 (`~/.local/share/godot/app_userdata/simulator/matches` on Linux), so they stay available if you
-move or delete the original file. Team swaps (⇄ in the roster) and team names (double-click a
-team's heading) are saved per match. Pilot renames (right-click a pilot → **Rename pilot…**) apply
+move or delete the original file.
+
+Each top-level library folder is a season. Pilots fly for one team per season, so the simulator
+keeps a team list for each season (`pilot-teams.db.json` in the folder). When a match is added,
+its pilots join the team that most of their side's known pilots are on. If none of a side's
+pilots are known yet, they form a new team with a temporary name ("Team 3"). Once a pilot is on
+a team, they stay on it: opening any match of the season puts them on their team's side, even if
+they started at the wrong corner. A team swap (⇄ in the roster) moves the pilot to that team for
+the whole season. Renaming a team (double-click its heading) renames it in every match of the
+season; an empty name gives back the temporary name. The team lists are rebuilt from all matches
+the first time a new version runs, and swaps and names are kept. To get the old behaviour, turn
+off **Keep pilots on their season's team** in Settings. Team swaps and team names are then saved
+for that match only.
+
+Pilot renames (right-click a pilot → **Rename pilot…**) apply
 in every match, and an empty name restores the original.
 
 ![Orbiting the camera while a match plays](docs/media/orbit.gif)
@@ -319,8 +340,88 @@ git tag -a v0.2.0 -m v0.2.0 && git push origin v0.2.0
 ## Hosting the simulator as a website
 
 `web/` holds a Cloudflare Worker that serves the simulator's web build to whitelisted EVE
-characters, with a shared match library, per-character settings and server-side ship models.
-It is deployed on every version tag; see [web/README.md](web/README.md) for setup.
+characters. It provides:
+- a match library shared by everyone who can log in
+- settings saved per character
+- ship models prepared on the server, so each browser downloads only the hulls of the match it
+  opens
+
+It is deployed on every version tag. [web/README.md](web/README.md) explains how it works and
+how to run it locally.
+
+### Deploying your own copy
+
+Everything runs on Cloudflare's free tier. You need:
+- a GitHub fork of this repository
+- a Cloudflare account
+- an EVE Online account
+- Node.js 22, to run `wrangler`, Cloudflare's command-line tool
+
+1. **Cloudflare dashboard** (<https://dash.cloudflare.com>):
+   - Open **Workers & Pages** once and pick your `workers.dev` subdomain.
+   - Open **R2 Object Storage** and enable it. Cloudflare asks for a payment method even on the
+     free tier, but nothing is charged under 10 GB.
+2. **Log in wrangler and create the storage.** In a clone of your fork:
+   ```sh
+   cd web/worker
+   npm ci
+   npx wrangler login
+   npx wrangler d1 create scrim-simulator          # prints a database_id
+   npx wrangler r2 bucket create scrim-simulator
+   ```
+   Put your `database_id` in `web/worker/wrangler.toml`, replacing the one there. Then create
+   the tables and do a first deploy:
+   ```sh
+   npx wrangler d1 migrations apply DB --remote
+   npx wrangler deploy                             # prints https://scrim-simulator.<subdomain>.workers.dev
+   ```
+3. **EVE application.** Create one at <https://developers.eveonline.com/applications>:
+   - Choose authentication only. The site needs no scopes.
+   - Set the callback URL to `https://scrim-simulator.<subdomain>.workers.dev/auth/callback`, or
+     use your custom domain if you've added one.
+
+   Keep the client secret private. If it ever ends up somewhere public, regenerate it.
+4. **Worker secrets.** Each command prompts for its value:
+   ```sh
+   npx wrangler secret put EVE_CLIENT_ID
+   npx wrangler secret put EVE_CLIENT_SECRET
+   npx wrangler secret put ADMIN_CHAR_IDS          # your character ID(s), comma-separated
+   ```
+   `ADMIN_CHAR_IDS` (note the S) lists the characters that can manage the whitelist. They can
+   always log in. The whitelist starts empty, so without this nobody can log in.
+5. **GitHub settings.** In your fork, go to Settings → Secrets and variables → **Actions**.
+   Use repository secrets and variables, not environment or Codespaces ones.
+
+   | Name | Type | Value |
+   |---|---|---|
+   | `CLOUDFLARE_API_TOKEN` | secret | Create at dash → My Profile → API Tokens → Custom token, with account permissions *Workers Scripts: Edit*, *D1: Edit* and *Workers R2 Storage: Edit* |
+   | `CLOUDFLARE_ACCOUNT_ID` | secret | Shown by `npx wrangler whoami` |
+   | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | secrets | Create at R2 → Manage API tokens, with *Object Read & Write* on the `scrim-simulator` bucket |
+   | `D1_DATABASE_ID` | **variable** | The `database_id` from step 2 |
+6. **Fill the asset mirror.** In Actions → **assets-sync**, choose **Run workflow**:
+   - It downloads the SDE and every ship model and decodes them, which takes a while the first
+     time.
+   - After that it runs every Monday and only fetches what changed.
+   - The workflow has to be on your default branch before it shows up in the list.
+7. **Publish a build.** Push a version tag on `master`:
+   ```sh
+   git tag v1.0.0 && git push origin v1.0.0
+   ```
+   - **deploy-web** runs the tests, builds the web export, uploads it and switches the site to
+     it.
+   - Every later `v*` tag on `master` does the same.
+   - Until the first build is published, the site shows "Not deployed yet".
+8. **Let people in.** Log in with an admin character and open `/admin`. Add characters or whole
+   alliances by name or ID.
+
+Notes:
+- **Ownership:** only a match's uploader or an admin can rename, move, replace or remove it.
+  Anyone allowed in can add matches, gamelogs and team edits.
+- **Upload limit:** a single upload can be at most 100 MB (the free plan's request limit).
+  Removed files stay in R2.
+- **Flaky CI:** the Godot test suite sometimes crashes on GitHub's small runners (see
+  `TODO.md`). **deploy-web** retries the tests when Godot crashes. If a run still fails, use
+  **Re-run failed jobs**.
 
 ## Credits
 

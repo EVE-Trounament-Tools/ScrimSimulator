@@ -7,19 +7,19 @@ const X := Vector3.RIGHT
 const HEADER := "t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m,eve_time"
 
 ## Real lines (timestamp and kind stripped), one per message shape.
-const DAMAGE_OUT := "<color=0xff00ffff><b>204</b> <color=0x77ffffff><font size=10>to</font> <b><color=0xffffffff>sorrel17[ALPHA](Magus)</b><font size=10><color=0x77ffffff> - Test Railgun - Glances Off"
-const DAMAGE_IN := "<color=0xffcc0000><b>57</b> <color=0x77ffffff><font size=10>from</font> <b><color=0xffffffff>Wenna Torb[ALPHA](Ashimmu)</b><font size=10><color=0x77ffffff> - Test Drone B - Penetrates"
-const SCRAM_THIRD := "<color=0xffffffff><b>Warp scramble attempt</b> <color=0x77ffffff><font size=10>from</font> <color=0xffffffff><b><font size=12><color=0xFFFFFFFF><b>Vexor Navy Issue</b></color></font><font size=11> [BRAVO]</font> <font size=11>[Narrow NineHawks] -</font></b> <color=0x77ffffff><font size=10>to <b><color=0xffffffff></font><font size=12><color=0xFFFFFFFF><b>Loki</b></color></font><font size=11> [ALPHA]</font> <font size=11>[Kelto Ruvan] -</font>"
-const SCRAM_OUT := "<color=0xffffffff><b>Warp scramble attempt</b> <color=0x77ffffff><font size=10>from</font> <color=0xffffffff><b>you</b> <color=0x77ffffff><font size=10>to <b><color=0xffffffff></font><font size=12><color=0xFFFFFFFF><b>Loki</b></color></font> <font size=11>[Kelto Ruvan] -</font>"
-const NEUT_IN := "<color=0xffe57f7f><b>94 GJ</b><color=0x77ffffff><font size=10> energy neutralized </font><b><color=0xffffffff><font size=12><color=0xFFFFFFFF><b>Ashimmu</b></color></font> <font size=11>[Wenna Torb] -</font></b><color=0x77ffffff><font size=10> - Small Energy Neutralizer II</font>"
-const NEUT_OUT := "<color=0xff7fffff><b>94 GJ</b><color=0x77ffffff><font size=10> energy neutralized </font><b><color=0xffffffff><font size=12><color=0xFFFFFFFF><b>Ashimmu</b></color></font> <font size=11>[Wenna Torb] -</font></b><color=0x77ffffff><font size=10> - Heavy Energy Neutralizer II</font>"
-const NOS_IN := "<color=0xffe57f7f><b>-3 GJ</b><color=0x77ffffff><font size=10> energy drained to </font><b><color=0xffffffff><font size=12><color=0xFFFFFFFF><b>Ashimmu</b></color></font> <font size=11>[Kelto Ruvan] -</font></b><color=0x77ffffff><font size=10> - Medium Energy Nosferatu II</font>"
-const NOS_OUT := "<color=0xff7fffff><b>+33 GJ</b><color=0x77ffffff><font size=10> energy drained from </font><b><color=0xffffffff><font size=12><color=0xFFFFFFFF><b>Oneiros</b></color></font> </b><color=0x77ffffff><font size=10> - Medium Compact Energy Nosferatu</font>"
+const DAMAGE_OUT := "<color=0xff00ffff><b>204</b> <color=0x77ffffff><font size=10>to</font> <b><color=0xffffffff>sorrel17[ALPHA](Endurance)</b><font size=10><color=0x77ffffff> - Test Railgun - Glances Off"
+const DAMAGE_IN := "<color=0xffcc0000><b>57</b> <color=0x77ffffff><font size=10>from</font> <b><color=0xffffffff>Wenna Torb[ALPHA](Covetor)</b><font size=10><color=0x77ffffff> - Test Drone B - Penetrates"
+const SCRAM_THIRD := "<color=0xffffffff><b>Warp scramble attempt</b> <color=0x77ffffff><font size=10>from</font> <color=0xffffffff><b><font size=12><color=0xFFFFFFFF><b>Retriever</b></color></font><font size=11> [BRAVO]</font> <font size=11>[Narrow NineHawks] -</font></b> <color=0x77ffffff><font size=10>to <b><color=0xffffffff></font><font size=12><color=0xFFFFFFFF><b>Hulk</b></color></font><font size=11> [ALPHA]</font> <font size=11>[Kelto Ruvan] -</font>"
+const SCRAM_OUT := "<color=0xffffffff><b>Warp scramble attempt</b> <color=0x77ffffff><font size=10>from</font> <color=0xffffffff><b>you</b> <color=0x77ffffff><font size=10>to <b><color=0xffffffff></font><font size=12><color=0xFFFFFFFF><b>Hulk</b></color></font> <font size=11>[Kelto Ruvan] -</font>"
+const NEUT_IN := "<color=0xffe57f7f><b>94 GJ</b><color=0x77ffffff><font size=10> energy neutralized </font><b><color=0xffffffff><font size=12><color=0xFFFFFFFF><b>Covetor</b></color></font> <font size=11>[Wenna Torb] -</font></b><color=0x77ffffff><font size=10> - Small Energy Neutralizer II</font>"
+const NEUT_OUT := "<color=0xff7fffff><b>94 GJ</b><color=0x77ffffff><font size=10> energy neutralized </font><b><color=0xffffffff><font size=12><color=0xFFFFFFFF><b>Covetor</b></color></font> <font size=11>[Wenna Torb] -</font></b><color=0x77ffffff><font size=10> - Heavy Energy Neutralizer II</font>"
+const NOS_IN := "<color=0xffe57f7f><b>-3 GJ</b><color=0x77ffffff><font size=10> energy drained to </font><b><color=0xffffffff><font size=12><color=0xFFFFFFFF><b>Covetor</b></color></font> <font size=11>[Kelto Ruvan] -</font></b><color=0x77ffffff><font size=10> - Medium Energy Nosferatu II</font>"
+const NOS_OUT := "<color=0xff7fffff><b>+33 GJ</b><color=0x77ffffff><font size=10> energy drained from </font><b><color=0xffffffff><font size=12><color=0xFFFFFFFF><b>Orca</b></color></font> </b><color=0x77ffffff><font size=10> - Medium Compact Energy Nosferatu</font>"
 const REP_IN := "<color=0xffccff66><b>15</b><color=0x77ffffff><font size=10> remote armor repaired by </font><b><color=0xffffffff><font size=12><color=0xFFFFFFFF><b>Light Repair Drone</b></color></font> <font size=11>[Light Repair Drone] -</font></b><color=0x77ffffff><font size=10> - Light Repair Drone</font>"
-const JAM_IN := "<color=0x77ffffff><font size=10>You're</font> <color=0xffffffff><b>jammed</b> <color=0x77ffffff><font size=10>by</font> <color=0xffffffff><b><font size=12><color=0xFFFFFFFF><b>Falcon</b></color></font> </b><color=0x77ffffff><font size=10> - Radar ECM</font>"
-const JAM_OUT := "<color=0xffffffff><b><font size=12><color=0xFFFFFFFF><b>Huginn</b></color></font> <font size=11>[Kelto Ruvan] -</font> jammed</b><color=0x77ffffff><font size=10> - Ladar ECM</font>"
-const JAM_OUT_NO_PILOT := "<color=0xffffffff><b><font size=12><color=0xFFFFFFFF><b>Pontifex</b></color></font>  jammed</b><color=0x77ffffff><font size=10> - Gravimetric ECM</font>"
-const REP_OUT := "<color=0xffccff66><b>488</b><color=0x77ffffff><font size=10> remote shield boosted to </font><b><color=0xffffffff><font size=12><color=0xFFFFFFFF><b>Scythe</b></color></font> </b><color=0x77ffffff><font size=10> - Medium Remote Shield Booster</font>"
+const JAM_IN := "<color=0x77ffffff><font size=10>You're</font> <color=0xffffffff><b>jammed</b> <color=0x77ffffff><font size=10>by</font> <color=0xffffffff><b><font size=12><color=0xFFFFFFFF><b>Prospect</b></color></font> </b><color=0x77ffffff><font size=10> - Radar ECM</font>"
+const JAM_OUT := "<color=0xffffffff><b><font size=12><color=0xFFFFFFFF><b>Mackinaw</b></color></font> <font size=11>[Kelto Ruvan] -</font> jammed</b><color=0x77ffffff><font size=10> - Ladar ECM</font>"
+const JAM_OUT_NO_PILOT := "<color=0xffffffff><b><font size=12><color=0xFFFFFFFF><b>Porpoise</b></color></font>  jammed</b><color=0x77ffffff><font size=10> - Gravimetric ECM</font>"
+const REP_OUT := "<color=0xffccff66><b>488</b><color=0x77ffffff><font size=10> remote shield boosted to </font><b><color=0xffffffff><font size=12><color=0xFFFFFFFF><b>Procurer</b></color></font> </b><color=0x77ffffff><font size=10> - Medium Remote Shield Booster</font>"
 
 
 func _log_text(lines: Array, listener := "Halvard Ostbergte") -> String:
@@ -45,8 +45,8 @@ func _match() -> MatchData:
 	var rows := []
 	for t in range(0, 12, 2):
 		var eve := "2026-10-03T14:03:%02d.000Z" % (14 + t)
-		var a := row(t, "Halvard Ostberg", "Deimos", C + X * (0.0 if t < 4 else 1000.0 * t))
-		var b := row(t, "Wenna Torb", "Ashimmu", C - X * 5000.0)
+		var a := row(t, "Halvard Ostberg", "Skiff", C + X * (0.0 if t < 4 else 1000.0 * t))
+		var b := row(t, "Wenna Torb", "Covetor", C - X * 5000.0)
 		rows.append(a + [eve])
 		rows.append(b + [eve])
 	return MatchData.load_csv(write_csv(rows, HEADER))
@@ -60,17 +60,17 @@ func test_damage_out() -> void:
 	assert_eq(e.amount, 204.0)
 	assert_eq(e.source, "", "the listener")
 	assert_eq(e.target, "sorrel17")
-	assert_eq(e.target_ship, "Magus")
+	assert_eq(e.target_ship, "Endurance")
 	assert_eq(e.weapon, "Test Railgun")
 	assert_eq(e.quality, "Glances Off")
-	assert_eq(e.text, "204 to sorrel17[ALPHA](Magus) - Test Railgun - Glances Off")
+	assert_eq(e.text, "204 to sorrel17[ALPHA](Endurance) - Test Railgun - Glances Off")
 
 
 func test_damage_in() -> void:
 	var e := CombatLog.parse_line(DAMAGE_IN)
 	assert_eq(e.kind, K.DAMAGE)
 	assert_eq(e.source, "Wenna Torb")
-	assert_eq(e.source_ship, "Ashimmu")
+	assert_eq(e.source_ship, "Covetor")
 	assert_eq(e.target, "")
 	assert_eq(e.weapon, "Test Drone B")
 	assert_eq(e.quality, "Penetrates")
@@ -93,10 +93,10 @@ func test_scram() -> void:
 	var e := CombatLog.parse_line(SCRAM_THIRD)
 	assert_eq(e.kind, K.SCRAM)
 	assert_eq(e.weapon, "Warp scramble")
-	assert_eq([e.source, e.source_ship], ["Narrow NineHawks", "Vexor Navy Issue"])
-	assert_eq([e.target, e.target_ship], ["Kelto Ruvan", "Loki"])
+	assert_eq([e.source, e.source_ship], ["Narrow NineHawks", "Retriever"])
+	assert_eq([e.target, e.target_ship], ["Kelto Ruvan", "Hulk"])
 	e = CombatLog.parse_line(SCRAM_OUT)
-	assert_eq([e.source, e.target, e.target_ship], ["", "Kelto Ruvan", "Loki"])
+	assert_eq([e.source, e.target, e.target_ship], ["", "Kelto Ruvan", "Hulk"])
 	e = CombatLog.parse_line("Warp disruption attempt from Keres [X Y Z] [TSTCO] [Lysande Vonnimarchos] - to you!")
 	assert_eq(e.weapon, "Warp disruption")
 	assert_eq([e.source, e.source_ship, e.target], ["Lysande Vonnimarchos", "Keres", ""])
@@ -106,10 +106,10 @@ func test_neut_direction_from_colour() -> void:
 	var e := CombatLog.parse_line(NEUT_IN)
 	assert_eq(e.kind, K.NEUT)
 	assert_eq(e.amount, 94.0)
-	assert_eq([e.source, e.source_ship, e.target], ["Wenna Torb", "Ashimmu", ""])
+	assert_eq([e.source, e.source_ship, e.target], ["Wenna Torb", "Covetor", ""])
 	assert_eq(e.weapon, "Small Energy Neutralizer II")
 	e = CombatLog.parse_line(NEUT_OUT)
-	assert_eq([e.source, e.target, e.target_ship], ["", "Wenna Torb", "Ashimmu"])
+	assert_eq([e.source, e.target, e.target_ship], ["", "Wenna Torb", "Covetor"])
 
 
 func test_nos() -> void:
@@ -119,7 +119,7 @@ func test_nos() -> void:
 	assert_eq([e.source, e.target], ["Kelto Ruvan", ""])
 	e = CombatLog.parse_line(NOS_OUT)
 	assert_eq(e.amount, 33.0)
-	assert_eq([e.source, e.target, e.target_ship], ["", "Oneiros", "Oneiros"], "no pilot shown: the ship")
+	assert_eq([e.source, e.target, e.target_ship], ["", "Orca", "Orca"], "no pilot shown: the ship")
 
 
 func test_remote_reps() -> void:
@@ -128,20 +128,20 @@ func test_remote_reps() -> void:
 	assert_eq(e.amount, 15.0)
 	assert_eq([e.source, e.target], ["Light Repair Drone", ""])
 	e = CombatLog.parse_line(REP_OUT)
-	assert_eq([e.source, e.target, e.weapon], ["", "Scythe", "Medium Remote Shield Booster"])
+	assert_eq([e.source, e.target, e.weapon], ["", "Procurer", "Medium Remote Shield Booster"])
 
 
 func test_jams() -> void:
 	var e := CombatLog.parse_line(JAM_IN)
 	assert_eq(e.kind, K.JAM)
-	assert_eq([e.source, e.source_ship, e.target, e.weapon], ["Falcon", "Falcon", "", "Radar ECM"])
+	assert_eq([e.source, e.source_ship, e.target, e.weapon], ["Prospect", "Prospect", "", "Radar ECM"])
 	e = CombatLog.parse_line(JAM_OUT)
 	assert_eq(e.kind, K.JAM)
 	assert_eq([e.source, e.target, e.target_ship, e.weapon],
-			["", "Kelto Ruvan", "Huginn", "Ladar ECM"])
+			["", "Kelto Ruvan", "Mackinaw", "Ladar ECM"])
 	e = CombatLog.parse_line(JAM_OUT_NO_PILOT)
 	assert_eq(e.kind, K.JAM)
-	assert_eq([e.source, e.target, e.weapon], ["", "Pontifex", "Gravimetric ECM"])
+	assert_eq([e.source, e.target, e.weapon], ["", "Porpoise", "Gravimetric ECM"])
 
 
 func test_unknown_is_other() -> void:
@@ -256,9 +256,9 @@ func test_same_event_in_several_logs_counts_once() -> void:
 	# One scram from Halvard to Wenna, as each of the scrammer, the target and a bystander logs it.
 	var d := _match()
 	var lines := {
-		"Halvard Ostbergte": "Warp scramble attempt from you to Ashimmu [ALPHA] [Wenna Torb] -",
-		"Wenna Torb": "Warp scramble attempt from Deimos [ALPHA] [Halvard Ostbergte] - to you!",
-		"Someone Else": "Warp scramble attempt from Deimos [ALPHA] [Halvard Ostbergte] - to Ashimmu [ALPHA] [Wenna Torb] -",
+		"Halvard Ostbergte": "Warp scramble attempt from you to Covetor [ALPHA] [Wenna Torb] -",
+		"Wenna Torb": "Warp scramble attempt from Skiff [ALPHA] [Halvard Ostbergte] - to you!",
+		"Someone Else": "Warp scramble attempt from Skiff [ALPHA] [Halvard Ostbergte] - to Covetor [ALPHA] [Wenna Torb] -",
 	}
 	var logs := []
 	for listener in lines:
@@ -286,7 +286,7 @@ func test_sync_override_and_unknown_listener() -> void:
 
 
 func test_sync_without_eve_time_keeps_nothing() -> void:
-	var d := MatchData.load_csv(write_csv([row(0, "Halvard Ostberg", "Deimos", C)]))
+	var d := MatchData.load_csv(write_csv([row(0, "Halvard Ostberg", "Skiff", C)]))
 	var gamelog := CombatLog.load_file(_write_log(["[ 2026.10.03 14:03:20 ] (combat) " + DAMAGE_OUT]))
 	gamelog.sync(d)
 	assert_eq(gamelog.pilot, "Halvard Ostberg")

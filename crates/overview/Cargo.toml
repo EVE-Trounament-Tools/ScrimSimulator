@@ -15,6 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rayon = "1"
 fast_image_resize = "6"
+nalgebra = "0.35.0"
 
 [[bin]]
 name = "overview-track"

@@ -5,15 +5,22 @@
 # `Capsule` is added by hand: it is not a player-flyable ship you can buy, it is the pod every
 # pilot is left in after a ship loss, but it is exactly the string the overview prints for one, and
 # `crates/overview/src/track.rs` treats it as the one legal post-loss ship-type transition.
+# `Skua` is added by hand: it postdates the fetch, and without it the overview's "Skua" snapped
+# to `Squall`.
+# `Algos Navy Issue`, `Anhinga`, `Babaroga`, `Corax Navy Issue`, `Dragoon Navy Issue` and
+# `Talwar Fleet Issue` are added by hand too: they postdate the fetch but have AT XXII points
+# (simulator/rulesets/atxxii.json).
 Abaddon
 Absolution
 Adrestia
 Aeon
 Algos
+Algos Navy Issue
 Aliastra Catalyst
 Alligator
 Amarr Shuttle
 Anathema
+Anhinga
 Anshar
 Apocalypse
 Apocalypse Imperial Issue
@@ -37,6 +44,7 @@ Augoror Navy Issue
 Avalanche
 Avatar
 Azariel
+Babaroga
 Badger
 Bane
 Bantam
@@ -88,6 +96,7 @@ Coercer Navy Issue
 Condor
 Confessor
 Corax
+Corax Navy Issue
 Cormorant
 Cormorant Navy Issue
 Council Diplomatic Shuttle
@@ -114,6 +123,7 @@ Devoter
 Dominix
 Dominix Navy Issue
 Dragoon
+Dragoon Navy Issue
 Drake
 Drake Navy Issue
 Dramiel
@@ -353,6 +363,7 @@ Sigil
 Silver Magnate
 Sin
 Skiff
+Skua
 Skybreaker
 Slasher
 Sleipnir
@@ -372,6 +383,7 @@ Svipul
 Taipan
 Talos
 Talwar
+Talwar Fleet Issue
 Taranis
 Tash-Murkon Magnate
 Tayra

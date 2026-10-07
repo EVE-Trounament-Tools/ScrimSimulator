@@ -23,6 +23,9 @@ const DEFAULTS := {
 	"roster/columns": [],
 	# Whether the bundled demo match has been added to the library (see `MatchLibrary.add_demo`).
 	"library/demo_added": false,
+	# Keep pilots on their season's team (`TeamDb`) in every match; off = each match's own
+	# teams from start positions.
+	"teams/season_db": true,
 	# CSV pilot name -> display name, applied in every match.
 	"names/pilots": {},
 	# What is drawn above each ship in space (Settings → Ship overlay).

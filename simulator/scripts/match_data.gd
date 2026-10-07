@@ -46,7 +46,11 @@ enum Event { DEATH, BOUNDARY, MJD }
 ## hull 0-1; `NAN_HP` when blank) }, sorted by t.
 ## A sample its ship micro jumped to also has `mjd: true`; with an `eve_time` column, every sample
 ## has `eve_time: String`.
+## A podded pilot's track ends at its first capsule sample (`pod: true`, with unknown speed and HP):
+## nothing the pod does after is kept, and `sample` holds it there until the match ends.
 var tracks: Dictionary = {}
+## pilot name -> match time it was podded (as its DEATH event). Pilots never podded are absent.
+var podded: Dictionary = {}
 ## pilot name -> Team, from each pilot's first position.
 var teams: Dictionary = {}
 ## pilot name -> { t: float (match time, s since start), pos: Vector3 (metres) } where the
@@ -79,6 +83,8 @@ var eve_unix_start := NAN
 var eve_unix_end := NAN
 ## CSV time of the first sample (whose EVE time is `eve_start`).
 var first_t := 0.0
+## CSV time of the last sample.
+var _end_t := 0.0
 ## `CombatLog`s of this match, synced to it; filled in by whoever loads the match.
 var combat_logs: Array = []
 ## Follow a Catmull-Rom spline through the samples instead of straight lines between them.
@@ -145,9 +151,15 @@ static func load_csv(path: String, ship_radii := {}, move_threshold_m := 0.0, ke
 		return null
 	for pilot in data.tracks:
 		data.tracks[pilot].sort_custom(func(a, b): return a.t < b.t)
+	data._freeze_pods()
 	var first_move := INF if keep_lead_in else data._find_start(move_threshold_m)
 	data.start_time = first_move if first_move < INF else t_min
 	data.first_t = t_min
+	data._end_t = t_max
+	for pilot in data.tracks:
+		var last: Dictionary = data.tracks[pilot][-1]
+		if last.get("pod", false):
+			data.podded[pilot] = maxf(last.t - data.start_time, 0.0)
 	if not data.eve_start.is_empty():
 		data.eve_unix_start = CombatLog.parse_eve_time(data.eve_start)
 		data.eve_unix_end = CombatLog.parse_eve_time(data.eve_end)
@@ -213,6 +225,20 @@ func _find_start(threshold_m: float) -> float:
 				start = track[i - 1].t
 				break
 	return start
+
+
+## Ends each podded pilot's track at its first capsule sample after a hull, which keeps no speed or
+## HP: a pod is left where it died.
+func _freeze_pods() -> void:
+	for pilot in tracks:
+		var track: Array = tracks[pilot]
+		for i in range(1, track.size()):
+			if track[i].ship_type == CAPSULE and track[i - 1].ship_type != CAPSULE:
+				track.resize(i + 1)
+				track[i].speed = NAN
+				track[i].hp = NAN_HP
+				track[i].pod = true
+				break
 
 
 ## Puts each pilot on the corner->centre line nearest its first position; the two most
@@ -403,9 +429,14 @@ static func _boundary_crossing(a: Vector3, b: Vector3, r: float) -> float:
 ## Interpolated state of `pilot` at match time `t` (seconds since start), or an empty
 ## Dictionary when the pilot has no data then (before first / after last sample, or in a gap).
 ## Ship type, speed and HP aren't interpolated: they're those of the latest sample at or before `t`.
+## A pod stays at its last sample until the match ends.
 func sample(pilot: String, t: float) -> Dictionary:
 	var track: Array = tracks[pilot]
 	t += start_time
+	if not track.is_empty() and t > track[-1].t and t <= _end_t and track[-1].get("pod", false):
+		var pod: Dictionary = track[-1].duplicate()
+		pod.t = t
+		return pod
 	if track.is_empty() or t < track[0].t or t > track[-1].t:
 		return {}
 	var i := track.bsearch_custom(t, func(s, v): return s.t < v)

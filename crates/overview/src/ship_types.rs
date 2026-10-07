@@ -147,6 +147,32 @@ mod tests {
     }
 
     #[test]
+    fn hand_added_skua_is_not_snapped_to_squall() {
+        let types = ShipTypes::builtin();
+        assert_eq!(types.resolve("Skua"), Resolution::Exact("Skua"));
+    }
+
+    #[test]
+    fn every_ship_with_ruleset_points_is_known() {
+        let types = ShipTypes::builtin();
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../simulator/rulesets");
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let ruleset: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let missing: Vec<&String> = ruleset["ships"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|s| !types.names.contains(s))
+                .collect();
+            assert!(missing.is_empty(), "{}: not in ship_types.txt: {missing:?}", path.display());
+        }
+    }
+
+    #[test]
     fn exact_name_matches_exactly_even_with_a_prefix_in_the_list() {
         let types = ShipTypes::from_names(["Scorpion", "Scorpion Navy Issue", "Scorpion Ishukone Watch"]);
         assert_eq!(types.resolve("Scorpion"), Resolution::Exact("Scorpion"));

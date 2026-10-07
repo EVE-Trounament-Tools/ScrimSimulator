@@ -37,6 +37,17 @@ func test_merge_skips_unknown_pilots_and_unsynced() -> void:
 	assert_eq(CombatStats.merge([_log([unknown, unsynced])]), [])
 
 
+func test_cutoff_drops_entries_by_or_on_a_pilot_after_its_time() -> void:
+	var s := CombatStats.from_logs([_log([
+		_e(K.DAMAGE, "A", "B", 1.0, 100.0),
+		_e(K.DAMAGE, "A", "B", 5.0, 50.0),  # B was podded at 3 s.
+		_e(K.DAMAGE, "B", "A", 6.0, 40.0),
+	])], {"B": 3.0})
+	var w := CombatStats.RATE_WINDOW_S
+	assert_almost(s.rate("B", "dmg_in", 6.0), 100.0 / w)
+	assert_true(is_nan(s.rate("A", "dmg_in", 6.0)), "the pod's shots are gone")
+
+
 func test_rates() -> void:
 	var s := CombatStats.from_logs([_log([
 		_e(K.DAMAGE, "A", "B", 1.0, 100.0),

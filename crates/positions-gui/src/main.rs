@@ -3,12 +3,15 @@
 //! to save the audio. Gamelogs with combat during the chat log's session are found in the Gamelogs
 //! folder and added on their own whenever the chat log or folder changes. The choices are
 //! remembered between sessions (eframe's app storage). The tool runs as a child process found
-//! next to this executable (or on `PATH`), and its output is shown as it runs.
+//! next to this executable (or on `PATH`), and its output is shown as it runs. A thumbnail of the
+//! video with the scene's rectangles drawn on it shows whether the scene matches the recording.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use chrono::{DateTime, NaiveDateTime, TimeDelta, Utc};
 use eframe::egui;
+use image::RgbImage;
+use overview::panel::Scene;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -175,6 +178,49 @@ fn default_scene() -> Option<PathBuf> {
     [beside, source].into_iter().find(|p| p.is_file()).map(|p| p.canonicalize().unwrap_or(p))
 }
 
+/// Width of the decoded thumbnail; the frame is scaled down to it before becoming a texture.
+const THUMB_WIDTH: u32 = 480;
+
+/// A frame grabbed for the thumbnail: the full frame's size, and the frame scaled down.
+type Thumb = Result<([u32; 2], RgbImage), String>;
+
+/// A frame of `video` a few seconds in (the first frame may still be black), else its first.
+fn grab_thumbnail(video: &Path) -> Thumb {
+    let first = |start: f64| -> Result<Option<videoin::Frame>, String> {
+        let mut dec = videoin::Decoder::open_range(video, None, start, Some(start + 0.5))
+            .map_err(|e| format!("{e:#}"))?;
+        dec.next_frame().map_err(|e| format!("{e:#}"))
+    };
+    let frame = match first(5.0)? {
+        Some(f) => f,
+        None => first(0.0)?.ok_or("the video has no frames")?,
+    };
+    let (w, h) = frame.image.dimensions();
+    let th = (THUMB_WIDTH as u64 * h as u64 / w.max(1) as u64).max(1) as u32;
+    Ok(([w, h], image::imageops::thumbnail(&frame.image, THUMB_WIDTH, th)))
+}
+
+/// What the thumbnail outlines: each of `scene`'s rectangles with its label, scaled by `k` from
+/// frame pixels to points relative to the image's corner, and whether it reaches past a frame
+/// of size `frame` (a scene made for another layout or resolution).
+fn overlay_rects(scene: &Scene, frame: [u32; 2], k: f32) -> Vec<(String, egui::Rect, bool)> {
+    let panels = scene.panels.iter().map(|p| (p.name.clone(), p.rect));
+    let chat = scene.chat.iter().map(|r| ("chat".to_owned(), *r));
+    let targets = scene.targets.iter().enumerate().map(|(i, r)| (format!("targets {}", i + 1), *r));
+    panels
+        .chain(chat)
+        .chain(targets)
+        .map(|(label, r)| {
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(r.x as f32 * k, r.y as f32 * k),
+                egui::vec2(r.w as f32 * k, r.h as f32 * k),
+            );
+            let outside = r.x as u64 + r.w as u64 > frame[0] as u64 || r.y as u64 + r.h as u64 > frame[1] as u64;
+            (label, rect, outside)
+        })
+        .collect()
+}
+
 /// The `scrim-positions` executable next to this one, else whatever `PATH` finds.
 fn scrim_positions() -> PathBuf {
     let name = format!("scrim-positions{}", std::env::consts::EXE_SUFFIX);
@@ -238,6 +284,14 @@ struct App {
     scanned: Option<(String, String)>,
     /// What the last search found, or why it failed.
     scan_status: String,
+    /// The thumbnail frame being grabbed.
+    thumb_grab: Option<Receiver<Thumb>>,
+    /// The video last grabbed from; another grab starts when it changes.
+    thumbed: Option<String>,
+    /// The thumbnail and the full frame's size, or why there is none.
+    thumb: Option<Result<(egui::TextureHandle, [u32; 2]), String>>,
+    /// The scene file last loaded for the overlay, and what it held.
+    scene: Option<(String, Result<Scene, String>)>,
 }
 
 impl App {
@@ -255,6 +309,45 @@ impl App {
             scan: None,
             scanned: None,
             scan_status: String::new(),
+            thumb_grab: None,
+            thumbed: None,
+            thumb: None,
+            scene: None,
+        }
+    }
+
+    /// Start grabbing a thumbnail frame when the video changed since the last grab (and exists);
+    /// take in a grab that finished. Reload the scene when its path changed.
+    fn poll_thumbnail(&mut self, ctx: &egui::Context) {
+        let video = self.settings.video.trim().to_owned();
+        if self.thumbed.as_ref() != Some(&video) {
+            self.thumbed = Some(video.clone());
+            self.thumb = None;
+            // A newer grab replaces one still running; its result is dropped.
+            self.thumb_grab = None;
+            if Path::new(&video).is_file() {
+                let (tx, rx) = channel();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(grab_thumbnail(Path::new(&video)));
+                    ctx.request_repaint();
+                });
+                self.thumb_grab = Some(rx);
+            }
+        }
+        if let Some(thumb) = self.thumb_grab.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.thumb_grab = None;
+            self.thumb = Some(thumb.map(|(frame, img)| {
+                let size = [img.width() as usize, img.height() as usize];
+                let image = egui::ColorImage::from_rgb(size, img.as_raw());
+                (ctx.load_texture("thumbnail", image, Default::default()), frame)
+            }));
+        }
+
+        let scene = self.settings.scene.trim();
+        if self.scene.as_ref().is_none_or(|(p, _)| p != scene) {
+            let loaded = Scene::load(scene).map_err(|e| format!("scene: {e}"));
+            self.scene = Some((scene.to_owned(), loaded));
         }
     }
 
@@ -498,13 +591,81 @@ fn combat_logs_ui(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
+/// The video's thumbnail with the scene's rectangles outlined on it; hovering shows it larger.
+fn thumbnail_ui(ui: &mut egui::Ui, app: &App) {
+    let (tex, frame) = match &app.thumb {
+        Some(Ok((tex, frame))) => (tex, *frame),
+        Some(Err(e)) => {
+            ui.colored_label(ui.visuals().warn_fg_color, format!("No preview: {e}"));
+            return;
+        }
+        None if app.thumb_grab.is_some() => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak("reading a frame…");
+            });
+            return;
+        }
+        None => {
+            ui.weak("Pick a video to preview it with the scene.");
+            return;
+        }
+    };
+    let scene = app.scene.as_ref().filter(|(p, _)| !p.is_empty()).map(|(_, s)| s);
+    let draw = |ui: &mut egui::Ui, width: f32| -> (egui::Response, bool) {
+        let size = egui::vec2(width, width * frame[1] as f32 / frame[0].max(1) as f32);
+        let response = ui.add(egui::Image::new(tex).fit_to_exact_size(size));
+        let Some(Ok(scene)) = scene else { return (response, false) };
+        let at = response.rect;
+        let painter = ui.painter_at(at);
+        let mut outside_any = false;
+        for (i, (label, rect, outside)) in overlay_rects(scene, frame, at.width() / frame[0] as f32).into_iter().enumerate() {
+            let color = if outside { ui.visuals().error_fg_color } else { OVERLAY_COLORS[i % OVERLAY_COLORS.len()] };
+            let rect = rect.translate(at.min.to_vec2());
+            painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.5, color), egui::StrokeKind::Inside);
+            painter.text(rect.min + egui::vec2(3.0, 2.0), egui::Align2::LEFT_TOP, label, egui::FontId::proportional(11.0), color);
+            outside_any |= outside;
+        }
+        (response, outside_any)
+    };
+    let (response, outside) = draw(ui, ui.available_width());
+    response.on_hover_ui(|ui| {
+        draw(ui, 960.0);
+    });
+    ui.weak(format!("{} × {}", frame[0], frame[1]));
+    match scene {
+        Some(Err(e)) => {
+            ui.colored_label(ui.visuals().warn_fg_color, e);
+        }
+        Some(Ok(_)) if outside => {
+            ui.colored_label(ui.visuals().warn_fg_color, "The scene reaches past the frame: is it for this recording?");
+        }
+        _ => {}
+    }
+}
+
+/// Outline colours of the scene's rectangles, in order.
+const OVERLAY_COLORS: [egui::Color32; 6] = [
+    egui::Color32::from_rgb(0x4f, 0xc3, 0xf7),
+    egui::Color32::from_rgb(0xff, 0xb7, 0x4d),
+    egui::Color32::from_rgb(0x81, 0xc7, 0x84),
+    egui::Color32::from_rgb(0xf0, 0x62, 0x92),
+    egui::Color32::from_rgb(0xba, 0x68, 0xc8),
+    egui::Color32::from_rgb(0xff, 0xf1, 0x76),
+];
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
         self.poll_scan(ctx);
+        self.poll_thumbnail(ctx);
         let running = self.run.is_some();
 
         egui::TopBottomPanel::top("settings").show(ctx, |ui| {
+            egui::SidePanel::right("thumbnail").resizable(true).default_width(320.0).show_inside(ui, |ui| {
+                ui.add_space(6.0);
+                thumbnail_ui(ui, self);
+            });
             ui.add_space(6.0);
             ui.add_enabled_ui(!running, |ui| {
                 let s = &mut self.settings;
@@ -602,7 +763,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Scrim Positions")
-            .with_inner_size([820.0, 560.0]),
+            .with_inner_size([1140.0, 620.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -640,6 +801,30 @@ mod tests {
         let span = chat_span(&decode_chat_log(&bytes)).unwrap();
         assert_eq!(span, (t("2026.09.26 12:59:55"), t("2026.09.26 15:13:01")));
         assert!(chat_span("not a chat log").is_err());
+    }
+
+    #[test]
+    fn overlay_scales_scene_rects() {
+        let scene: Scene = serde_json::from_str(
+            r#"{ "panels": [ { "name": "A", "rect": { "x": 0, "y": 0, "w": 100, "h": 50 } } ],
+                 "chat": { "x": 100, "y": 0, "w": 100, "h": 100 },
+                 "targets": [ { "x": 150, "y": 50, "w": 60, "h": 50 } ] }"#,
+        )
+        .unwrap();
+        let rects = overlay_rects(&scene, [200, 100], 0.5);
+        let labels: Vec<_> = rects.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(labels, ["A", "chat", "targets 1"]);
+        assert_eq!(rects[1].1, egui::Rect::from_min_size(egui::pos2(50.0, 0.0), egui::vec2(50.0, 50.0)));
+        assert_eq!(rects.iter().map(|r| r.2).collect::<Vec<_>>(), [false, false, true]);
+    }
+
+    #[test]
+    fn grabs_thumbnail_of_short_clip() {
+        let clip = Path::new(env!("CARGO_MANIFEST_DIR")).join("../overview/tests/fixtures/overview-sample.mkv");
+        let (frame, img) = grab_thumbnail(&clip).unwrap();
+        assert_eq!(img.width(), THUMB_WIDTH);
+        assert_eq!(img.height(), THUMB_WIDTH * frame[1] / frame[0]);
+        assert!(grab_thumbnail(Path::new("no-such-video.mkv")).is_err());
     }
 
     #[test]

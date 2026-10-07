@@ -114,6 +114,10 @@ var team_overrides := {}
 ## Team -> name given to it in this match (Blue/Red only; default `TEAM_NAMES`), saved like
 ## `team_overrides`.
 var team_names := {}
+## The open library match's season `TeamDb` and which of its teams each side is (`{ Team -> id }`,
+## "" for none); `team_sides` is empty when season teams are off or the match isn't in the library.
+var team_db := {}
+var team_sides := {}
 ## Gamelog file name -> pilot it belongs to, where the listener's name doesn't pick the right one
 ## (see `CombatLog.sync`); saved like `team_overrides`.
 var log_pilots := {}
@@ -286,6 +290,8 @@ func _ready() -> void:
 	_apply_visual_mode()
 
 	MatchLibrary.add_demo()
+	if not OS.has_feature("web"):  # the web build checks once its library is synced (`WebLibrary`)
+		TeamDb.ensure_current(TeamDb.build_id())
 	var args := OS.get_cmdline_user_args()
 	var i := args.find("--csv")
 	if i >= 0 and i + 1 < args.size():
@@ -329,6 +335,11 @@ func load_match(path: String) -> bool:
 			w.queue_free()
 		breakdown_windows.clear()
 		start_button.visible = true
+	team_db = {}
+	team_sides = {}
+	if Settings.get_value("teams/season_db") and MatchLibrary.contains(path):
+		team_db = TeamDb.read(TeamDb.season_of(path))
+		team_sides = TeamDb.apply(team_db, data)
 	for pilot in team_overrides:
 		if data.teams.has(pilot):
 			data.teams[pilot] = team_overrides[pilot]
@@ -425,7 +436,7 @@ func _load_combat_logs() -> void:
 
 ## Rebuilds `combat_stats` from `data.combat_logs`; roster columns without data are hidden.
 func _apply_combat_stats() -> void:
-	combat_stats = CombatStats.from_logs(data.combat_logs)
+	combat_stats = CombatStats.from_logs(data.combat_logs, data.podded)
 	for id in CombatStats.RATE_IDS + CombatStats.EWAR_IDS:
 		roster_table.set_column_available(id, combat_stats.has(id))
 	_update_roster_cells()
@@ -446,9 +457,19 @@ func _pilot_name(pilot: String) -> String:
 	return pilot_names.get(pilot, pilot)
 
 
-## `team`'s display name in this match.
+## `team`'s display name in this match: its name here, else its season team's (`TeamDb`), else
+## the default.
 func _team_name(team: int) -> String:
-	return team_names.get(team, TEAM_NAMES[team])
+	if team_names.has(team):
+		return team_names[team]
+	var id: String = team_sides.get(team, "")
+	return TeamDb.team_name(team_db, id) if id != "" else TEAM_NAMES[team]
+
+
+## `_team_name`, lowercase while it is the default ("blue").
+func _team_label(team: int) -> String:
+	var name := _team_name(team)
+	return name.to_lower() if name == TEAM_NAMES[team] else name
 
 
 func _update_file_label() -> void:
@@ -459,8 +480,8 @@ func _update_file_label() -> void:
 		counts[data.teams[pilot]] += 1
 	file_label.text = "%s — %d pilots (%s %d / %s %d / unknown %d), %d out of bounds" % [
 		match_path.get_file(), ships.size(),
-		team_names.get(MatchData.Team.BLUE, "blue"), counts[MatchData.Team.BLUE],
-		team_names.get(MatchData.Team.RED, "red"), counts[MatchData.Team.RED], counts[MatchData.Team.UNKNOWN],
+		_team_label(MatchData.Team.BLUE), counts[MatchData.Team.BLUE],
+		_team_label(MatchData.Team.RED), counts[MatchData.Team.RED], counts[MatchData.Team.UNKNOWN],
 		data.deaths.size(),
 	]
 
@@ -1962,6 +1983,8 @@ func _build_audio() -> void:
 	audio_pitch.pitch_scale = 1.0
 	audio_player = AudioStreamPlayer.new()
 	audio_player.bus = AUDIO_BUS
+	# Web defaults to sample playback, which skips bus effects (and so the pitch fix).
+	audio_player.playback_type = AudioServer.PLAYBACK_TYPE_STREAM
 	add_child(audio_player)
 
 
@@ -2053,6 +2076,12 @@ func _build_settings(layer: CanvasLayer) -> void:
 		jitter_spin.editable = on
 		_set_match_setting("match/ignore_jitter", on))
 	jitter_spin.value_changed.connect(func(v): _set_match_setting("match/jitter_threshold_m", v))
+
+	var season_teams := CheckBox.new()
+	season_teams.text = "Keep pilots on their season's team in every match (top-level library folder = season)"
+	season_teams.button_pressed = Settings.get_value("teams/season_db")
+	season_teams.toggled.connect(func(on): _set_match_setting("teams/season_db", on))
+	box.add_child(season_teams)
 
 	var status := Label.new()
 	status.text = sizes.status
@@ -2382,6 +2411,11 @@ func _swap_team(pilot: String) -> void:
 	var team: int = MatchData.Team.RED if data.teams.get(pilot) == MatchData.Team.BLUE else MatchData.Team.BLUE
 	data.teams[pilot] = team
 	team_overrides[pilot] = team
+	if not team_sides.is_empty():
+		_edit_team_db(func(db):
+			if team_sides[team] == "":
+				team_sides[team] = TeamDb.new_team(db)
+			TeamDb.assign(db, pilot, team_sides[team]))
 	var ship: Dictionary = ships[pilot]
 	ship.color = TEAM_COLORS[team]
 	ship.ship_type = ""  # Forces `_update_ships` to re-tint the visual, icon and label.
@@ -2425,10 +2459,14 @@ func _rename_pilot(pilot: String, new_name: String) -> void:
 		_refresh_ship_debug_menu()
 
 
-## Names `team` (Blue or Red) in this match; empty restores the default.
+## Names `team` (Blue or Red): its season team (`TeamDb`, where empty gives back its temporary
+## name) with season teams on, else just in this match (where empty restores the default).
 func _rename_team(team: int, new_name: String) -> void:
 	new_name = new_name.strip_edges()
-	if new_name == "" or new_name == TEAM_NAMES[team]:
+	if team_sides.get(team, "") != "":
+		team_names.erase(team)
+		_edit_team_db(func(db): TeamDb.rename(db, team_sides[team], new_name))
+	elif new_name == "" or new_name == TEAM_NAMES[team]:
 		team_names.erase(team)
 	else:
 		team_names[team] = new_name
@@ -2436,6 +2474,15 @@ func _rename_team(team: int, new_name: String) -> void:
 	_update_file_label()
 	_refresh_roster()
 	_update_info()
+
+
+## Changes the open match's season `TeamDb` with `edit` (called with the db, read afresh) and
+## saves it.
+func _edit_team_db(edit: Callable) -> void:
+	var season := TeamDb.season_of(match_path)
+	team_db = TeamDb.read(season)
+	edit.call(team_db)
+	TeamDb.save(season, team_db)
 
 
 ## A dropped CSV joins the library and opens (from the menu or mid-match); a dropped folder
