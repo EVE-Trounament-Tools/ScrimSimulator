@@ -80,11 +80,12 @@ static func local_changed() -> void:
 
 
 ## Downloads whatever of library match `path` (its CSV, sidecar, audio and logs) is still a
-## placeholder, showing progress in the menu. False (with the reason shown) if it couldn't.
-static func fetch_match(path: String) -> bool:
+## placeholder, showing progress in the menu; without `whole`, only its CSV and logs (what
+## adding gamelogs needs). False (with the reason shown) if it couldn't.
+static func fetch_match(path: String, whole := true) -> bool:
 	if menu == null or not MatchLibrary.contains(path):
 		return true
-	var files := [path, MatchLibrary.meta_path(path), MatchLibrary.audio_path(path)]
+	var files := [path, MatchLibrary.meta_path(path), MatchLibrary.audio_path(path)] if whole else [path]
 	files.append_array(MatchLibrary.log_paths(path))
 	var name := MatchLibrary.display_name(path.get_file())
 	for file: String in files:

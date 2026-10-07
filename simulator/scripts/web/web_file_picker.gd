@@ -67,9 +67,11 @@ static func _on_popup(menu: MainMenu, dialog: FileDialog) -> void:
 		FileDialog.FILE_MODE_OPEN_FILE:
 			dialog.file_selected.emit(paths[0])
 		FileDialog.FILE_MODE_OPEN_FILES:
-			# Gamelogs are matched against the match's CSV, which may not be downloaded yet.
-			if await WebLibrary.fetch_match(menu.selected_path()):
-				dialog.files_selected.emit(PackedStringArray(paths))
+			# Gamelogs are matched against the matches' CSVs, which may not be downloaded yet.
+			for path: String in menu.log_targets():
+				if not await WebLibrary.fetch_match(path, false):
+					return
+			dialog.files_selected.emit(PackedStringArray(paths))
 		FileDialog.FILE_MODE_OPEN_DIR:
 			# Every path is "<dest>/<picked folder>/…".
 			dialog.dir_selected.emit(dest.path_join(paths[0].substr(dest.length() + 1).get_slice("/", 0)))

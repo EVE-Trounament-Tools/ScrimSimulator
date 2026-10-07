@@ -329,6 +329,62 @@ func test_menu_adds_combat_logs() -> void:
 	assert_eq(m.data.combat_logs, [])
 
 
+## A library match in `folder` with EVE times from 14:`minute`:00 to 14:`minute`:06.
+func _timed_match(minute: int, folder := "") -> String:
+	var rows := []
+	for t in [0, 2, 4, 6]:
+		rows.append(row(t, "Halvard Ostberg", "Deimos", C + X * 1000.0 * t) + ["2026-10-03T14:%02d:%02d.000Z" % [minute, t]])
+	return MatchLibrary.add(write_csv(rows, DEFAULT_HEADER + ",eve_time"), folder)
+
+
+## A gamelog with one hit at 14:`minute`:02 for each of `minutes`.
+func _day_log(minutes: Array) -> String:
+	var gamelog := temp_dir().path_join("20261003_120000.txt")
+	var f := FileAccess.open(gamelog, FileAccess.WRITE)
+	f.store_string("  Listener: Halvard Ostberg\n")
+	for minute in minutes:
+		f.store_string("[ 2026.10.03 14:%02d:02 ] (combat) 204 to Someone[X](Magus) - Test Railgun - Hits\n" % minute)
+	f.close()
+	return gamelog
+
+
+func test_logs_added_to_one_match_reach_its_folder() -> void:
+	var a := _timed_match(3, "Scrim")
+	var b := _timed_match(10, "Scrim")
+	var other := _timed_match(20, "Elsewhere")
+	var idle := _timed_match(30, "Scrim")
+	var m := _main()
+	m._show_menu()
+	m.menu.refresh()
+	m.menu._select({"kind": "match", "path": a})
+	m.menu.add_logs(PackedStringArray([_day_log([3, 10, 20])]))
+	assert_false(m.menu.error_label.visible)
+	assert_eq(MatchLibrary.log_paths(a).size(), 1)
+	assert_eq(MatchLibrary.log_paths(b).size(), 1, "same day, same folder")
+	assert_eq(MatchLibrary.log_paths(idle), [], "no combat during it")
+	assert_eq(MatchLibrary.log_paths(other), [], "other folder untouched")
+	assert_eq(CombatLog.load_file(MatchLibrary.log_paths(b)[0]).entries.size(), 1, "trimmed to its window")
+
+
+func test_folder_menu_adds_logs() -> void:
+	var a := _timed_match(3, "Scrim/Day 1")
+	var b := _timed_match(10, "Scrim")
+	var m := _main()
+	m._show_menu()
+	m.menu.refresh()
+	m.menu._select({"kind": "folder", "rel": "Scrim"})
+	m.menu.open_context_menu(Vector2(10, 10))
+	var menu: PopupMenu = m.menu.context_menu
+	assert_false(menu.is_item_disabled(menu.get_item_index(MainMenu.MenuItem.ADD_LOGS)))
+	m.menu.add_logs(PackedStringArray([_day_log([3, 10, 40])]))
+	assert_eq(MatchLibrary.log_paths(a).size(), 1, "subfolder included")
+	assert_eq(MatchLibrary.log_paths(b).size(), 1)
+	var not_a_log := temp_dir().path_join("notes.txt")
+	FileAccess.open(not_a_log, FileAccess.WRITE).store_string("hello")
+	m.menu.add_logs(PackedStringArray([not_a_log]))
+	assert_true(m.menu.error_label.visible, "notes.txt refused")
+
+
 func test_log_pilot_override_survives_meta_save() -> void:
 	var made := _logged_match()
 	MatchLibrary.add_log(made[0], made[1])
