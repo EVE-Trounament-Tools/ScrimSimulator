@@ -205,6 +205,9 @@ func test_drop_folder_adds_scrim() -> void:
 	assert_eq(m.menu.selected_path(), MatchLibrary.folder_abs("Scrim 1").path_join("clip_001.positions.csv"))
 	assert_ne(MatchLibrary.audio_path(m.menu.selected_path()), "", "audio paired by number")
 	assert_false(m.menu.error_label.visible)
+	var db := TeamDb.read("Scrim 1")
+	assert_eq(db.pilots.size(), 2, "its pilots join the season's teams")
+	assert_eq(db.teams.size(), 2)
 
 
 ## A library match whose first ship moves at 2 s (after a countdown from 0 s).
@@ -990,6 +993,7 @@ func test_swap_survives_reload_of_same_match() -> void:
 
 
 func test_swap_persists_for_library_match() -> void:
+	Settings.set_value("teams/season_db", false)  # teams of this match only
 	var path := MatchLibrary.add(_match_csv())
 	var m := _main()
 	m.load_match(path)
@@ -1001,6 +1005,7 @@ func test_swap_persists_for_library_match() -> void:
 
 
 func test_rename_team_shows_and_persists() -> void:
+	Settings.set_value("teams/season_db", false)  # teams of this match only
 	var path := MatchLibrary.add(_match_csv())
 	var m := _main()
 	m.load_match(path)
@@ -1015,6 +1020,65 @@ func test_rename_team_shows_and_persists() -> void:
 	assert_eq(_roster(m2)[2], "Red (1)", "empty restores the default")
 	m2.load_match(MatchLibrary.add(write_csv([row(0, "blue", "Test Hull", on_line(0, 0.5))])))
 	assert_true(m2.team_names.is_empty(), "another match has its own names")
+
+
+## Library match (added like the menu does, so its season `TeamDb` knows it) with "blue" and
+## "red" starting at corners `blue_corner` and `red_corner`, and "late" at the centre.
+func _season_match(blue_corner: int, red_corner: int, folder := "Season 1") -> String:
+	var path := MatchLibrary.add(write_csv([
+		row(0, "blue", "Test Hull", on_line(blue_corner, 0.5)),
+		row(0, "red", "Test Hull", on_line(red_corner, 0.5)),
+		row(0, "late", "Test Hull", C),
+		row(10, "blue", "Test Hull", on_line(blue_corner, 0.4)),
+	]), folder)
+	TeamDb.ingest_paths([path])
+	return path
+
+
+func test_season_teams_follow_pilots_across_matches() -> void:
+	var first := _season_match(0, 7)
+	var flipped := _season_match(7, 0)
+	var m := _main()
+	m.load_match(first)
+	assert_eq(_roster(m), ["Team 1 (1)", "blue", "Team 2 (1)", "red", "Unknown (1)", "late"])
+	m.load_match(flipped)
+	assert_eq(m.data.teams["blue"], MatchData.Team.RED, "starts at the red corner here")
+	assert_eq(_roster(m), ["Team 2 (1)", "red", "Team 1 (1)", "blue", "Unknown (1)", "late"])
+	assert_true(m.file_label.text.contains("Team 2 1 / Team 1 1 / unknown 1"))
+
+
+func test_season_team_rename_shows_in_every_match() -> void:
+	var first := _season_match(0, 7)
+	var flipped := _season_match(7, 0)
+	var m := _main()
+	m.load_match(flipped)
+	m._rename_team(MatchData.Team.BLUE, " Them ")
+	assert_eq(_roster(m)[0], "Them (1)")
+	assert_true(m.team_names.is_empty(), "named in the season, not the match")
+	m.load_match(first)
+	assert_eq(_roster(m)[2], "Them (1)")
+	m._rename_team(MatchData.Team.RED, "")
+	assert_eq(_roster(m)[2], "Team 2 (1)", "empty gives back the temporary name")
+
+
+func test_season_team_swap_teaches_other_matches() -> void:
+	var first := _season_match(0, 7)
+	var flipped := _season_match(7, 0)
+	var m := _main()
+	m.load_match(first)
+	m._swap_team("late")  # unknown -> blue, Team 1
+	m.load_match(flipped)
+	assert_eq(m.data.teams["late"], MatchData.Team.RED, "with Team 1, on red here")
+
+
+func test_season_teams_off_keeps_match_teams() -> void:
+	_season_match(0, 7)
+	var flipped := _season_match(7, 0)
+	Settings.set_value("teams/season_db", false)
+	var m := _main()
+	m.load_match(flipped)
+	assert_eq(_roster(m), ["Blue (1)", "red", "Red (1)", "blue", "Unknown (1)", "late"])
+	assert_true(m.team_sides.is_empty())
 
 
 func test_ship_overlay_default_name_and_type() -> void:

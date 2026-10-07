@@ -203,8 +203,21 @@ and several can be open at once, one per pilot.
 
 Added matches are copied into the simulator's own library
 (`~/.local/share/godot/app_userdata/simulator/matches` on Linux), so they stay available if you
-move or delete the original file. Team swaps (⇄ in the roster) and team names (double-click a
-team's heading) are saved per match. Pilot renames (right-click a pilot → **Rename pilot…**) apply
+move or delete the original file.
+
+Each top-level library folder is a season. Pilots fly for one team per season, so the simulator
+keeps a team list for each season (`pilot-teams.db.json` in the folder). When a match is added,
+its pilots join the team that most of their side's known pilots are on. If none of a side's
+pilots are known yet, they form a new team with a temporary name ("Team 3"). Once a pilot is on
+a team, they stay on it: opening any match of the season puts them on their team's side, even if
+they started at the wrong corner. A team swap (⇄ in the roster) moves the pilot to that team for
+the whole season. Renaming a team (double-click its heading) renames it in every match of the
+season; an empty name gives back the temporary name. The team lists are rebuilt from all matches
+the first time a new version runs, and swaps and names are kept. To get the old behaviour, turn
+off **Keep pilots on their season's team** in Settings. Team swaps and team names are then saved
+for that match only.
+
+Pilot renames (right-click a pilot → **Rename pilot…**) apply
 in every match, and an empty name restores the original.
 
 ![Orbiting the camera while a match plays](docs/media/orbit.gif)

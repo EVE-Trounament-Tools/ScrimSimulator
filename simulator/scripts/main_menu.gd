@@ -301,6 +301,7 @@ func add_file(src: String) -> void:
 	if path == "":
 		show_error("Failed to add %s" % src.get_file())
 		return
+	await TeamDb.ingest_paths([path])  # doesn't wait outside the web build
 	show_error("")
 	refresh()
 	_select({"kind": "match", "path": path})
@@ -319,6 +320,7 @@ func add_folder(src_dir: String) -> void:
 		notes.append("Not added: %s" % ", ".join(added.failed))
 	if not added.unpaired_audio.is_empty():
 		notes.append("No match for audio: %s" % ", ".join(added.unpaired_audio))
+	await TeamDb.ingest_paths(added.matches)  # doesn't wait outside the web build
 	show_error(". ".join(notes))
 	collapsed.erase(added.folder)
 	refresh()

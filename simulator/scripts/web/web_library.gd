@@ -39,6 +39,8 @@ static var _again := false
 static var _change_timer: Timer
 ## Set while the menu is refreshed from here, so that refresh isn't taken for a local change.
 static var _quiet := false
+## Whether the season team dbs have been checked against this build (after the first sync).
+static var _teams_checked := false
 
 
 ## Called once by the menu (before its first `refresh`): brings the local copy up to the library
@@ -79,13 +81,14 @@ static func local_changed() -> void:
 	_change_timer.start()
 
 
-## Downloads whatever of library match `path` (its CSV, sidecar, audio and logs) is still a
-## placeholder, showing progress in the menu; without `whole`, only its CSV and logs (what
-## adding gamelogs needs). False (with the reason shown) if it couldn't.
+## Downloads whatever of library match `path` (its CSV, sidecar, audio, logs and its season's
+## `TeamDb`) is still a placeholder, showing progress in the menu; without `whole`, only its CSV
+## and logs (what adding gamelogs needs). False (with the reason shown) if it couldn't.
 static func fetch_match(path: String, whole := true) -> bool:
 	if menu == null or not MatchLibrary.contains(path):
 		return true
-	var files := [path, MatchLibrary.meta_path(path), MatchLibrary.audio_path(path)] if whole else [path]
+	var files := [path, MatchLibrary.meta_path(path), MatchLibrary.audio_path(path),
+		TeamDb.db_path(TeamDb.season_of(path))] if whole else [path]
 	files.append_array(MatchLibrary.log_paths(path))
 	var name := MatchLibrary.display_name(path.get_file())
 	for file: String in files:
@@ -101,6 +104,13 @@ static func fetch_match(path: String, whole := true) -> bool:
 	return true
 
 
+## Downloads library file `abs` if it is still a placeholder. False if it couldn't.
+static func fetch_file(abs: String) -> bool:
+	if not _is_marker(abs):
+		return true
+	return await _download(_read_marker(abs).sha, abs)
+
+
 # --- sync ------------------------------------------------------------------------------
 
 ## One sync with the site; a sync asked for while one runs follows it.
@@ -111,10 +121,18 @@ static func sync() -> void:
 		_again = true
 		return
 	_syncing = true
+	var result := ""
 	for attempt in 3:
 		# Another commit got in between reading the library and committing: read it again.
-		if await _sync_once() != "conflict":
+		result = await _sync_once()
+		if result != "conflict":
 			break
+	if result == "ok" and not _teams_checked:
+		# Once the library is up to date: the first visit after a deploy rebuilds the season
+		# team dbs (`TeamDb.ensure_current`), and the next sync sends them.
+		_teams_checked = true
+		await TeamDb.ensure_current(TeamDb.build_id())
+		_again = true
 	_syncing = false
 	if _again:
 		_again = false

@@ -267,6 +267,9 @@ static func _copy_unique(src: String, to_dir: String, stem: String, ext: String)
 	var n := 1
 	while true:
 		var dest := _numbered(to_dir, stem, ext, n)
+		if meta_path(dest).get_file() == TeamDb.FILE:  # its sidecar would be the season's db
+			n += 1
+			continue
 		if not FileAccess.file_exists(dest):
 			var err := DirAccess.copy_absolute(ProjectSettings.globalize_path(src), ProjectSettings.globalize_path(dest))
 			if err != OK:
