@@ -64,14 +64,10 @@ func test_name_clash_gets_suffix() -> void:
 	assert_eq(MatchLibrary.list().size(), 3)
 
 
-func test_list_newest_first() -> void:
-	if OS.get_name() == "Windows":
-		return  # Ages the file with `touch`.
-	var old := MatchLibrary.add(_file("old.csv", "1"))
-	MatchLibrary.add(_file("new.csv", "2"))
-	# Modification times have 1 s resolution: age the first file instead of sleeping.
-	OS.execute("touch", ["-d", "2020-01-01", ProjectSettings.globalize_path(old)])
-	assert_eq(MatchLibrary.list().map(func(e): return e.name), ["new", "old"])
+func test_list_natural_name_order() -> void:
+	for n in ["m_10", "m_02", "m_1", "M_3"]:
+		MatchLibrary.add(_file(n + ".csv", n))
+	assert_eq(MatchLibrary.list().map(func(e): return e.name), ["m_1", "m_02", "M_3", "m_10"])
 
 
 func test_list_ignores_other_files() -> void:
@@ -301,6 +297,17 @@ func test_removed_demo_stays_removed() -> void:
 	MatchLibrary.remove(MatchLibrary.list()[0].path)
 	MatchLibrary.add_demo()
 	assert_eq(MatchLibrary.list(), [])
+
+
+func test_add_demo_copies_folders_and_audio() -> void:
+	var d := _demo_dir()
+	DirAccess.make_dir_recursive_absolute(d.path_join("Scrim/m.positions.logs"))
+	DirAccess.copy_absolute(d.path_join("Demo match.positions.csv"), d.path_join("Scrim/m.positions.csv"))
+	DirAccess.copy_absolute(write_wav(), d.path_join("Scrim/m.positions.wav"))
+	MatchLibrary.demo_dir = d
+	MatchLibrary.add_demo()
+	assert_eq(MatchLibrary.list().map(func(e): return [e.folder, e.name, e.audio]),
+		[["", "Demo match", false], ["Scrim", "m", true]])
 
 
 func test_missing_demo_is_noop() -> void:

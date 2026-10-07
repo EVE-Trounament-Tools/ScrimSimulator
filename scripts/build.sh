@@ -3,12 +3,20 @@
 # match) and, as a separate download, the scrim-positions OCR tool.
 #
 #   scripts/build.sh [linux|windows|all]    (default: all)
+#   scripts/build.sh web                    (the website's build; not part of all)
 #
 # Output: dist/scrim-simulator-<version>-<platform>-x86_64.zip
 #         dist/scrim-positions-<version>-<platform>-x86_64.zip
+#         dist/web/ (web: the Godot web export the website serves, see web/README.md)
 # Runs on Ubuntu; Windows is cross-compiled (needs `mingw-w64`). Godot and its export templates
 # are downloaded into .cache/ / the user's Godot data dir if not already present. Override the
 # Godot binary with $GODOT.
+#
+# The simulator bundle's demo/ is copied into the user's match library on first run. By default
+# it holds the checked-in demo match; set DEMO_LIBRARY to a match library directory (e.g.
+# ~/.local/share/godot/app_userdata/simulator/matches) to ship all of it instead: folders,
+# audio, gamelogs and sidecars. Set BUNDLE_SDE=1 to also ship simulator/sde/ (ship sizes, icons,
+# models) so the bundle works offline.
 set -euo pipefail
 
 GODOT_VERSION="4.6"
@@ -22,8 +30,8 @@ cd "$ROOT"
 
 TARGET="${1:-all}"
 case "$TARGET" in
-    linux|windows|all) ;;
-    *) echo "usage: $0 [linux|windows|all]" >&2; exit 2 ;;
+    linux|windows|all|web) ;;
+    *) echo "usage: $0 [linux|windows|all|web]" >&2; exit 2 ;;
 esac
 
 VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo "v0.0.0")"
@@ -74,7 +82,7 @@ write_simulator_readme() { # <dir> <sim exe> <undraco exe>
 Scrim Simulator ${VERSION}
 
 $2
-    Replay viewer for *.positions.csv files. The demo match in demo/ is added to the match
+    Replay viewer for *.positions.csv files. The demo matches in demo/ are added to the match
     list on first run. Add your own with the "Add match..." button, by dropping a CSV onto
     the window, or open one from the command line:
         $2 -- --csv /path/to/match.positions.csv
@@ -93,7 +101,7 @@ Source: https://github.com/AckbadP/ScrimSimulator
 EOF
 }
 
-write_ocr_readme() { # <dir> <ocr exe>
+write_ocr_readme() { # <dir> <ocr exe> <gui exe>
     cat > "$1/README.txt" <<EOF
 Scrim Positions ${VERSION}
 
@@ -103,6 +111,11 @@ $2
     scene.json matches the OBS template in the source repository (docs/obs/); adjust its
     panel rectangles if your layout differs. Requires ffmpeg and ffprobe on PATH.
     Watch the result in the separate scrim-simulator download.
+
+$3
+    A window for running $2 on one recording: pick the video, chat log, output folder,
+    optional combat logs folder and whether to save the audio. Remembers your choices.
+    Keep it next to $2.
 
 Source: https://github.com/AckbadP/ScrimSimulator
 EOF
@@ -127,30 +140,37 @@ package_simulator() { # <platform> <sim exe path> <undraco exe path>
     local stage="$DIST/$name"
     new_stage "$name"
     cp "$2" "$3" "$stage/"
-    # The CSV and its gamelogs dir must share a stem (MatchLibrary.logs_dir).
-    mkdir -p "$stage/demo/$DEMO_NAME.positions.logs"
-    cp "$DEMO_CSV" "$stage/demo/$DEMO_NAME.positions.csv"
-    cp "${DEMO_CSV%.csv}.logs/"*.txt "$stage/demo/$DEMO_NAME.positions.logs/"
+    if [[ -n "${DEMO_LIBRARY:-}" ]]; then
+        cp -r "$DEMO_LIBRARY/." "$stage/demo/"
+    else
+        # The CSV and its gamelogs dir must share a stem (MatchLibrary.logs_dir).
+        mkdir -p "$stage/demo/$DEMO_NAME.positions.logs"
+        cp "$DEMO_CSV" "$stage/demo/$DEMO_NAME.positions.csv"
+        cp "${DEMO_CSV%.csv}.logs/"*.txt "$stage/demo/$DEMO_NAME.positions.logs/"
+    fi
+    if [[ "${BUNDLE_SDE:-}" == 1 ]]; then
+        cp -r simulator/sde "$stage/"
+    fi
     write_simulator_readme "$stage" "$(basename "$2")" "$(basename "$3")"
     zip_stage "$name"
 }
 
-package_ocr() { # <platform> <ocr exe path>
+package_ocr() { # <platform> <ocr exe path> <gui exe path>
     local name="scrim-positions-${VERSION}-$1-x86_64"
     local stage="$DIST/$name"
     new_stage "$name"
-    cp "$2" docs/obs/scene.json "$stage/"
-    write_ocr_readme "$stage" "$(basename "$2")"
+    cp "$2" "$3" docs/obs/scene.json "$stage/"
+    write_ocr_readme "$stage" "$(basename "$2")" "$(basename "$3")"
     zip_stage "$name"
 }
 
 build_linux() {
     log "building scrim-positions (linux)"
-    cargo build --release -p overview --bin scrim-positions -p glb-undraco --bin glb-undraco
+    cargo build --release -p overview --bin scrim-positions -p positions-gui --bin scrim-positions-gui -p glb-undraco --bin glb-undraco
     log "exporting simulator (linux)"
     export_simulator "Linux" "export/linux/scrim-simulator.x86_64"
     package_simulator linux simulator/export/linux/scrim-simulator.x86_64 target/release/glb-undraco
-    package_ocr linux target/release/scrim-positions
+    package_ocr linux target/release/scrim-positions target/release/scrim-positions-gui
 }
 
 build_windows() {
@@ -162,15 +182,24 @@ build_windows() {
         rustup target add "$WIN_TARGET"
     fi
     log "building scrim-positions (windows)"
-    cargo build --release -p overview --bin scrim-positions -p glb-undraco --bin glb-undraco --target "$WIN_TARGET"
+    cargo build --release -p overview --bin scrim-positions -p positions-gui --bin scrim-positions-gui -p glb-undraco --bin glb-undraco --target "$WIN_TARGET"
     log "exporting simulator (windows)"
     export_simulator "Windows Desktop" "export/windows/scrim-simulator.exe"
     package_simulator windows simulator/export/windows/scrim-simulator.exe "target/$WIN_TARGET/release/glb-undraco.exe"
-    package_ocr windows "target/$WIN_TARGET/release/scrim-positions.exe"
+    package_ocr windows "target/$WIN_TARGET/release/scrim-positions.exe" "target/$WIN_TARGET/release/scrim-positions-gui.exe"
+}
+
+build_web() {
+    log "exporting simulator (web)"
+    rm -rf simulator/export/web "$DIST/web"
+    export_simulator "Web" "export/web/index.html"
+    mkdir -p "$DIST/web"
+    cp -r simulator/export/web/. "$DIST/web/"
 }
 
 ensure_godot
 mkdir -p "$DIST"
+[[ "$TARGET" == web ]] && build_web
 [[ "$TARGET" == linux || "$TARGET" == all ]] && build_linux
 [[ "$TARGET" == windows || "$TARGET" == all ]] && build_windows
 log "done ($VERSION)"

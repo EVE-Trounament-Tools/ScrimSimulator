@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/glyph", "crates/videoin", "crates/overview", "crates/glb-undraco"]
+members = ["crates/glyph", "crates/videoin", "crates/overview", "crates/glb-undraco", "crates/positions-gui"]
 
 # OCR (NCC template matching, `crates/glyph`) is pixel-loop-heavy; at opt-level 0 the video test
 # bed in `crates/overview` (every frame of a several-second clip) takes minutes instead of
@@ -8,3 +8,8 @@ members = ["crates/glyph", "crates/videoin", "crates/overview", "crates/glb-undr
 # times.
 [profile.test]
 opt-level = 3
+
+# The OCR hot loops (`crates/glyph`'s matcher) are small enough that cross-crate inlining pays off.
+[profile.release]
+lto = "fat"
+codegen-units = 1

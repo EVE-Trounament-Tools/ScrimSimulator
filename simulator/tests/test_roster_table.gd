@@ -16,17 +16,20 @@ func after_each() -> void:
 	Settings._cfg = null
 
 
-## The original four columns; the combat-log ones are made unavailable, as with no gamelogs.
+## The original four columns; the combat-log ones are made unavailable, as with no gamelogs, and
+## the HP one as with a CSV without HP.
 const BASE := ["ship", "pilot", "speed", "distance"]
 const COMBAT := ["dmg_in", "dmg_out", "rep_in", "rep_out", "cap_in", "cap_out", "ewar_in", "ewar_out"]
 
 
-func _table(combat := false) -> RosterTable:
+func _table(combat := false, hp := false) -> RosterTable:
 	var t := RosterTable.new()
 	add_node(t)
 	if not combat:
 		for id in COMBAT:
 			t.set_column_available(id, false)
+	if not hp:
+		t.set_column_available("hp", false)
 	return t
 
 
@@ -248,7 +251,7 @@ func test_load_repairs_saved_layout() -> void:
 		{"id": "speed", "width": 90},
 		"junk",
 	])
-	assert_eq(cols.map(func(c): return c.id), ["speed", "ship", "pilot", "distance"] + COMBAT)
+	assert_eq(cols.map(func(c): return c.id), ["speed", "ship", "pilot", "distance", "hp"] + COMBAT)
 	assert_almost(cols[0].width, RosterTable.MIN_WIDTH)
 	assert_false(cols[0].visible)
 	var hidden := RosterTable._load_columns(RosterTable.COLUMNS.keys().map(
@@ -353,3 +356,44 @@ func test_autosize_icon_column() -> void:
 	t.autosize("ewar_out")
 	assert_true(t._column("ewar_out").width >= t.icon_box("p", "ewar_out").get_combined_minimum_size().x)
 	assert_true(t._column("ewar_out").width > RosterTable.COLUMNS["ewar_out"].width)
+
+
+# --- HP column and damage highlight -------------------------------------------
+
+func test_hp_column() -> void:
+	var t := _table(false, true)
+	t.add_row("p", Color.WHITE, "swap")
+	assert_eq(t.visible_ids(), ["ship", "pilot", "speed", "distance", "hp"])
+	assert_eq(_titles(t)[-1], "HP")
+	var bars: HBoxContainer = t.rows["p"].labels["hp"]
+	assert_eq(bars.get_child_count(), 3)
+	for bar in bars.get_children():
+		assert_true(is_nan(HpBar.get_fraction(bar)), "unknown until set")
+	t.set_cell_hp("p", "hp", Vector3(0.0, 0.25, 1.0))
+	assert_eq(bars.get_children().map(HpBar.get_fraction), [0.0, 0.25, 1.0])
+	assert_eq(bars.get_child(1).tooltip_text, "Armor: 25%")
+	assert_almost(bars.get_child(1).get_child(0).anchor_right, 0.25)
+	t.set_cell_hp("p", "hp", MatchData.NAN_HP)
+	assert_false(bars.get_child(1).get_child(0).visible, "unknown: no fill")
+	assert_eq(bars.get_child(1).tooltip_text, "Armor: Not locked")
+	var width: float = t._column("hp").width
+	t.autosize("hp")
+	assert_almost(t._column("hp").width, width, 1e-3, "bars keep their width")
+
+
+func test_hp_column_unavailable() -> void:
+	var t := _table()
+	assert_false("hp" in t.visible_ids())
+	var i := RosterTable.COLUMNS.keys().find("hp")
+	assert_eq(t.menu.get_item_tooltip(i), "No HP data in this CSV")
+	assert_eq(t.menu.get_item_tooltip(RosterTable.COLUMNS.keys().find("dmg_in")), "No combat log data")
+
+
+func test_row_damaged() -> void:
+	var t := _table()
+	t.add_row("p", Color.WHITE, "swap")
+	assert_false(t.is_row_damaged("p"))
+	t.set_row_damaged("p", true)
+	assert_true(t.is_row_damaged("p"))
+	t.set_row_damaged("p", false)
+	assert_false(t.is_row_damaged("p"))

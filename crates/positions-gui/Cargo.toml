@@ -1,0 +1,15 @@
+[package]
+name = "positions-gui"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop front end for scrim-positions"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+eframe = { version = "0.33", features = ["persistence"] }
+rfd = "0.17"
+serde = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "scrim-positions-gui"
+path = "src/main.rs"

@@ -11,7 +11,7 @@
 use crate::layout::{self, Layout, Rect, REF_ROW_PITCH};
 use anyhow::{bail, Result};
 use glyph::Font;
-use image::imageops::{self, FilterType};
+use image::imageops;
 use image::RgbImage;
 
 /// One panel in a scene config: where it sits in the frame, and (once calibrated) the resample
@@ -36,6 +36,11 @@ pub struct Scene {
     /// against a chat log (`scrim-positions --chat-log`). Not OCR'd by this crate.
     #[serde(default)]
     pub chat: Option<Rect>,
+    /// Locked-target blocks: each rect holds one contiguous grid of locked-target brackets
+    /// (shield/armor/hull rings) recorded at 1:1, for tracking ship HP — the OBS template uses two
+    /// 3x3 grids and one column of two. Read by `crate::targets`.
+    #[serde(default)]
+    pub targets: Vec<Rect>,
 }
 
 impl Scene {
@@ -55,7 +60,15 @@ pub fn crop_scaled(frame: &RgbImage, rect: Rect, scale: f32) -> RgbImage {
     }
     let w = (rect.w as f32 * scale).round().max(1.0) as u32;
     let h = (rect.h as f32 * scale).round().max(1.0) as u32;
-    imageops::resize(&crop, w, h, FilterType::Lanczos3)
+    // `fast_image_resize` (SIMD) rather than `imageops::resize`: same Lanczos3 filter, ~7x less
+    // CPU, and identical OCR output on the match fixtures.
+    use fast_image_resize as fir;
+    let src = fir::images::ImageRef::new(crop.width(), crop.height(), crop.as_raw(), fir::PixelType::U8x3)
+        .expect("RgbImage buffer is width*height*3");
+    let mut dst = fir::images::Image::new(w, h, fir::PixelType::U8x3);
+    let opts = fir::ResizeOptions::new().resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Lanczos3));
+    fir::Resizer::new().resize(&src, &mut dst, &opts).expect("same pixel type in and out");
+    RgbImage::from_raw(w, h, dst.into_vec()).expect("U8x3 buffer is w*h*3")
 }
 
 fn full_rect(img: &RgbImage) -> Rect {

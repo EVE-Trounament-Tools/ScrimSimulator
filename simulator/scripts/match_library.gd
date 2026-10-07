@@ -10,7 +10,7 @@ extends RefCounted
 
 ## Overridable so tests never touch the real library.
 static var dir := "user://matches"
-## Where the release bundle keeps the demo match (`demo/` next to the executable, see
+## Where the release bundle keeps the demo library (`demo/` next to the executable, see
 ## `demo_source`). Overridable so tests never touch the real one.
 static var demo_dir := ""
 ## Audio formats Godot can load at runtime.
@@ -18,7 +18,7 @@ const AUDIO_EXTENSIONS := ["ogg", "mp3", "wav"]
 
 
 ## `[{ path, name, modified, audio, folder }]` for every CSV in the library: the library's own
-## first, then each of `folders()` in turn, newest first within each; `name` drops the
+## first, then each of `folders()` in turn, in natural name order within each (`_2` before `_10`); `name` drops the
 ## `.positions.csv` / `.csv` extension, `modified` is a Unix time, `audio` whether the match has
 ## an audio file and `folder` the folder it is in.
 static func list() -> Array:
@@ -36,8 +36,7 @@ static func list() -> Array:
 				"path": path, "name": display_name(file), "modified": FileAccess.get_modified_time(path),
 				"audio": audio_path(path) != "", "folder": folder,
 			})
-		here.sort_custom(func(a, b):
-			return a.modified > b.modified if a.modified != b.modified else a.name.naturalnocasecmp_to(b.name) < 0)
+		here.sort_custom(func(a, b): return a.name.naturalnocasecmp_to(b.name) < 0)
 		out.append_array(here)
 	return out
 
@@ -175,8 +174,10 @@ static func display_name(file: String) -> String:
 	return file
 
 
-## The demo match's CSV shipped with the release (in `demo_dir`, else `demo/` next to the
-## executable), or "" if there is none. Never found when run from source.
+## The demo library shipped with the release (`demo_dir`, else `demo/` next to the
+## executable): a copy of a library, its matches in the same layout as in `dir` (folders,
+## sidecars, audio, logs). "" if there is none or it holds no CSV. Never found when run from
+## source.
 static func demo_source() -> String:
 	var d := demo_dir
 	if d == "":
@@ -185,21 +186,54 @@ static func demo_source() -> String:
 		d = OS.get_executable_path().get_base_dir().path_join("demo")
 	if not DirAccess.dir_exists_absolute(d):
 		return ""
-	for file in DirAccess.get_files_at(d):
-		if file.get_extension().to_lower() == "csv":
-			return d.path_join(file)
+	for folder in [""] + _subdirs(d):
+		for file in DirAccess.get_files_at(d.path_join(folder)):
+			if file.get_extension().to_lower() == "csv":
+				return d
 	return ""
 
 
-## Adds the demo match (and its gamelogs) to the library the first time it is found; once added,
-## it is never added again, so removing it sticks.
+## Every directory inside `d`, at any depth, as paths relative to it.
+static func _subdirs(d: String) -> Array:
+	var out := []
+	for n in DirAccess.get_directories_at(d):
+		out.append(n)
+		for sub in _subdirs(d.path_join(n)):
+			out.append(n.path_join(sub))
+	return out
+
+
+## Copies the demo library (`demo_source`) into the library the first time it is found, keeping
+## any file already there; once added, it is never added again, so removing it sticks.
 static func add_demo() -> void:
 	if Settings.get_value("library/demo_added"):
 		return
 	var src := demo_source()
-	if src == "" or add(src) == "":
+	if src == "" or not _copy_tree(src, dir):
 		return
 	Settings.set_value("library/demo_added", true)
+
+
+## Copies everything in directory `src` into `dest` (made if missing), skipping files `dest`
+## already has. False if anything couldn't be copied.
+static func _copy_tree(src: String, dest: String) -> bool:
+	var ok := true
+	for folder in [""] + _subdirs(src):
+		var to_dir := dest.path_join(folder)
+		var err := DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(to_dir))
+		if err != OK:
+			push_error("Cannot create %s: %s" % [to_dir, error_string(err)])
+			ok = false
+			continue
+		for file in DirAccess.get_files_at(src.path_join(folder)):
+			var to := to_dir.path_join(file)
+			if FileAccess.file_exists(to):
+				continue
+			err = DirAccess.copy_absolute(src.path_join(folder).path_join(file), ProjectSettings.globalize_path(to))
+			if err != OK:
+				push_error("Cannot copy %s to %s: %s" % [file, to_dir, error_string(err)])
+				ok = false
+	return ok
 
 
 ## Copies `src` into library folder `folder` (made if missing) and returns the copy's path (""
@@ -565,8 +599,8 @@ static func load_audio(path: String) -> AudioStream:
 
 
 ## The match's saved edits: `{ teams: { pilot -> Team }, team_names: { Team -> String },
-## log_pilots: { gamelog file name -> pilot } }` (the last overrides who a gamelog is attributed
-## to), each present only if saved. {} when there is no (readable) sidecar.
+## log_pilots: { gamelog file name -> pilot }, ruleset: `Ruleset` id }` (`log_pilots` overrides
+## who a gamelog is attributed to), each present only if saved. {} when there is no (readable) sidecar.
 static func load_meta(path: String) -> Dictionary:
 	var file := meta_path(path)
 	if not FileAccess.file_exists(file):
@@ -589,6 +623,8 @@ static func load_meta(path: String) -> Dictionary:
 		out.log_pilots = {}
 		for log_file in parsed.log_pilots:
 			out.log_pilots[log_file] = str(parsed.log_pilots[log_file])
+	if parsed.get("ruleset") is String:
+		out.ruleset = parsed.ruleset
 	return out
 
 

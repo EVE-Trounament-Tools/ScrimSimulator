@@ -32,6 +32,7 @@ func after_each() -> void:
 func _main() -> Main:
 	var m: Main = Main.new()
 	add_node(m)
+	m.assets.fetch_ewar_icons = false
 	return m
 
 
@@ -623,12 +624,179 @@ func test_short_name() -> void:
 
 func test_roster_lists_teams() -> void:
 	var m := _main()
+	m._set_broadcast_on(false)
 	assert_false(m.roster_panel.visible, "hidden until a match loads")
 	m.load_match(_match_csv())
 	assert_true(m.roster_panel.visible)
 	assert_eq(_roster(m), ["Blue (1)", "blue", "Red (1)", "red", "Unknown (2)", "late", "runner"])
 	assert_eq(m.roster_table.cell_text("blue", "ship"), "Test Hull")
 	assert_eq(m.roster_table.cell_text("blue", "pilot"), "blue")
+
+
+func test_broadcast_toggle() -> void:
+	var m := _main()
+	m.load_match(_match_csv())
+	assert_true(m.broadcast_panel.visible, "on by default")
+	assert_false(m.roster_panel.visible)
+	assert_true(m.broadcast_button.button_pressed)
+	m._set_broadcast_on(false)
+	assert_false(Settings.get_value("display/broadcast_roster"))
+	m._set_broadcast_on(true)
+	assert_true(m.broadcast_panel.visible)
+	assert_true(Settings.get_value("display/broadcast_roster"))
+	assert_eq(m.broadcast_panel.rows.keys(), ["blue", "red"], "unknown pilots left out")
+	assert_eq(m.broadcast_panel.rows["red"].side, BroadcastRoster.Side.LEFT)
+	assert_eq(m.broadcast_panel.rows["blue"].side, BroadcastRoster.Side.RIGHT)
+	assert_eq(m.broadcast_panel.team_text(BroadcastRoster.Side.LEFT), "RED")
+	assert_eq(m.broadcast_panel.cell_text("blue", "ship"), "Test Hull")
+	m._seek(2.0)
+	m._process(0.0)
+	assert_eq(m.broadcast_panel.cell_text("blue", "speed"), "0 m/s")
+	assert_eq(m.broadcast_panel.clock.text, "00:02")
+	m._set_broadcast_on(false)
+	assert_false(m.broadcast_panel.visible)
+	assert_true(m.roster_panel.visible)
+
+
+func test_broadcast_setting_survives_reload() -> void:
+	Settings.set_value("display/broadcast_roster", false)
+	var m := _main()
+	assert_false(m.broadcast_button.button_pressed)
+	m.load_match(_match_csv())
+	assert_false(m.broadcast_panel.visible)
+	assert_true(m.roster_panel.visible)
+
+
+## Two Abaddons each (40 points apiece) for blue (corner 0) and red (corner 7); blue's "b2" is
+## podded at 4 s, red's "r2" leaves the arena at 3 s.
+func _points_csv() -> String:
+	var rows := []
+	for t in 7:
+		rows.append(row(t, "b1", "Abaddon", on_line(0, 0.5)))
+		rows.append(row(t, "b2", "Abaddon" if t < 4 else "Capsule", on_line(0, 0.6)))
+		rows.append(row(t, "r1", "Abaddon", on_line(7, 0.5)))
+		rows.append(row(t, "r2", "Abaddon", on_line(7, 0.6) if t < 3 else C + X * 130000))
+	return write_csv(rows)
+
+
+func test_broadcast_points() -> void:
+	var m := _main()
+	m.load_match(MatchLibrary.add(_points_csv()))
+	assert_eq(m.ruleset_id, Ruleset.latest_id())
+	var L := BroadcastRoster.Side.LEFT  # red
+	var R := BroadcastRoster.Side.RIGHT  # blue
+	assert_eq(m.broadcast_panel.cell_text("b1", "pts"), "44", "two Abaddons inflate each other")
+	m._seek(0.0)
+	m._process(0.0)
+	# Each 88-point fleet hands the other 112 of the 200-point cap.
+	var start := m.score.score(MatchData.Team.RED, 0.0)
+	assert_eq(m.broadcast_panel.points_text(L), "%d" % start)
+	assert_eq(m.broadcast_panel.points_text(R), "%d" % m.score.score(MatchData.Team.BLUE, 0.0))
+	m._seek(6.0)
+	m._process(0.0)
+	assert_eq(m.broadcast_panel.points_text(L), "%d" % (start + 44), "red scores the podded b2")
+	assert_eq(m.broadcast_panel.points_text(R), "%d" % (start + 44), "blue scores r2 leaving the arena")
+
+
+func test_ruleset_saved_with_match() -> void:
+	var path := MatchLibrary.add(_points_csv())
+	MatchLibrary.save_meta(path, {"ruleset": "nope"})
+	var m := _main()
+	m.load_match(path)
+	assert_eq(m.ruleset_id, Ruleset.latest_id(), "unknown ruleset falls back to the newest")
+	assert_eq(m.ruleset_option.get_item_metadata(m.ruleset_option.selected), m.ruleset_id)
+	m._set_ruleset("ATXXII")
+	assert_eq(MatchLibrary.load_meta(path).ruleset, "ATXXII")
+
+
+## Stationary blue (corner 0) and red (corner 7) with HP: red takes a hit at 3 s; blue's HP is
+## blank from 2 s.
+func _hp_csv() -> String:
+	var rows := []
+	for t in 7:
+		var red := Vector3(1, 1, 1) if t < 3 else Vector3(0.5, 1, 1)
+		rows.append(row(t, "red", "Test Hull", on_line(7, 0.5)) + [red.x, red.y, red.z])
+		rows.append(row(t, "blue", "Test Hull", on_line(0, 0.5)) + ([1, 1, 1] if t < 2 else ["", "", ""]))
+	return write_csv(rows, DEFAULT_HEADER + ",shield,armor,hull")
+
+
+func test_hp_shown_in_both_rosters() -> void:
+	var m := _main()
+	m.load_match(_hp_csv())
+	assert_true("hp" in m.roster_table.visible_ids())
+	m._set_playing(false)
+	m._seek(4.0)
+	m._process(0.0)
+	var bars: HBoxContainer = m.roster_table.rows["red"].labels["hp"]
+	assert_eq(bars.get_children().map(HpBar.get_fraction), [0.5, 1.0, 1.0])
+	assert_eq(HpBar.get_fraction(m.broadcast_panel.rows["red"].labels.shield), 0.5)
+	assert_true(is_nan(HpBar.get_fraction(m.roster_table.rows["blue"].labels["hp"].get_child(0))), "blank: unknown")
+	assert_true(is_nan(HpBar.get_fraction(m.broadcast_panel.rows["blue"].labels.hull)))
+
+
+func test_broadcast_row_greyed_out_once_podded() -> void:
+	var rows := []
+	for t in 7:
+		rows.append(row(t, "red", "Test Hull" if t < 3 else "Capsule", on_line(7, 0.5)) + [1, 1, 1])
+		rows.append(row(t, "blue", "Test Hull", on_line(0, 0.5)) + [1, 1, 1])
+	var m := _main()
+	m.load_match(write_csv(rows, DEFAULT_HEADER + ",shield,armor,hull"))
+	m._set_playing(false)
+	m._seek(2.0)
+	m._process(0.0)
+	assert_false(m.broadcast_panel.is_dead("red"))
+	m._seek(4.0)
+	m._process(0.0)
+	assert_true(m.broadcast_panel.is_dead("red"))
+	assert_eq(m.broadcast_panel.cell_text("red", "ship"), "Test Hull", "keeps the hull it lost")
+	assert_eq(m.broadcast_panel.cell_text("red", "speed"), "—")
+	assert_true(is_nan(HpBar.get_fraction(m.broadcast_panel.rows["red"].labels.hull)))
+	assert_eq(m.roster_table.cell_text("red", "ship"), "Capsule", "roster table unchanged")
+	assert_false(m.broadcast_panel.is_dead("blue"))
+	m._seek(1.0)
+	m._process(0.0)
+	assert_false(m.broadcast_panel.is_dead("red"), "alive again when scrubbed back")
+
+
+func test_hp_column_hidden_without_hp() -> void:
+	var m := _main()
+	m.load_match(_match_csv())
+	assert_false("hp" in m.roster_table.visible_ids())
+	assert_true(m.damage_button.disabled)
+	m.load_match(_hp_csv())
+	assert_false(m.damage_button.disabled)
+
+
+func test_damage_highlight_toggle() -> void:
+	var m := _main()
+	m.load_match(_hp_csv())
+	m._set_playing(false)
+	m._seek(3.5)
+	m._process(0.0)
+	assert_false(m.roster_table.is_row_damaged("red"), "off by default")
+	m._set_damage_on(true)
+	assert_true(Settings.get_value("display/damage_highlight"))
+	assert_true(m.damage_button.button_pressed)
+	assert_true(m.damage_setting.button_pressed)
+	assert_true(m.roster_table.is_row_damaged("red"))
+	assert_true(m.broadcast_panel.is_damaged("red"))
+	assert_false(m.roster_table.is_row_damaged("blue"))
+	m._seek(6.5)
+	m._process(0.0)
+	assert_false(m.roster_table.is_row_damaged("red"), "steady again")
+	m._seek(3.5)
+	m._process(0.0)
+	m._set_damage_on(false)
+	assert_false(m.roster_table.is_row_damaged("red"))
+	assert_false(m.broadcast_panel.is_damaged("red"))
+
+
+func test_damage_setting_survives_reload() -> void:
+	Settings.set_value("display/damage_highlight", true)
+	var m := _main()
+	assert_true(m.damage_on)
+	assert_true(m.damage_button.button_pressed)
+	assert_true(m.damage_setting.button_pressed)
 
 
 func test_roster_sorts_by_ship_type_and_abbreviates() -> void:
@@ -1392,6 +1560,75 @@ func test_roster_right_click_opens_debug_menu() -> void:
 	assert_true(m.ship_debug_menu.visible)
 
 
+## "jumper" (corner 0) flies +Y at 100 m/s, then micro jumps 100 km along +X at 21 s; "other"
+## (corner 7) sits still.
+func _mjd_main() -> Main:
+	var m := _main()
+	var rows := []
+	for t in 21:
+		rows.append(row(t, "jumper", "Test Hull", on_line(0, 0.5) + Vector3.UP * 100 * t))
+		rows.append(row(t, "other", "Test Hull", on_line(7, 0.5)))
+	rows.append(row(21, "jumper", "Test Hull", on_line(0, 0.5) + Vector3.UP * 2000 + X * 100000))
+	m.load_match(write_csv(rows))
+	return m
+
+
+func test_mjd_spool_up_graphics() -> void:
+	var m := _mjd_main()
+	var ship: Dictionary = m.ships["jumper"]
+	m._seek(5.0)
+	m._process(0.0)
+	assert_false(ship.mjd_ring.visible, "not spooling yet")
+	assert_false(ship.mjd_projection.visible)
+	assert_eq(m.broadcast_panel.rows["jumper"].mjd.get_child_count(), 0)
+
+	m._seek(15.0)
+	m._process(0.0)
+	assert_true(ship.mjd_ring.visible)
+	assert_true(ship.mjd_projection.visible)
+	assert_eq(ship.mjd_label.text, "jumper MJD 6 s")
+	# 100 km ahead along its current heading (+Y), not where it actually lands (+X).
+	var pos := (on_line(0, 0.5) + Vector3.UP * 1500) * Main.M_TO_UNITS
+	assert_almost(ship.mjd_land, pos + Vector3.UP * 100.0)
+	var icons: HBoxContainer = m.broadcast_panel.rows["jumper"].mjd
+	assert_eq(icons.get_child_count(), 1)
+	assert_eq(icons.get_child(0).tooltip_text, "Micro jump drive spooling: jumps in 6 s")
+	assert_eq(m.broadcast_panel.rows["other"].mjd.get_child_count(), 0)
+
+	m.mjd_button.button_pressed = false
+	assert_false(Settings.get_value("display/mjd_spoolup"))
+	assert_false(m.mjd_setting.button_pressed, "settings checkbox follows")
+	m._process(0.0)
+	assert_false(ship.mjd_ring.visible, "space graphics are behind the toggle")
+	assert_false(ship.mjd_projection.visible)
+	assert_eq(icons.get_child_count(), 1, "broadcast icon shows regardless")
+
+	m.mjd_setting.button_pressed = true
+	m._seek(21.0)
+	m._process(0.0)
+	assert_false(ship.mjd_ring.visible, "landed")
+	assert_eq(icons.get_child_count(), 0)
+
+
+func test_mjd_projection_holds_heading_when_stopped() -> void:
+	var m := _main()
+	var rows := []
+	for t in 21:
+		var y := 100 * mini(t, 5)  # stops at 5 s
+		rows.append(row(t, "jumper", "Test Hull", on_line(0, 0.5) + Vector3.UP * y))
+		rows.append(row(t, "other", "Test Hull", on_line(7, 0.5)))
+	rows.append(row(21, "jumper", "Test Hull", on_line(0, 0.5) + Vector3.UP * 500 + X * 100000))
+	m.load_match(write_csv(rows))
+	var ship: Dictionary = m.ships["jumper"]
+	m._seek(3.0)
+	m._process(0.0)
+	m._seek(15.0)
+	m._process(0.0)
+	assert_true(ship.mjd_projection.visible, "keeps the heading it had while moving")
+	var pos := (on_line(0, 0.5) + Vector3.UP * 500) * Main.M_TO_UNITS
+	assert_almost(ship.mjd_land, pos + Vector3.UP * 100.0)
+
+
 func test_movement_vector_projects_velocity() -> void:
 	var m := _select_main()
 	var ship: Dictionary = m.ships["blue"]
@@ -1485,3 +1722,35 @@ func test_beacon_jump_ranges() -> void:
 	var centre: Node3D = m.beacon_ranges_centre.get_child(0)
 	assert_almost(centre.position, Vector3.ONE * Main.CUBE / 2.0)
 	assert_almost(centre.get_child(1).mesh.radius, Main.BEACON_JUMP_KM)
+
+
+func test_activity_lines() -> void:
+	var m := _main()
+	m.load_match(_match_csv())
+	m._set_playing(false)
+	var gamelog := CombatLog.new()
+	gamelog.entries = [{
+		"eve_unix": 1005.0, "t": 5.0, "kind": CombatLog.Kind.DAMAGE, "text": "",
+		"source": "blue", "target": "late", "source_ship": "", "target_ship": "",
+		"source_pilot": "blue", "target_pilot": "late", "amount": 100.0, "weapon": "Gun", "quality": "",
+	}]
+	m.combat_stats = CombatStats.from_logs([gamelog])
+	var lines: ImmediateMesh = m.links_mesh.mesh
+	m._seek(6.0)
+	m._process(0.0)
+	assert_eq(lines.get_surface_count(), 1, "blue shooting late")
+	m._seek(12.0)
+	m._process(0.0)
+	assert_eq(lines.get_surface_count(), 0, "the shot has long passed")
+	m._seek(6.0)
+	m._refresh_all_debug_menu()
+	assert_true(m.all_debug_menu.link_checks.shooting.button_pressed, "on by default")
+	m.all_debug_menu.link_checks.shooting.button_pressed = false
+	assert_false(Settings.get_value("links/shooting"))
+	m._process(0.0)
+	assert_eq(lines.get_surface_count(), 0, "shooting hidden")
+	m.all_debug_menu.link_color_changed.emit("tackle", Color.GREEN)
+	assert_eq(Settings.get_value("links/tackle_color"), Color.GREEN)
+	var again := _main()
+	assert_false(again.links.shooting.on, "kept across restarts")
+	assert_eq(again.links.tackle.color, Color.GREEN)

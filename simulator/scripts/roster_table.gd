@@ -5,7 +5,8 @@ extends VBoxContainer
 ## to trade width between them, double-click a column's right grip to fit it to its contents,
 ## drag a header to move it, and right-click the header to choose which columns are shown. The
 ## layout persists in setting `roster/columns`. Columns can also be made unavailable (no data for
-## them): they are hidden without touching the saved layout.
+## them): they are hidden without touching the saved layout. Rows can be highlighted while their
+## ship takes damage.
 
 signal row_pressed(pilot: String)
 signal swap_pressed(pilot: String)
@@ -17,12 +18,14 @@ signal group_activated(key: int)
 signal layout_changed
 
 ## id -> title, alignment and default width (px), in default display order. `icons` columns hold
-## a row of icons (`set_cell_icons`) instead of text.
+## a row of icons (`set_cell_icons`) and `hp` columns shield, armor and hull bars (`set_cell_hp`)
+## instead of text. `missing` is the menu tooltip while a column is unavailable.
 const COLUMNS := {
 	"ship": {"title": "Ship", "align": HORIZONTAL_ALIGNMENT_LEFT, "width": 110},
 	"pilot": {"title": "Pilot", "align": HORIZONTAL_ALIGNMENT_LEFT, "width": 110},
 	"speed": {"title": "Speed", "align": HORIZONTAL_ALIGNMENT_RIGHT, "width": 70},
 	"distance": {"title": "Centre", "align": HORIZONTAL_ALIGNMENT_RIGHT, "width": 70},
+	"hp": {"title": "HP", "align": HORIZONTAL_ALIGNMENT_CENTER, "width": 90, "hp": true, "missing": "No HP data in this CSV"},
 	"dmg_in": {"title": "Dmg in", "align": HORIZONTAL_ALIGNMENT_RIGHT, "width": 72},
 	"dmg_out": {"title": "Dmg out", "align": HORIZONTAL_ALIGNMENT_RIGHT, "width": 72},
 	"rep_in": {"title": "Reps in", "align": HORIZONTAL_ALIGNMENT_RIGHT, "width": 72},
@@ -43,6 +46,10 @@ const MAX_VIEWPORT_FRACTION := 0.9
 const SWAP_W := 28.0
 ## Size of the icons in `icons` columns.
 const ICON_PX := 24.0
+## Height of the bars in `hp` columns.
+const HP_BAR_H := 8.0
+## Row background while its ship takes damage.
+const DAMAGE_COLOR := Color(0.9, 0.15, 0.1, 0.35)
 const SETTING := "roster/columns"
 
 ## Display order of { id, width, visible }.
@@ -54,7 +61,7 @@ var menu: PopupMenu
 ## Column id -> its header Label.
 var header_cells := {}
 ## pilot -> { button, cells (HBoxContainer), labels: { column id -> Label, or HBoxContainer for
-## `icons` columns } }.
+## `icons` and `hp` columns }, damage (ColorRect behind the cells, shown while taking damage) }.
 var rows := {}
 ## Column id -> true for columns hidden because there is nothing to show in them.
 var unavailable := {}
@@ -186,6 +193,8 @@ func autosize(id: String) -> void:
 		var cell: Control = rows[pilot].labels[id]
 		if cell is Label:
 			texts.append(cell.text)
+		elif COLUMNS[id].get("hp", false):
+			return  # Bars fill whatever width they're given.
 		else:
 			width = maxf(width, icon_box(pilot, id).get_combined_minimum_size().x)
 	for text in texts:
@@ -275,6 +284,12 @@ func add_row(pilot: String, color: Color, swap_tooltip: String) -> Button:
 			row_context_pressed.emit(pilot)
 			button.accept_event())
 	row.add_child(button)
+	var damage := ColorRect.new()
+	damage.color = DAMAGE_COLOR
+	damage.visible = false
+	damage.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	damage.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	button.add_child(damage)
 	var cells := HBoxContainer.new()
 	cells.add_theme_constant_override("separation", int(HANDLE_W))
 	cells.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -285,6 +300,8 @@ func add_row(pilot: String, color: Color, swap_tooltip: String) -> Button:
 		var cell: Control
 		if COLUMNS[id].get("icons", false):
 			cell = _icon_cell(color)
+		elif COLUMNS[id].get("hp", false):
+			cell = _hp_cell()
 		else:
 			cell = _cell(COLUMNS[id].align)
 			cell.add_theme_color_override("font_color", color)
@@ -297,7 +314,7 @@ func add_row(pilot: String, color: Color, swap_tooltip: String) -> Button:
 	swap.tooltip_text = swap_tooltip
 	swap.pressed.connect(func(): swap_pressed.emit(pilot))
 	row.add_child(swap)
-	rows[pilot] = {"button": button, "cells": cells, "labels": labels}
+	rows[pilot] = {"button": button, "cells": cells, "labels": labels, "damage": damage}
 	_layout_row(rows[pilot])
 	return button
 
@@ -310,17 +327,40 @@ func cell_text(pilot: String, id: String) -> String:
 	return rows[pilot].labels[id].text
 
 
+## Shows `pilot`'s remaining shield, armor and hull (`hp` x, y, z: 0-1, NAN when unknown) in
+## `hp` column `id`.
+func set_cell_hp(pilot: String, id: String, hp: Vector3) -> void:
+	var bars: HBoxContainer = rows[pilot].labels[id]
+	for i in 3:
+		HpBar.set_fraction(bars.get_child(i), hp[i])
+
+
+## Highlights `pilot`'s row (taking damage) or not.
+func set_row_damaged(pilot: String, on: bool) -> void:
+	rows[pilot].damage.visible = on
+
+
+func is_row_damaged(pilot: String) -> bool:
+	return rows[pilot].damage.visible
+
+
 ## Fills `icons` column `id` of `pilot`'s row with `items`, each { key, texture, text, tooltip }:
 ## the texture, or `text` when it is null, with its own tooltip (clicks still reach the row). Does
 ## nothing when the items are the same as last time, so it is cheap to call every frame.
 func set_cell_icons(pilot: String, id: String, items: Array) -> void:
 	var cell := icon_box(pilot, id)
+	fill_icons(cell, items, cell.get_meta("color", Color.WHITE))
+
+
+## Fills `box` with `items` (see `set_cell_icons`); text items are drawn in `color`. Does nothing
+## when the items are the same as last time.
+static func fill_icons(box: HBoxContainer, items: Array, color: Color) -> void:
 	var signature := "\n".join(items.map(func(i): return "%s|%s|%s" % [i.key, i.texture != null, i.tooltip]))
-	if cell.get_meta("signature", "") == signature:
+	if box.get_meta("signature", "") == signature:
 		return
-	cell.set_meta("signature", signature)
-	for c in cell.get_children():
-		cell.remove_child(c)
+	box.set_meta("signature", signature)
+	for c in box.get_children():
+		box.remove_child(c)
 		c.queue_free()
 	for item in items:
 		var child: Control
@@ -336,12 +376,12 @@ func set_cell_icons(pilot: String, id: String, items: Array) -> void:
 			var label := Label.new()
 			label.text = item.text
 			label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-			label.add_theme_color_override("font_color", cell.get_meta("color", Color.WHITE))
+			label.add_theme_color_override("font_color", color)
 			child = label
 		child.tooltip_text = item.tooltip
 		child.mouse_filter = Control.MOUSE_FILTER_PASS
 		child.set_meta("key", item.key)
-		cell.add_child(child)
+		box.add_child(child)
 
 
 ## An `icons` cell: a clipping Control (so extra icons don't widen the row) around a row of icons.
@@ -356,6 +396,18 @@ static func _icon_cell(color: Color) -> Control:
 	box.set_meta("color", color)
 	cell.add_child(box)
 	return cell
+
+
+## An `hp` cell: shield, armor and hull bars side by side, sharing the column's width.
+static func _hp_cell() -> HBoxContainer:
+	var box := HBoxContainer.new()
+	box.add_theme_constant_override("separation", 3)
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	for layer in ["Shield", "Armor", "Hull"]:
+		var bar := HpBar.make(0.0, HP_BAR_H, layer)
+		bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		box.add_child(bar)
+	return box
 
 
 ## The icon row of `pilot`'s `icons` column `id`.
@@ -406,7 +458,7 @@ func _apply_layout() -> void:
 		var id: String = COLUMNS.keys()[i]
 		menu.set_item_checked(i, _column(id).visible)
 		menu.set_item_disabled(i, unavailable.has(id) or visible_ids() == [id])
-		menu.set_item_tooltip(i, "No combat log data" if unavailable.has(id) else "")
+		menu.set_item_tooltip(i, COLUMNS[id].get("missing", "No combat log data") if unavailable.has(id) else "")
 	for pilot in rows:
 		_layout_row(rows[pilot])
 

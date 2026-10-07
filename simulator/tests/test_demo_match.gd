@@ -195,6 +195,7 @@ func test_sample() -> void:
 func _viewer() -> Main:
 	var m: Main = Main.new()
 	add_node(m)
+	m.assets.fetch_ewar_icons = false
 	m.sizes.ships.clear()
 	for hull in HULL_RADII:
 		m.sizes.ships[hull.to_lower()] = {

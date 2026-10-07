@@ -21,3 +21,8 @@ simulator/sde/
 
 # Python bytecode (scripts/)
 __pycache__/
+
+# Website (web/worker): dependencies, local wrangler state, local secrets
+web/worker/node_modules/
+web/worker/.wrangler/
+web/worker/.dev.vars

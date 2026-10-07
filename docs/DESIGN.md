@@ -220,10 +220,13 @@ contributing observers, and a GDOP estimate.
 
 ### 4.6 S6 — Locked-target HP rings
 
-Locked-target brackets draw shield/armor/hull as three concentric arcs. Read them by sampling
-along each arc's radius and finding the filled/unfilled boundary — pixel geometry, not OCR, and
-robust because the bracket's position and radius are fixed by the layout config. Yields per-ship
-damage state over time for every ship any observer has locked.
+Locked-target brackets draw shield/armor/hull as three concentric arcs, white where HP remains and
+red where it's lost. Read them by sampling 100 points along each arc and taking the white share —
+pixel geometry, not OCR. The brackets aren't at fixed spots (rows move as long names wrap, and
+each client may run another UI scale), so each recorded block is calibrated once for ring scale
+and columns, and rings are found again every tick. Whose ring it is comes from the label under
+it (name, ship type, range), read with Tesseract and matched to the overview roster. Yields
+per-ship damage state over time for every ship any observer has locked.
 
 ### 4.7 S7 — Game log fusion
 

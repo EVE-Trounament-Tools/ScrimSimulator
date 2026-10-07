@@ -1,7 +1,7 @@
 //! Read a segmented cell against a trained [`crate::Font`] (DESIGN.md S4.3).
 //!
 //! Each ink run in the cell is classified against the active alphabet by best-offset NCC
-//! (`template::best_match`). A run whose single best match is unconvincing is also tried as two
+//! (`template::PaddedCell::best_match`). A run whose single best match is unconvincing is also tried as two
 //! (or more) touching glyphs — real overview video is compressed with 4:2:0 chroma, which
 //! regularly blurs adjacent glyphs into one ink run (`km` -> one run, `rn` fusing into something
 //! that scores tolerably as `m`) — so recognition-driven splitting (`classify_span`, below) is
@@ -11,7 +11,7 @@
 
 use crate::coverage::CoverageMap;
 use crate::segment::{self, gaps, split_at_ink_minimum, Span};
-use crate::template::{best_match, Template};
+use crate::template::{PaddedCell, Template};
 
 /// Which characters are legal in a cell, used to prune the search (DESIGN.md S4.3: "numeric
 /// columns use a digit/separator/unit alphabet only — a tiny, closed, high-confidence set").
@@ -88,10 +88,11 @@ fn best_two<'a>(templates: &'a [Template], cell: &CoverageMap, alphabet: Alphabe
         .collect();
     let pool = if narrow.is_empty() { candidates } else { narrow };
 
+    let padded = PaddedCell::new(cell, DX_PAD, DY_PAD);
     let mut scored: Vec<(f32, &Template)> = pool
         .into_iter()
         .map(|t| {
-            let (score, _dx, _dy) = best_match(t, cell, DX_PAD, DY_PAD);
+            let (score, _dx, _dy) = padded.best_match(t);
             (score, t)
         })
         .collect();

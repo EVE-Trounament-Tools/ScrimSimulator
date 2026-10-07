@@ -79,11 +79,25 @@ const AUDIO_BUS := "Match audio"
 const EVENT_LEAD_S := 2.0
 ## A micro jump's take-off -> landing line stays up this long (match s) after the jump.
 const MJD_TRAIL_S := 5.0
+## Radius (screen px) of the spool ring drawn around a ship spooling its micro jump drive, and of
+## the marker at its projected landing.
+const MJD_RING_PX := 24.0
+const MJD_RING_SEGMENTS := 48
 ## Jump range drawn around the corner and centre beacons (debug menu).
 const BEACON_JUMP_KM := 5.0
 const VECTOR_SECONDS := 3.0
 ## A movement vector's arrowhead is this fraction of its length.
 const ARROW_FRACTION := 0.08
+## Activity lines (shooting, tackle, …), in screen pixels: space between the lines of different
+## kinds joining the same two ships, dash and gap length, how fast the dashes flow from source to
+## target (px/s, wall clock so they move while paused), and the arrowhead at the target.
+const LINK_SPACING_PX := 4.0
+const LINK_DASH_PX := 14.0
+const LINK_GAP_PX := 8.0
+const LINK_FLOW_PX_S := 40.0
+const LINK_HEAD_PX := 9.0
+## Alpha at a dash's tail; its head is opaque, so direction shows in a still frame too.
+const LINK_TAIL_ALPHA := 0.3
 
 var data: MatchData
 var match_path := ""
@@ -103,6 +117,10 @@ var team_names := {}
 ## Gamelog file name -> pilot it belongs to, where the listener's name doesn't pick the right one
 ## (see `CombatLog.sync`); saved like `team_overrides`.
 var log_pilots := {}
+## Id of the `Ruleset` the match's points follow (default the newest); saved like `team_overrides`.
+var ruleset_id := ""
+## Team points under `ruleset_id` (null without a match or ruleset).
+var score: MatchScore
 ## What the open match's gamelogs say about each pilot (roster combat columns).
 var combat_stats := CombatStats.new()
 ## CSV pilot name -> display name, for every match (setting `names/pilots`).
@@ -110,16 +128,22 @@ var pilot_names: Dictionary = Settings.get_value("names/pilots").duplicate()
 ## pilot -> { vector: bool, spheres: [{ radius_km, color }] } from the debug menus; kept when the
 ## same match reloads.
 var debug := {}
+## `CombatStats.LINK_KINDS` kind -> { on, color }: which activity lines are drawn (from Settings).
+var links := {}
+## Every activity line, in world space.
+var links_mesh: MeshInstance3D
 ## Movement vectors end where the ship will be this many seconds from now.
 var vector_seconds := VECTOR_SECONDS
 
 ## pilot -> { node, visual, model_id, icon, select_icon, label, ship_type, radius, dead, color, tint, death_t,
-## death_marker, heading, heading_t, vector, vector_tip, spheres }; `heading` is the model's
+## death_marker, heading, heading_t, vector, vector_tip, spheres, mjd_ring, mjd_projection,
+## mjd_lines, mjd_label, mjd_dir, mjd_land }; `heading` is the model's
 ## rotation as of match time `heading_t`; `radius` is the true hull radius in scene units (0 if
 ## unknown), `visual` the sphere or model under `node`, `model_id` the type ID it shows
 ## (0 = sphere), `tint` the colour the ship is currently drawn in; `vector` the debug movement
 ## line (ending at `vector_tip`, relative to the ship) and `spheres` the node holding its debug
-## range spheres.
+## range spheres; `mjd_ring` and `mjd_projection` (lines `mjd_lines` and label `mjd_label`, in
+## world space) draw its micro jump drive spool-up, aimed along `mjd_dir` to `mjd_land`.
 var ships := {}
 var ships_root: Node3D
 var boundary: Node3D
@@ -151,6 +175,11 @@ var play_button: Button
 var start_button: Button
 var timeline: HSlider
 var event_strip: EventStrip
+## Draw micro jump drive spool-ups in space (setting `display/mjd_spoolup`); the broadcast panel's
+## MJD icon shows regardless.
+var mjd_on := true
+var mjd_button: Button
+var mjd_setting: CheckBox
 ## { t: float, node: Node3D } per micro jump: a line from take-off to landing.
 var mjd_trails: Array = []
 var time_label: Label
@@ -169,6 +198,16 @@ var assets_dialog: ConfirmationDialog
 var bottom_panel: PanelContainer
 var roster_panel: PanelContainer
 var roster_table: RosterTable
+## Broadcast-style alternative to the roster (setting `display/broadcast_roster`).
+var broadcast_panel: BroadcastRoster
+var broadcast_button: Button
+var broadcast_on := false
+## Highlight roster rows of ships taking damage (setting `display/damage_highlight`).
+var damage_button: Button
+## Picks `ruleset_id`; item metadata is the ruleset id.
+var ruleset_option: OptionButton
+var damage_setting: CheckBox
+var damage_on := false
 var info_panel: PanelContainer
 var info_label: Label
 var select_texture: Texture2D
@@ -211,8 +250,13 @@ func _ready() -> void:
 	add_child(assets)
 	models_on = Settings.get_value("display/ship_models")
 	smooth_on = Settings.get_value("display/smooth_motion")
+	broadcast_on = Settings.get_value("display/broadcast_roster")
+	damage_on = Settings.get_value("display/damage_highlight")
+	mjd_on = Settings.get_value("display/mjd_spoolup")
 	for field in OVERLAY_FIELDS:
 		ship_overlay[field] = Settings.get_value("overlay/" + field)
+	for kind in CombatStats.LINK_KINDS:
+		links[kind] = {"on": Settings.get_value("links/" + kind), "color": Settings.get_value("links/%s_color" % kind)}
 	get_window().content_scale_factor = Settings.get_value("display/ui_scale")
 	_build_environment()
 	_overlay_unit = _units_per_px(1.0)
@@ -221,6 +265,9 @@ func _ready() -> void:
 	_build_boundary()
 	ships_root = Node3D.new()
 	add_child(ships_root)
+	links_mesh = _lines_mesh()
+	links_mesh.visible = true
+	add_child(links_mesh)
 	_build_measure()
 	_build_audio()
 	_build_ui()
@@ -234,6 +281,7 @@ func _ready() -> void:
 	assets.status_changed.connect(func(text): sde_label.text = text)
 	assets.needs_download.connect(_prompt_assets)
 	assets.assets_changed.connect(_on_assets_changed)
+	assets.ewar_icons_changed.connect(_update_roster_cells)
 	assets.start(models_on, Settings.get_value("sde/auto_update"))
 	_apply_visual_mode()
 
@@ -272,6 +320,10 @@ func load_match(path: String) -> bool:
 		team_overrides = meta.get("teams", {})
 		team_names = meta.get("team_names", {})
 		log_pilots = meta.get("log_pilots", {})
+		ruleset_id = meta.get("ruleset", "")
+		if Ruleset.load_id(ruleset_id) == null:
+			ruleset_id = Ruleset.latest_id()
+		_select_ruleset_option()
 		debug.clear()
 		for w in breakdown_windows.duplicate():
 			w.queue_free()
@@ -297,6 +349,8 @@ func load_match(path: String) -> bool:
 	if not ships.has(selected):
 		selected = ""
 	_update_file_label()
+	roster_table.set_column_available("hp", data.has_hp)
+	_update_damage_controls()
 	_refresh_roster()
 	_select(selected)
 	print("Loaded %s: %d pilots, %.0f s" % [path, ships.size(), data.duration])
@@ -320,6 +374,8 @@ func _show_menu() -> void:
 
 
 func _on_menu_match_chosen(path: String) -> void:
+	if OS.has_feature("web") and not await WebLibrary.fetch_match(path):
+		return
 	if not load_match(path):
 		menu.show_error("Failed to load %s — is it a scrim-positions CSV?" % path.get_file())
 
@@ -379,7 +435,7 @@ func _apply_combat_stats() -> void:
 ## Saves this match's team swaps and names (and gamelog attributions), if it is in the library.
 func _save_meta() -> void:
 	if MatchLibrary.contains(match_path):
-		var meta := {"teams": team_overrides, "team_names": team_names}
+		var meta := {"teams": team_overrides, "team_names": team_names, "ruleset": ruleset_id}
 		if not log_pilots.is_empty():
 			meta.log_pilots = log_pilots
 		MatchLibrary.save_meta(match_path, meta)
@@ -524,7 +580,9 @@ func _process(delta: float) -> void:
 				audio_player.seek(time)
 	_update_ships()
 	_update_vectors()
+	_update_links()
 	_update_mjd_trails()
+	_update_mjd_spool()
 	if tracked != "" and ships[tracked].node.visible:
 		camera.set_target(ships[tracked].node.position)
 	_update_measure()
@@ -610,14 +668,23 @@ func _add_ship(pilot: String) -> void:
 	var label := _label(color)
 	node.add_child(label)
 
-	var vector := MeshInstance3D.new()
-	vector.mesh = ImmediateMesh.new()
-	vector.material_override = vector_material
-	vector.visible = false
+	var vector := _lines_mesh()
 	node.add_child(vector)
 
 	var spheres := Node3D.new()
 	node.add_child(spheres)
+
+	var mjd_ring := _lines_mesh()
+	node.add_child(mjd_ring)
+	var mjd_projection := Node3D.new()
+	mjd_projection.top_level = true  # drawn in world space
+	mjd_projection.visible = false
+	var mjd_lines := _lines_mesh()
+	mjd_lines.visible = true
+	mjd_projection.add_child(mjd_lines)
+	var mjd_label := _label(MJD_COLOR)
+	mjd_projection.add_child(mjd_label)
+	node.add_child(mjd_projection)
 
 	node.visible = false
 	ships_root.add_child(node)
@@ -627,12 +694,23 @@ func _add_ship(pilot: String) -> void:
 		"ship_type": "", "radius": 0.0, "dead": false, "color": color, "tint": color,
 		"death_t": INF, "death_marker": null, "heading": Quaternion.IDENTITY, "heading_t": -INF,
 		"vector": vector, "vector_tip": Vector3.ZERO, "spheres": spheres,
+		"mjd_ring": mjd_ring, "mjd_projection": mjd_projection, "mjd_lines": mjd_lines,
+		"mjd_label": mjd_label, "mjd_dir": Vector3.ZERO, "mjd_land": Vector3.ZERO,
 	}
 	_apply_debug(pilot)
 	if data.deaths.has(pilot):
 		var death: Dictionary = data.deaths[pilot]
 		ships[pilot].death_t = death.t
 		ships[pilot].death_marker = _death_marker(pilot, death, color)
+
+
+## An empty, hidden line mesh drawn in its vertex colours over everything.
+func _lines_mesh() -> MeshInstance3D:
+	var mesh := MeshInstance3D.new()
+	mesh.mesh = ImmediateMesh.new()
+	mesh.material_override = vector_material
+	mesh.visible = false
+	return mesh
 
 
 func _sphere() -> MeshInstance3D:
@@ -757,6 +835,85 @@ func _mjd_trail(e: Dictionary) -> Node3D:
 func _update_mjd_trails() -> void:
 	for trail in mjd_trails:
 		trail.node.visible = time >= trail.t and time - trail.t <= MJD_TRAIL_S
+
+
+## Draws each micro jump drive spool-up (`mjd_on`): a ring around the ship filling over the
+## `MatchData.MJD_SPOOL_S`, and an arrow to where it would land if it jumped now, 100 km along its
+## current heading (`_mjd_heading`), labelled with the seconds left.
+func _update_mjd_spool() -> void:
+	for pilot in ships:
+		var ship: Dictionary = ships[pilot]
+		var spool := -1.0
+		if mjd_on and ship.node.visible and time < ship.death_t:
+			spool = data.mjd_spool(pilot, time)
+			_track_mjd_heading(pilot)
+		var on := spool >= 0.0
+		ship.mjd_ring.visible = on
+		if not on:
+			ship.mjd_projection.visible = false
+			continue
+		var pos: Vector3 = ship.node.position
+		var r := maxf(ship.radius * 1.5, _units_per_px(camera.global_position.distance_to(pos)) * MJD_RING_PX)
+		var ring: ImmediateMesh = ship.mjd_ring.mesh
+		ring.clear_surfaces()
+		ring.surface_begin(Mesh.PRIMITIVE_LINES)
+		_add_ring(ring, Vector3.ZERO, r, 1.0, Color(MJD_COLOR, 0.3))
+		for k in [1.0, 1.08, 1.16]:
+			_add_ring(ring, Vector3.ZERO, r * k, spool, MJD_COLOR)
+		ring.surface_end()
+
+		var dir := _mjd_heading(ship)
+		ship.mjd_projection.visible = dir != Vector3.ZERO
+		if dir == Vector3.ZERO:
+			continue
+		var land := pos + dir * MatchData.MJD_DISTANCE_M * M_TO_UNITS
+		ship.mjd_land = land
+		var land_r := _units_per_px(camera.global_position.distance_to(land)) * MJD_RING_PX
+		var lines: ImmediateMesh = ship.mjd_lines.mesh
+		lines.clear_surfaces()
+		lines.surface_begin(Mesh.PRIMITIVE_LINES)
+		lines.surface_set_color(Color(MJD_COLOR, 0.8))
+		for p in _arrow_points(pos + dir * r, land - dir * land_r):
+			lines.surface_add_vertex(p)
+		_add_ring(lines, land, land_r, 1.0, MJD_COLOR)
+		_add_ring(lines, land, land_r * 0.3, 1.0, MJD_COLOR)
+		lines.surface_end()
+		ship.mjd_label.text = "%s MJD %d s" % [_pilot_name(pilot), _mjd_seconds_left(spool)]
+		ship.mjd_label.position = land + camera.global_basis.y * land_r * 1.6
+
+
+## Adds the first `fraction` (clockwise from the top) of a camera-facing circle of `radius` around
+## `centre` to `lines` (an open `PRIMITIVE_LINES` surface), in `color`.
+func _add_ring(lines: ImmediateMesh, centre: Vector3, radius: float, fraction: float, color: Color) -> void:
+	var x := camera.global_basis.x * radius
+	var y := camera.global_basis.y * radius
+	var n := ceili(MJD_RING_SEGMENTS * fraction)
+	lines.surface_set_color(color)
+	for j in n:
+		for k in [j, j + 1]:
+			var a: float = TAU * fraction * k / n
+			lines.surface_add_vertex(centre + x * sin(a) + y * cos(a))
+
+
+## Keeps `pilot`'s `mjd_dir` (its last known heading) up to date: the direction of its velocity
+## over the last `HEADING_WINDOW_S`, never looking ahead (which would give away where a jump
+## lands); left as it was while the ship is (nearly) stopped.
+func _track_mjd_heading(pilot: String) -> void:
+	var prev := data.sample(pilot, time - HEADING_WINDOW_S)
+	var now := data.sample(pilot, time)
+	if prev.is_empty() or now.is_empty() or now.t <= prev.t:
+		return
+	var v: Vector3 = (now.pos - prev.pos) / (now.t - prev.t)
+	if v.length() >= MIN_HEADING_SPEED:
+		ships[pilot].mjd_dir = v.normalized()
+
+
+## Unit direction `ship` is heading now, for its projected micro jump: its last known heading
+## (`_track_mjd_heading`), else its model's facing. ZERO when unknown.
+func _mjd_heading(ship: Dictionary) -> Vector3:
+	if ship.mjd_dir == Vector3.ZERO and ship.model_id != 0 and ship.heading_t > -INF:
+		return Basis(ship.heading).z.normalized()
+	return ship.mjd_dir
 
 
 ## Seeks to the lead-up of the next (`dir` 1) or previous (-1) event from now.
@@ -1202,14 +1359,88 @@ func _update_vectors() -> void:
 			continue
 		var tip := v * vector_seconds * M_TO_UNITS
 		ship.vector_tip = tip
-		var dir := tip.normalized()
-		var side := dir.cross(Vector3.UP if absf(dir.y) < 0.99 else Vector3.RIGHT).normalized()
-		var head := tip.length() * ARROW_FRACTION
 		lines.surface_begin(Mesh.PRIMITIVE_LINES)
 		lines.surface_set_color(Color(ship.tint, 1.0))
-		for p in [Vector3.ZERO, tip, tip, tip - (dir - side * 0.5) * head, tip, tip - (dir + side * 0.5) * head]:
+		for p in _arrow_points(Vector3.ZERO, tip):
 			lines.surface_add_vertex(p)
 		lines.surface_end()
+
+
+## Line vertex pairs of an arrow from `from` to `to`: the shaft, then an arrowhead
+## `ARROW_FRACTION` of its length.
+static func _arrow_points(from: Vector3, to: Vector3) -> Array:
+	var dir := (to - from).normalized()
+	var side := dir.cross(Vector3.UP if absf(dir.y) < 0.99 else Vector3.RIGHT).normalized()
+	var head := from.distance_to(to) * ARROW_FRACTION
+	return [from, to, to, to - (dir - side * 0.5) * head, to, to - (dir + side * 0.5) * head]
+
+
+## Redraws the activity lines active now (`CombatStats.links_at`) between visible ships: dashes
+## flowing from source to target in the kind's colour, each fading in from its tail, with an
+## arrowhead short of the target. Kinds joining the same two ships are drawn side by side.
+func _update_links() -> void:
+	var lines: ImmediateMesh = links_mesh.mesh
+	lines.clear_surfaces()
+	var active := combat_stats.links_at(time)
+	if active.is_empty():
+		return
+	var flow := Time.get_ticks_msec() / 1000.0 * LINK_FLOW_PX_S
+	var began := false
+	for l in active:
+		var state: Dictionary = links.get(l.kind, {})
+		if not state.get("on", false) or not ships.has(l.source) or not ships.has(l.target):
+			continue
+		var a: Node3D = ships[l.source].node
+		var b: Node3D = ships[l.target].node
+		if not a.visible or not b.visible:
+			continue
+		var mid := (a.position + b.position) / 2.0
+		var px := _units_per_px(camera.global_position.distance_to(mid))
+		var along := b.position - a.position
+		var length := along.length()
+		if length < px:
+			continue
+		var dir := along / length
+		var side := dir.cross(camera.global_position - mid).normalized()
+		var offset := side * (CombatStats.LINK_KINDS.find(l.kind) - 1.5) * LINK_SPACING_PX * px
+		var from := a.position + offset + dir * _icon_clearance(a) * 0.6
+		var to := b.position + offset - dir * _icon_clearance(b)
+		var span := (to - from).dot(dir)
+		if span <= 0.0:
+			continue
+		if not began:
+			lines.surface_begin(Mesh.PRIMITIVE_LINES)
+			began = true
+		var color: Color = state.color
+		var tail := Color(color, LINK_TAIL_ALPHA)
+		var period := (LINK_DASH_PX + LINK_GAP_PX) * px
+		var d := fmod(flow * px, period) - period
+		while d < span:
+			var d0 := maxf(d, 0.0)
+			var d1 := minf(d + LINK_DASH_PX * px, span)
+			if d1 > d0:
+				lines.surface_set_color(tail.lerp(color, (d0 - d) / (LINK_DASH_PX * px)))
+				lines.surface_add_vertex(from + dir * d0)
+				lines.surface_set_color(tail.lerp(color, (d1 - d) / (LINK_DASH_PX * px)))
+				lines.surface_add_vertex(from + dir * d1)
+			d += period
+		var head := LINK_HEAD_PX * px
+		var wing := side * head * 0.5
+		lines.surface_set_color(color)
+		for p in [to, to - dir * head + wing, to, to - dir * head - wing]:
+			lines.surface_add_vertex(p)
+	if began:
+		lines.surface_end()
+
+
+func _set_link(kind: String, on: bool) -> void:
+	links[kind].on = on
+	Settings.set_value("links/" + kind, on)
+
+
+func _set_link_color(kind: String, color: Color) -> void:
+	links[kind].color = color
+	Settings.set_value("links/%s_color" % kind, color)
 
 
 func _set_vector(pilot: String, on: bool) -> void:
@@ -1256,6 +1487,7 @@ func _open_all_debug_menu() -> void:
 func _refresh_all_debug_menu() -> void:
 	var all_on := not ships.is_empty() and ships.keys().all(func(p): return _debug(p).vector)
 	all_debug_menu.show_state("Debug — all ships", all_on, [])
+	all_debug_menu.show_links(links)
 
 
 ## The two debug menus; their signals change `debug` and redraw the overlays.
@@ -1285,6 +1517,8 @@ func _build_debug_menus(layer: CanvasLayer) -> void:
 	all_debug_menu.spheres_cleared.connect(_clear_spheres)
 	all_debug_menu.vector_seconds_changed.connect(func(sec): vector_seconds = sec)
 	all_debug_menu.beacon_range_toggled.connect(_set_beacon_range)
+	all_debug_menu.link_toggled.connect(_set_link)
+	all_debug_menu.link_color_changed.connect(_set_link_color)
 
 
 ## Opens a new damage breakdown window for `pilot` with its top-left corner near `at` (kept on
@@ -1602,6 +1836,38 @@ func _build_ui() -> void:
 	debug_button.pressed.connect(_open_all_debug_menu)
 	row.add_child(debug_button)
 
+	broadcast_button = Button.new()
+	broadcast_button.text = "Broadcast"
+	broadcast_button.toggle_mode = true
+	broadcast_button.button_pressed = broadcast_on
+	broadcast_button.tooltip_text = "Broadcast-style ship data panel instead of the roster table"
+	broadcast_button.toggled.connect(_set_broadcast_on)
+	row.add_child(broadcast_button)
+
+	damage_button = Button.new()
+	damage_button.text = "Damage"
+	damage_button.toggle_mode = true
+	damage_button.button_pressed = damage_on
+	damage_button.toggled.connect(_set_damage_on)
+	row.add_child(damage_button)
+	_update_damage_controls()
+
+	mjd_button = Button.new()
+	mjd_button.text = "MJD"
+	mjd_button.toggle_mode = true
+	mjd_button.button_pressed = mjd_on
+	mjd_button.tooltip_text = "Show micro jump drive spool-ups in space: a ring around the ship and its projected landing"
+	mjd_button.toggled.connect(_set_mjd_on)
+	row.add_child(mjd_button)
+
+	ruleset_option = OptionButton.new()
+	ruleset_option.tooltip_text = "Ruleset the broadcast panel's points follow"
+	for id in Ruleset.available():
+		ruleset_option.add_item(Ruleset.load_id(id).name)
+		ruleset_option.set_item_metadata(ruleset_option.item_count - 1, id)
+	ruleset_option.item_selected.connect(func(i): _set_ruleset(ruleset_option.get_item_metadata(i)))
+	row.add_child(ruleset_option)
+
 	sde_label = Label.new()
 	sde_label.modulate = Color(1, 1, 1, 0.6)
 	row.add_child(sde_label)
@@ -1735,6 +2001,18 @@ func _build_settings(layer: CanvasLayer) -> void:
 	overlay_button.pressed.connect(func(): overlay_popup.popup_centered())
 	box.add_child(overlay_button)
 
+	damage_setting = CheckBox.new()
+	damage_setting.text = "Highlight ships taking damage in the roster (HP dropping)"
+	damage_setting.button_pressed = damage_on
+	damage_setting.toggled.connect(_set_damage_on)
+	box.add_child(damage_setting)
+
+	mjd_setting = CheckBox.new()
+	mjd_setting.text = "Show micro jump drive spool-ups in space (ring, projected landing)"
+	mjd_setting.button_pressed = mjd_on
+	mjd_setting.toggled.connect(_set_mjd_on)
+	box.add_child(mjd_setting)
+
 	var smooth_setting := CheckBox.new()
 	smooth_setting.text = "Smooth ship movement between position samples (instead of straight lines)"
 	smooth_setting.button_pressed = smooth_on
@@ -1839,7 +2117,16 @@ func _build_roster(layer: CanvasLayer) -> void:
 	roster_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	roster_panel.visible = false
 	layer.add_child(roster_panel)
-	var keep_above_bar := func(): roster_panel.offset_bottom = -bottom_panel.size.y
+	broadcast_panel = BroadcastRoster.new()
+	broadcast_panel.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
+	broadcast_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	broadcast_panel.visible = false
+	broadcast_panel.row_pressed.connect(_set_tracked)
+	layer.add_child(broadcast_panel)
+	var keep_above_bar := func():
+		roster_panel.offset_bottom = -bottom_panel.size.y
+		broadcast_panel.offset_top = -bottom_panel.size.y
+		broadcast_panel.offset_bottom = -bottom_panel.size.y
 	bottom_panel.resized.connect(keep_above_bar)
 	keep_above_bar.call()
 
@@ -1863,11 +2150,48 @@ func _fit_roster() -> void:
 	roster_panel.offset_right = 0.0
 
 
-## Rebuilds the roster from the loaded match's teams.
+## Shows the roster table or the broadcast panel (`broadcast_on`) while a match is open.
+func _apply_roster_visibility() -> void:
+	roster_panel.visible = data != null and not broadcast_on
+	broadcast_panel.visible = data != null and broadcast_on
+
+
+func _set_broadcast_on(on: bool) -> void:
+	broadcast_on = on
+	Settings.set_value("display/broadcast_roster", on)
+	broadcast_button.set_pressed_no_signal(on)
+	_apply_roster_visibility()
+
+
+func _set_damage_on(on: bool) -> void:
+	damage_on = on
+	Settings.set_value("display/damage_highlight", on)
+	damage_button.set_pressed_no_signal(on)
+	damage_setting.set_pressed_no_signal(on)
+	_update_roster_cells()
+
+
+func _set_mjd_on(on: bool) -> void:
+	mjd_on = on
+	Settings.set_value("display/mjd_spoolup", on)
+	mjd_button.set_pressed_no_signal(on)
+	mjd_setting.set_pressed_no_signal(on)
+
+
+## The damage highlight needs HP: its button is disabled for a match without any.
+func _update_damage_controls() -> void:
+	var has_hp := data != null and data.has_hp
+	damage_button.disabled = not has_hp
+	damage_button.tooltip_text = ("Highlight ships taking damage (HP dropping) in the roster" if has_hp
+			else "This match has no HP data")
+
+
+## Rebuilds the roster and the broadcast panel from the loaded match's teams.
 func _refresh_roster() -> void:
 	roster_table.clear()
 	roster_buttons.clear()
-	roster_panel.visible = data != null
+	broadcast_panel.clear()
+	_apply_roster_visibility()
 	if data == null:
 		return
 	var pilots := ships.keys()
@@ -1891,11 +2215,61 @@ func _refresh_roster() -> void:
 			_style_roster_button(pilot)
 			roster_table.set_cell(pilot, "ship", data.tracks[pilot][0].ship_type)
 			roster_table.set_cell(pilot, "pilot", pilot_names.get(pilot, _short_name(pilot)))
+	# Broadcast panel: red down the left, blue down the right; unknown pilots are left out.
+	broadcast_panel.set_teams(_team_name(MatchData.Team.RED), TEAM_COLORS[MatchData.Team.RED],
+			_team_name(MatchData.Team.BLUE), TEAM_COLORS[MatchData.Team.BLUE])
+	for pilot in pilots:
+		var team: int = data.teams.get(pilot, MatchData.Team.UNKNOWN)
+		if team == MatchData.Team.UNKNOWN:
+			continue
+		var side := BroadcastRoster.Side.LEFT if team == MatchData.Team.RED else BroadcastRoster.Side.RIGHT
+		var button := broadcast_panel.add_row(side, pilot, TEAM_COLORS[team])
+		button.tooltip_text = "Centre the camera on %s" % _pilot_name(pilot)
+		broadcast_panel.set_cell(pilot, "ship", data.tracks[pilot][0].ship_type)
+		broadcast_panel.set_cell(pilot, "name", pilot_names.get(pilot, _short_name(pilot)))
+	_refresh_score()
 	_update_roster_cells()
 
 
-## Refreshes each roster row's live columns: current hull, speed, distance from centre, and the
-## combat-log rates and electronic warfare. Pilots off grid show dashes; dead ones are dimmed.
+## Recomputes `score` for the current teams and `ruleset_id`, and shows each ship's points.
+func _refresh_score() -> void:
+	var rules := Ruleset.load_id(ruleset_id)
+	score = MatchScore.new(data, rules) if data != null and rules != null else null
+	for pilot in broadcast_panel.rows:
+		if score == null or not score.values.has(pilot):
+			broadcast_panel.set_cell(pilot, "pts", "—")
+			continue
+		var ship: String = score.fielded[pilot]
+		broadcast_panel.set_cell(pilot, "pts", "%d" % score.values[pilot])
+		var label: Label = broadcast_panel.rows[pilot].labels.pts
+		label.mouse_filter = Control.MOUSE_FILTER_PASS
+		if not rules.knows(ship):
+			label.tooltip_text = "%s isn't in %s: 0 points" % [ship, rules.name]
+		else:
+			var extra: int = score.values[pilot] - rules.base_points(ship)
+			label.tooltip_text = "%s: %d points%s (%s)" % [ship, rules.base_points(ship),
+					" + %d inflation" % extra if extra > 0 else "", rules.name]
+
+
+func _set_ruleset(id: String) -> void:
+	ruleset_id = id
+	_select_ruleset_option()
+	_save_meta()
+	_refresh_score()
+	_update_roster_cells()
+
+
+func _select_ruleset_option() -> void:
+	if ruleset_option == null:
+		return
+	for i in ruleset_option.item_count:
+		if ruleset_option.get_item_metadata(i) == ruleset_id:
+			ruleset_option.select(i)
+
+
+## Refreshes each roster row's live columns: current hull, speed, distance from centre, HP, and the
+## combat-log rates and electronic warfare, and highlights ships taking damage (`damage_on`).
+## Pilots off grid show dashes and unknown HP; dead ones are dimmed.
 func _update_roster_cells() -> void:
 	if data == null:
 		return
@@ -1918,6 +2292,46 @@ func _update_roster_cells() -> void:
 			roster_table.set_cell(pilot, "speed", "—" if is_nan(motion.speed) else _fmt_speed(motion.speed))
 			roster_table.set_cell(pilot, "distance", "%.1f km" % motion.dist_km)
 		roster_buttons[pilot].modulate.a = 0.5 if dead else 1.0
+		var hp := MatchData.NAN_HP if dead else data.hp_at(pilot, time)
+		var hit := damage_on and not dead and data.taking_damage(pilot, time)
+		roster_table.set_cell_hp(pilot, "hp", hp)
+		roster_table.set_row_damaged(pilot, hit)
+		if broadcast_panel.rows.has(pilot):
+			_update_broadcast_row(pilot, dead, hp, hit)
+	broadcast_panel.set_clock(_fmt_time(time))
+	for side in [BroadcastRoster.Side.LEFT, BroadcastRoster.Side.RIGHT]:
+		var team := MatchData.Team.RED if side == BroadcastRoster.Side.LEFT else MatchData.Team.BLUE
+		broadcast_panel.set_points(side, "%d" % score.score(team, time) if score != null else "0")
+
+
+## Copies `pilot`'s roster row (ship, speed, `hp`, taking damage: `hit`) into the broadcast panel,
+## with the electronic warfare on it and a micro jump drive icon while it spools. Ships that died (out of bounds: `dead`, or podded) grey out
+## their row and keep the hull they lost.
+func _update_broadcast_row(pilot: String, dead: bool, hp: Vector3, hit: bool) -> void:
+	var lost := data.lost_hull(pilot, time)
+	dead = dead or not lost.is_empty()
+	broadcast_panel.set_cell(pilot, "ship", lost if not lost.is_empty() else roster_table.cell_text(pilot, "ship"))
+	broadcast_panel.set_cell(pilot, "speed", "—" if dead else roster_table.cell_text(pilot, "speed"))
+	broadcast_panel.set_dead(pilot, dead)
+	broadcast_panel.set_hp(pilot, MatchData.NAN_HP if dead else hp)
+	broadcast_panel.set_damaged(pilot, hit and not dead)
+	var ewar := combat_stats.has("ewar_in") and not dead
+	broadcast_panel.set_ewar(pilot, _ewar_icons(pilot, false) if ewar else [])
+	broadcast_panel.set_mjd(pilot, [] if dead else _mjd_icons(data.mjd_spool(pilot, time)))
+
+
+## The broadcast panel's micro jump drive icon for a drive `spool` of the way spooled up (see
+## `MatchData.mjd_spool`), or none when it isn't spooling.
+func _mjd_icons(spool: float) -> Array:
+	if spool < 0.0:
+		return []
+	return [{"key": "mjd", "texture": assets.ewar_texture("mjd"), "text": "MJD",
+		"tooltip": "Micro jump drive spooling: jumps in %d s" % _mjd_seconds_left(spool)}]
+
+
+## Whole seconds (rounded up) until a micro jump drive `spool` of the way spooled up jumps.
+static func _mjd_seconds_left(spool: float) -> int:
+	return ceili((1.0 - spool) * MatchData.MJD_SPOOL_S - 0.001)
 
 
 ## Roster icons for the electronic warfare on `pilot` (`outgoing`: by it) now: one per type, its

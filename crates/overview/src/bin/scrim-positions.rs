@@ -11,20 +11,38 @@
 //! (`third_party/ScrimTrimmer`, via `scripts/scrim_trimmer_bridge.py`): it finds the EVE time at
 //! video second 0 from the scene's `chat` rect and the match's CD -> WF/GF window, only that window
 //! is OCR'd, and every CSV row gets its EVE time (`eve_time`) so the data can be lined up with
-//! other EVE logs.
+//! other EVE logs. A video holding several matches is processed one match (`--match N`) or all of
+//! them (`--match all`) per run; with `all`, each match's outputs are named `<video>_NN.*`, where
+//! an OBS-style `<video>` name ("2026-10-04 05-58-36") is cut to its date (`output_stem`).
+//!
+//! The audio of the processed window is saved next to the CSV as `<video>.mp3` (as ScrimTrimmer's
+//! `--extract-audio` does), so it starts with the data and the simulator pairs the two by name.
+//!
+//! With `--combat-log` (and EVE times), every given EVE gamelog with combat during the match is
+//! cut down to the match and saved in `<video>.positions.logs/` next to the CSV, the folder the
+//! simulator reads a match's combat logs from.
+//!
+//! When the scene has `targets` blocks (locked-target brackets, `overview::targets`), every
+//! ring's shield/armor/hull is read each tick, its label is OCR'd with Tesseract to tell whose
+//! it is, and the CSV's `shield`, `armor` and `hull` columns carry each pilot's HP (0-1) wherever
+//! some observer had them locked.
 
 use anyhow::{bail, ensure, Context, Result};
-use chrono::{DateTime, NaiveDateTime, NaiveTime, TimeDelta, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Utc};
 use clap::Parser;
 use glyph::Font;
-use overview::layout::Layout;
+use overview::layout::{Layout, Rect};
 use overview::panel::{calibrate, crop_scaled, PanelSpec, Scene};
 use overview::row::{read_rows, RowReading};
+use overview::ship_types::ShipTypes;
 use overview::solve::{self, direction, infer_corners, solve_track, Fix};
+use overview::targets::{
+    label_image, match_label, ocr_label, read_rings, BlockGeometry, Candidate, Hp, Label, LabelCache, Ring,
+};
 use overview::track::{hampel_flags, Sample, Track, Tracker, CAPSULE};
 use overview::util::levenshtein;
 use rayon::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -39,9 +57,17 @@ struct Cli {
     /// tick rate.
     #[arg(long, default_value_t = 1.0)]
     fps: f64,
-    /// Output directory for `<video>.positions.csv`.
+    /// Output directory for `<video>.positions.csv` and the same window's audio, `<video>.mp3`.
     #[arg(long, default_value = "resouces/matches/out")]
     out: PathBuf,
+    /// Don't extract the processed window's audio to `<video>.mp3`.
+    #[arg(long)]
+    no_audio: bool,
+    /// EVE gamelog (`Documents/EVE/logs/Gamelogs/*.txt`), or a folder of them (repeatable).
+    /// Each log with combat during the match is trimmed to it and saved in
+    /// `<video>.positions.logs/`. Needs EVE times (`--chat-log` or `--t0`).
+    #[arg(long = "combat-log", value_name = "PATH")]
+    combat_logs: Vec<PathBuf>,
     /// EVE Local chat log covering the recording (repeatable). Finds the match's CD -> WF/GF
     /// window and the EVE time base with ScrimTrimmer; only the match is processed, and the CSV
     /// gains an `eve_time` column.
@@ -52,13 +78,22 @@ struct Cli {
     /// stamped with EVE times from it.
     #[arg(long)]
     t0: Option<String>,
-    /// Which CD -> WF/GF pair to process (1-based) when the video holds more than one.
-    #[arg(long = "match", value_name = "N")]
-    match_n: Option<usize>,
+    /// Which CD -> WF/GF pair to process (1-based) when the video holds more than one, or `all`
+    /// to process each of them into its own `<video>_NN.*` outputs.
+    #[arg(long = "match", value_name = "N|all")]
+    match_sel: Option<MatchSel>,
     /// Use tournament system messages ("30 seconds until match start", "Match completed!") as
     /// the match window instead of CD and WF/GF.
     #[arg(long)]
     tournament: bool,
+    /// Decode the video on the GPU with this ffmpeg `-hwaccel` (e.g. `cuda` for NVDEC, `vaapi`),
+    /// leaving the CPU cores to OCR. Same frames either way; ffmpeg falls back to software decode
+    /// when the accelerator isn't available.
+    #[arg(long, env = "SCRIM_HWACCEL", value_name = "API")]
+    hwaccel: Option<String>,
+    /// Tesseract executable, for reading locked targets' labels.
+    #[arg(long, env = "SCRIM_TESSERACT", default_value = "tesseract")]
+    tesseract: PathBuf,
     /// Python interpreter that runs the ScrimTrimmer bridge.
     #[arg(long, env = "SCRIM_PYTHON", default_value = "python3")]
     python: String,
@@ -66,6 +101,28 @@ struct Cli {
     #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/scrim_trimmer_bridge.py"))]
     trimmer_bridge: PathBuf,
     videos: Vec<PathBuf>,
+}
+
+/// Which of a video's matches `--match` picks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MatchSel {
+    /// The `n`th (1-based).
+    One(usize),
+    All,
+}
+
+impl std::str::FromStr for MatchSel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        if s.eq_ignore_ascii_case("all") {
+            return Ok(Self::All);
+        }
+        match s.parse() {
+            Ok(n @ 1..) => Ok(Self::One(n)),
+            _ => Err(format!("{s:?} is not a match number (1, 2, …) or `all`")),
+        }
+    }
 }
 
 /// The part of a video to process, and the EVE time of its first frame (when known).
@@ -84,8 +141,9 @@ struct BridgeOutput {
     pairs: Vec<(u32, u32)>,
 }
 
-/// Run the ScrimTrimmer bridge on `video` and pick its match window.
-fn match_window(cli: &Cli, scene: &Scene, video: &Path) -> Result<Window> {
+/// Run the ScrimTrimmer bridge on `video` and pick its match windows, each with its 1-based
+/// number when `--match all` picked more than one (so its outputs need their own names).
+fn match_windows(cli: &Cli, scene: &Scene, video: &Path) -> Result<Vec<(Option<usize>, Window)>> {
     let mut cmd = Command::new(&cli.python);
     cmd.arg(&cli.trimmer_bridge).arg(video);
     for log in &cli.chat_logs {
@@ -119,31 +177,54 @@ fn match_window(cli: &Cli, scene: &Scene, video: &Path) -> Result<Window> {
     let t0: DateTime<Utc> = DateTime::parse_from_rfc3339(&bridge.t0_utc)
         .with_context(|| format!("bridge t0 {:?}", bridge.t0_utc))?
         .into();
-    let (cd, wf) = pick_pair(&bridge.pairs, cli.match_n)?;
-    let window = Window {
-        start_s: cd as f64,
-        end_s: Some(wf as f64),
-        eve_origin: Some(t0 + TimeDelta::seconds(cd as i64)),
-    };
-    println!(
-        "  t0 {} ({}); match {cd}s -> {wf}s of video",
-        bridge.t0_utc, bridge.t0_source
-    );
-    Ok(window)
+    let picked = pick_pairs(&bridge.pairs, cli.match_sel)?;
+    println!("  t0 {} ({})", bridge.t0_utc, bridge.t0_source);
+    let numbered = picked.len() > 1;
+    Ok(picked
+        .into_iter()
+        .map(|(i, (cd, wf))| {
+            println!("  match {i}: {cd}s -> {wf}s of video");
+            let window = Window {
+                start_s: cd as f64,
+                end_s: Some(wf as f64),
+                eve_origin: Some(t0 + TimeDelta::seconds(cd as i64)),
+            };
+            (numbered.then_some(i), window)
+        })
+        .collect())
 }
 
-/// The `(cd, wf)` pair to process: the only one, or the `n`th (1-based).
-fn pick_pair(pairs: &[(u32, u32)], n: Option<usize>) -> Result<(u32, u32)> {
-    match (pairs, n) {
+/// The `(cd, wf)` pairs to process, each with its 1-based number: the only one, the `n`th, or all.
+fn pick_pairs(pairs: &[(u32, u32)], sel: Option<MatchSel>) -> Result<Vec<(usize, (u32, u32))>> {
+    let numbered = pairs.iter().copied().enumerate().map(|(i, p)| (i + 1, p));
+    match (pairs, sel) {
         ([], _) => bail!("no CD -> WF/GF pair found in the chat log within the video"),
-        (_, Some(n)) => pairs.get(n.wrapping_sub(1)).copied().with_context(|| {
-            format!("--match {n}, but the video has {} match(es): {pairs:?}", pairs.len())
-        }),
-        ([only], None) => Ok(*only),
+        (_, Some(MatchSel::All)) => Ok(numbered.collect()),
+        (_, Some(MatchSel::One(n))) => match pairs.get(n.wrapping_sub(1)) {
+            Some(&p) => Ok(vec![(n, p)]),
+            None => bail!("--match {n}, but the video has {} match(es): {pairs:?}", pairs.len()),
+        },
+        ([only], None) => Ok(vec![(1, *only)]),
         (_, None) => bail!(
-            "the video has {} matches (video seconds {pairs:?}); pick one with --match N",
+            "the video has {} matches (video seconds {pairs:?}); pick one with --match N, or \
+             process each with --match all",
             pairs.len()
         ),
+    }
+}
+
+/// Output name for a video named `stem`: an OBS-style "YYYY-MM-DD HH-MM-SS" name keeps only its
+/// date ("2026-10-04 05-58-36" -> "2026-10-04"); any other name is used as is.
+fn output_stem(stem: &str) -> String {
+    let (Some(date), Some(rest)) = (stem.get(..10), stem.get(10..)) else {
+        return stem.to_string();
+    };
+    let is_time = |s: &str| NaiveTime::parse_from_str(s, "%H-%M-%S").is_ok();
+    match rest.strip_prefix([' ', '_']).and_then(|r| r.get(..8).map(|t| (t, &r[8..]))) {
+        Some((time, tail)) if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok() && is_time(time) => {
+            format!("{date}{tail}")
+        }
+        _ => stem.to_string(),
     }
 }
 
@@ -199,7 +280,7 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&cli.out)
         .with_context(|| format!("creating {}", cli.out.display()))?;
 
-    if cli.chat_logs.is_empty() && cli.match_n.is_some() {
+    if cli.chat_logs.is_empty() && cli.match_sel.is_some() {
         bail!("--match needs --chat-log");
     }
     if let (false, Some(t0)) = (cli.chat_logs.is_empty(), &cli.t0) {
@@ -207,21 +288,195 @@ fn main() -> Result<()> {
             .with_context(|| format!("--t0 {t0:?}: with --chat-log it must be HH:MM:SS"))?;
     }
 
+    let mut failed = 0;
     for video in &cli.videos {
-        let window = if !cli.chat_logs.is_empty() {
-            match_window(&cli, &scene, video)
+        let windows = if !cli.chat_logs.is_empty() {
+            match_windows(&cli, &scene, video)
         } else {
-            cli.t0.as_deref().map(parse_t0_utc).transpose().map(|eve_origin| Window {
-                start_s: 0.0,
-                end_s: None,
-                eve_origin,
+            cli.t0.as_deref().map(parse_t0_utc).transpose().map(|eve_origin| {
+                vec![(None, Window { start_s: 0.0, end_s: None, eve_origin })]
             })
         }
         .with_context(|| format!("finding the match in {}", video.display()))?;
-        process_video(video, &scene, &font, cli.fps, &cli.out, &window)
-            .with_context(|| format!("processing {}", video.display()))?;
+        let stem = output_stem(&video.file_stem().unwrap_or_default().to_string_lossy());
+        let n = windows.len();
+        for (i, window) in windows {
+            let Some(i) = i else {
+                process_match(&cli, &scene, &font, video, &stem, &window)?;
+                continue;
+            };
+            println!("== match {i}/{n} of {}", video.display());
+            // One bad match shouldn't lose the others.
+            if let Err(e) = process_match(&cli, &scene, &font, video, &format!("{stem}_{i:02}"), &window) {
+                eprintln!("  error: match {i}: {e:#}");
+                failed += 1;
+            }
+        }
+    }
+    ensure!(failed == 0, "{failed} match(es) failed");
+    Ok(())
+}
+
+/// OCR one match window of `video` and save its CSV, audio and combat logs as `<out_stem>.*`.
+fn process_match(cli: &Cli, scene: &Scene, font: &Font, video: &Path, out_stem: &str, window: &Window) -> Result<()> {
+    let eve_span = process_video(video, scene, font, cli, out_stem, window)
+        .with_context(|| format!("processing {}", video.display()))?;
+    if !cli.no_audio {
+        save_audio(video, &cli.out, out_stem, window);
+    }
+    if !cli.combat_logs.is_empty() {
+        match eve_span {
+            Some(span) => save_combat_logs(&cli.combat_logs, &cli.out, out_stem, span),
+            None => eprintln!(
+                "  warning: no EVE times (give --chat-log or --t0); combat logs not saved"
+            ),
+        }
     }
     Ok(())
+}
+
+/// Extract the window's audio to `<out>/<out_stem>.mp3`. Audio is an extra, so a failure (or a
+/// recording without an audio track) is reported and the positions CSV is kept.
+fn save_audio(video: &Path, out: &Path, out_stem: &str, window: &Window) {
+    let path = out.join(format!("{out_stem}.mp3"));
+    match videoin::extract_audio(video, window.start_s, window.end_s, &path) {
+        Ok(true) => println!("  wrote {}", path.display()),
+        Ok(false) => println!("  {} has no audio track; no audio saved", video.display()),
+        Err(e) => eprintln!("  warning: audio extraction failed: {e:#}"),
+    }
+}
+
+/// Save the part of each gamelog in `logs` (files, or folders of them) logged during `span` (EVE
+/// times of the first and last CSV rows) to `<out>/<out_stem>.positions.logs/`, skipping logs
+/// with no combat in it. Like audio, combat logs are an extra: failures are reported and the CSV
+/// is kept.
+fn save_combat_logs(
+    logs: &[PathBuf],
+    out: &Path,
+    out_stem: &str,
+    span: (DateTime<Utc>, DateTime<Utc>),
+) {
+    let dest = out.join(format!("{out_stem}.positions.logs"));
+    let (first, last) = (span.0.naive_utc(), span.1.naive_utc());
+    // A rerun replaces the previous run's logs rather than adding to them.
+    if let Ok(old) = std::fs::read_dir(&dest) {
+        for entry in old.flatten() {
+            if entry.path().extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let mut saved = std::collections::BTreeSet::new();
+    for log in logs {
+        if !log.is_dir() {
+            // Picked by hand, so say what became of it.
+            match save_combat_log(log, &dest, first, last) {
+                Ok(Some(path)) => {
+                    println!("  saved {}", path.display());
+                    saved.insert(path);
+                }
+                Ok(None) => println!("  {}: no combat during the match", log.display()),
+                Err(e) => eprintln!("  warning: {}: {e:#}", log.display()),
+            }
+            continue;
+        }
+        let entries = match std::fs::read_dir(log) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("  warning: reading {}: {e}", log.display());
+                continue;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")) {
+                continue;
+            }
+            // Cheap skips before reading a whole Gamelogs folder: a log started after the match
+            // (its name starts with the session's EVE start time), or last written before it (a
+            // copied log gets a new mtime, so this can only let extra logs through).
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if name.get(..15).and_then(|s| NaiveDateTime::parse_from_str(s, "%Y%m%d_%H%M%S").ok())
+                .is_some_and(|start| start > last)
+            {
+                continue;
+            }
+            if entry.metadata().and_then(|m| m.modified()).is_ok_and(|m| {
+                DateTime::<Utc>::from(m) < span.0 - TimeDelta::minutes(1)
+            }) {
+                continue;
+            }
+            match save_combat_log(&path, &dest, first, last) {
+                Ok(Some(path)) => {
+                    println!("  saved {}", path.display());
+                    saved.insert(path);
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("  warning: {}: {e:#}", path.display()),
+            }
+        }
+    }
+    println!("  {} combat log(s) with combat during the match", saved.len());
+}
+
+/// Save gamelog `log` trimmed to `first..=last` in `dest`, returning where; None if it has no
+/// combat then. An identical log already there (the same file given twice) is reused; a
+/// different one with the same name (from another folder) gets a " (2)", … suffix.
+fn save_combat_log(
+    log: &Path,
+    dest: &Path,
+    first: NaiveDateTime,
+    last: NaiveDateTime,
+) -> Result<Option<PathBuf>> {
+    let bytes = std::fs::read(log).context("reading")?;
+    let Some(text) = trim_gamelog(&String::from_utf8_lossy(&bytes), first, last) else {
+        bail!("not an EVE gamelog (no Listener header)");
+    };
+    if !text.lines().any(|l| l.contains("] (combat) ")) {
+        return Ok(None);
+    }
+    std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
+    let stem = log.file_stem().unwrap_or_default().to_string_lossy();
+    for n in 1.. {
+        let name = if n == 1 { format!("{stem}.txt") } else { format!("{stem} ({n}).txt") };
+        let path = dest.join(name);
+        match std::fs::read_to_string(&path) {
+            Ok(existing) if existing == text => return Ok(Some(path)),
+            Ok(_) => continue,
+            Err(_) => {
+                std::fs::write(&path, &text).with_context(|| format!("writing {}", path.display()))?;
+                return Ok(Some(path));
+            }
+        }
+    }
+    unreachable!()
+}
+
+/// Gamelog `text` cut down to its header and the lines logged between EVE times `first` and
+/// `last` (a multi-line message's extra lines go with it), as the simulator's `CombatLog.trim`
+/// does. None if `text` isn't a gamelog (no `Listener:` header).
+fn trim_gamelog(text: &str, first: NaiveDateTime, last: NaiveDateTime) -> Option<String> {
+    let mut out = String::new();
+    let (mut header, mut listener, mut keep) = (true, false, false);
+    for line in text.split_inclusive('\n') {
+        let time = line
+            .strip_prefix("[ ")
+            .and_then(|l| l.get(..19))
+            .and_then(|s| NaiveDateTime::parse_from_str(s, "%Y.%m.%d %H:%M:%S").ok());
+        header = header && time.is_none();
+        if header {
+            listener = listener || line.trim().starts_with("Listener:");
+            out.push_str(line);
+            continue;
+        }
+        if let Some(t) = time {
+            keep = t >= first && t <= last;
+        }
+        if keep {
+            out.push_str(line);
+        }
+    }
+    listener.then_some(out)
 }
 
 /// One observer panel, calibrated for this video.
@@ -235,12 +490,18 @@ fn process_video(
     video: &Path,
     scene: &Scene,
     font: &Font,
-    fps: f64,
-    out: &Path,
+    cli: &Cli,
+    out_stem: &str,
     window: &Window,
-) -> Result<()> {
+) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>> {
+    let (fps, hwaccel, out) = (cli.fps, cli.hwaccel.as_deref(), cli.out.as_path());
     let started = std::time::Instant::now();
-    let mut decoder = videoin::Decoder::open_range(video, Some(fps), window.start_s, window.end_s)?;
+    let batch_size = 2 * rayon::current_num_threads();
+    // Decode on a background thread, one batch ahead, so ffmpeg keeps decoding while a batch is
+    // OCR'd instead of stalling on a full pipe.
+    let mut decoder =
+        videoin::Decoder::open_range_hw(video, Some(fps), window.start_s, window.end_s, hwaccel)?
+            .prefetch(batch_size);
     println!(
         "== {}: {}x{}, sampling at {fps} fps",
         video.display(),
@@ -248,28 +509,48 @@ fn process_video(
         decoder.height
     );
 
+    // Each panel calibrates on the first of the window's leading frames it can; one still
+    // failing after that (its header hidden all along, e.g. by a hover tooltip) falls back to
+    // another part of the video, since the client layout doesn't change between matches.
     let mut pending = Vec::new();
-    let panels = loop {
-        let Some(frame) = decoder.next_frame()? else {
-            bail!("video ended before every panel calibrated");
-        };
-        let attempt: Result<Vec<Panel>> = scene
-            .panels
-            .par_iter()
-            .map(|spec| {
-                let (scale, layout) = calibrate(&frame.image, spec, font)?;
-                Ok(Panel { spec, scale, layout })
-            })
+    let mut found: Vec<Option<(f32, Layout)>> = vec![None; scene.panels.len()];
+    let mut errors: Vec<String> = vec![String::new(); scene.panels.len()];
+    while found.iter().any(Option::is_none) && pending.len() < CALIBRATION_ATTEMPTS {
+        let Some(frame) = decoder.next_frame()? else { break };
+        let attempts: Vec<(usize, Result<(f32, Layout)>)> = (0..scene.panels.len())
+            .into_par_iter()
+            .filter(|&i| found[i].is_none())
+            .map(|i| (i, calibrate(&frame.image, &scene.panels[i], font)))
             .collect();
-        pending.push(frame);
-        match attempt {
-            Ok(p) => break p,
-            Err(e) if pending.len() < CALIBRATION_ATTEMPTS => {
-                eprintln!("  calibration failed on frame {}: {e:#}; retrying", pending.len() - 1);
+        for (i, attempt) in attempts {
+            match attempt {
+                Ok(fit) => found[i] = Some(fit),
+                Err(e) => errors[i] = format!("{e:#}"),
             }
-            Err(e) => return Err(e),
         }
-    };
+        pending.push(frame);
+    }
+    for (i, fit) in found.iter_mut().enumerate() {
+        if fit.is_none() {
+            let spec = &scene.panels[i];
+            eprintln!(
+                "  panel {} didn't calibrate in the first {} frames ({}); trying elsewhere in the video",
+                spec.name,
+                pending.len(),
+                errors[i]
+            );
+            *fit = Some(calibrate_elsewhere(video, window, spec, font, hwaccel)?);
+        }
+    }
+    let panels: Vec<Panel> = scene
+        .panels
+        .iter()
+        .zip(found)
+        .map(|(spec, fit)| {
+            let (scale, layout) = fit.expect("every panel calibrated");
+            Panel { spec, scale, layout }
+        })
+        .collect();
     for p in &panels {
         println!(
             "  panel {}: scale {:.4}, row pitch {:.2}",
@@ -278,8 +559,8 @@ fn process_video(
     }
 
     let mut trackers: Vec<Tracker> = panels.iter().map(|_| Tracker::new()).collect();
+    let mut targets = TargetReader::new(&scene.targets, &cli.tesseract);
     let mut times = Vec::new();
-    let batch_size = 2 * rayon::current_num_threads();
     loop {
         while pending.len() < batch_size {
             match decoder.next_frame()? {
@@ -304,6 +585,7 @@ fn process_video(
         for (&(f, p), r) in jobs.iter().zip(&rows) {
             trackers[p].observe(pending[f].t, r);
         }
+        targets.observe(&pending);
         times.extend(pending.iter().map(|f| f.t));
         pending.clear();
         eprint!("\r  {} frames ({:.0}s of video)", times.len(), times.last().unwrap_or(&0.0));
@@ -328,24 +610,74 @@ fn process_video(
 
     let solved: Vec<Vec<Fix>> =
         readings.iter().map(|r| solve_track(fit.corners, &r.distances)).collect();
+    let hp = targets.pilot_hp(&per_observer, &roster);
 
-    let stem = video.file_stem().unwrap_or_default().to_string_lossy();
-    let path = out.join(format!("{stem}.positions.csv"));
+    let path = out.join(format!("{out_stem}.positions.csv"));
     std::fs::write(
         &path,
-        positions_csv(&per_observer, &roster, &readings, &solved, window.eve_origin),
+        positions_csv(&per_observer, &roster, &readings, &solved, &hp, window.eve_origin),
     )?;
     print_summary(&per_observer, &roster, &readings, &solved);
-    if let (Some(origin), Some(first), Some(last)) = (window.eve_origin, times.first(), times.last()) {
-        println!("  EVE time {} -> {}", eve_time(origin, *first), eve_time(origin, *last));
-    }
+    let eve_span = match (window.eve_origin, times.first(), times.last()) {
+        (Some(origin), Some(&first), Some(&last)) => {
+            println!("  EVE time {} -> {}", eve_time(origin, first), eve_time(origin, last));
+            let at = |t: f64| origin + TimeDelta::milliseconds((t * 1000.0).round() as i64);
+            Some((at(first), at(last)))
+        }
+        _ => None,
+    };
     println!(
         "  wrote {} ({} frames in {:.0}s)",
         path.display(),
         times.len(),
         started.elapsed().as_secs_f64()
     );
-    Ok(())
+    Ok(eve_span)
+}
+
+/// How far apart, and how far either side of the match window, [`calibrate_elsewhere`] looks.
+const FALLBACK_STEP_S: f64 = 60.0;
+const FALLBACK_STEPS: usize = 30;
+/// How many frames [`calibrate_elsewhere`] calibrates on before keeping the best.
+const FALLBACK_FITS: usize = 5;
+
+/// Calibrate panel `spec` on frames from outside `window`: one frame every [`FALLBACK_STEP_S`],
+/// alternately before and after the window, nearest first. Of the first [`FALLBACK_FITS`] that
+/// calibrate, the one showing the longest list wins: a layout only reads a few rows past the
+/// last one its calibration frame showed (`Layout::list_bottom`), and between matches the
+/// overview may list only a handful of ships.
+fn calibrate_elsewhere(
+    video: &Path,
+    window: &Window,
+    spec: &PanelSpec,
+    font: &Font,
+    hwaccel: Option<&str>,
+) -> Result<(f32, Layout)> {
+    let mut fits: Vec<(f64, (f32, Layout))> = Vec::new();
+    let mut past_end = false;
+    'search: for k in 1..=FALLBACK_STEPS {
+        let step = k as f64 * FALLBACK_STEP_S;
+        let before = window.start_s - step;
+        let after = window.end_s.map(|e| e + step).filter(|_| !past_end);
+        for t in [Some(before).filter(|&t| t >= 0.0), after].into_iter().flatten() {
+            let mut decoder = videoin::Decoder::open_range_hw(video, Some(1.0), t, Some(t + 1.0), hwaccel)?;
+            let Some(frame) = decoder.next_frame()? else {
+                past_end |= t > window.start_s;
+                continue;
+            };
+            if let Ok(fit) = calibrate(&frame.image, spec, font) {
+                fits.push((t, fit));
+                if fits.len() >= FALLBACK_FITS {
+                    break 'search;
+                }
+            }
+        }
+    }
+    let Some((t, fit)) = fits.into_iter().max_by_key(|(_, (_, layout))| layout.list_bottom) else {
+        bail!("panel {:?} didn't calibrate anywhere within {FALLBACK_STEPS} minutes of the match", spec.name);
+    };
+    println!("  panel {} calibrated on the frame at {t:.0}s of the video", spec.name);
+    Ok(fit)
 }
 
 /// How many of each pilot's earliest three-observer ticks feed corner inference. Pilots start
@@ -503,6 +835,194 @@ fn observer_series(
     by_t.into_iter().zip(flags).map(|((t, d), f)| (t, (d, f))).collect()
 }
 
+/// One ring read in one frame, with its label when it was read.
+struct TargetSample {
+    t: f64,
+    hp: Hp,
+    label: Option<Label>,
+}
+
+/// Reads the scene's locked-target blocks frame by frame (`overview::targets`), and afterwards
+/// works out whose HP each ring was.
+struct TargetReader<'a> {
+    rects: &'a [Rect],
+    tesseract: &'a Path,
+    /// Each block's geometry, once a frame with a ring in it calibrated it.
+    geoms: Vec<Option<BlockGeometry>>,
+    cache: LabelCache,
+    /// Tesseract failed; rings are still read, but nothing can say whose they are.
+    ocr_failed: bool,
+    samples: Vec<TargetSample>,
+}
+
+impl<'a> TargetReader<'a> {
+    fn new(rects: &'a [Rect], tesseract: &'a Path) -> TargetReader<'a> {
+        TargetReader {
+            rects,
+            tesseract,
+            geoms: vec![None; rects.len()],
+            cache: LabelCache::new(rects.len()),
+            ocr_failed: false,
+            samples: Vec::new(),
+        }
+    }
+
+    fn block(&self, frame: &videoin::Frame, b: usize) -> image::RgbImage {
+        crop_scaled(&frame.image, self.rects[b], 1.0)
+    }
+
+    /// Read one batch of frames, in order: calibrate any block not yet calibrated, read every
+    /// ring, and OCR the labels of each block whose rings changed.
+    fn observe(&mut self, frames: &[videoin::Frame]) {
+        for frame in frames {
+            let todo: Vec<usize> = (0..self.rects.len()).filter(|&b| self.geoms[b].is_none()).collect();
+            if todo.is_empty() {
+                break;
+            }
+            let found: Vec<(usize, Option<BlockGeometry>)> =
+                todo.par_iter().map(|&b| (b, BlockGeometry::calibrate(&self.block(frame, b)))).collect();
+            for (b, geom) in found {
+                if let Some(g) = geom {
+                    println!(
+                        "  targets {}: ring scale {:.3}, {} column(s) (from t={:.0}s)",
+                        b + 1,
+                        g.scale,
+                        g.columns.len(),
+                        frame.t
+                    );
+                    self.geoms[b] = Some(g);
+                }
+            }
+        }
+
+        let jobs: Vec<(usize, usize)> = (0..frames.len())
+            .flat_map(|f| (0..self.rects.len()).filter(|&b| self.geoms[b].is_some()).map(move |b| (f, b)))
+            .collect();
+        let rings: Vec<Vec<Ring>> = jobs
+            .par_iter()
+            .map(|&(f, b)| read_rings(&self.block(&frames[f], b), self.geoms[b].as_ref().expect("calibrated")))
+            .collect();
+        let centers: Vec<Vec<(f32, f32)>> = rings.iter().map(|r| r.iter().map(|r| r.center).collect()).collect();
+
+        // Which jobs' labels to read: jobs are frame-major, so this walks the frames in order.
+        let mut reads = Vec::new();
+        for (j, &(f, b)) in jobs.iter().enumerate() {
+            if !self.ocr_failed && self.cache.needs_read(b, frames[f].t, &centers[j]) {
+                self.cache.plan(b, frames[f].t, &centers[j]);
+                reads.push(j);
+            }
+        }
+        let ocr: Vec<(usize, usize)> = reads.iter().flat_map(|&j| (0..rings[j].len()).map(move |i| (j, i))).collect();
+        let labels: Vec<Result<Label>> = ocr
+            .par_iter()
+            .map(|&(j, i)| {
+                let (f, b) = jobs[j];
+                let scale = self.geoms[b].as_ref().expect("calibrated").scale;
+                match label_image(&self.block(&frames[f], b), &centers[j], i, scale) {
+                    Some(img) => ocr_label(&img, self.tesseract),
+                    None => Ok(Label::default()),
+                }
+            })
+            .collect();
+        let mut by_job: HashMap<usize, Vec<Label>> = HashMap::new();
+        for (&(j, _), label) in ocr.iter().zip(labels) {
+            let label = label.unwrap_or_else(|e| {
+                if !self.ocr_failed {
+                    eprintln!("  warning: can't read locked targets' labels, so their HP is left out: {e:#}");
+                    self.ocr_failed = true;
+                }
+                Label::default()
+            });
+            by_job.entry(j).or_default().push(label);
+        }
+
+        for (j, &(f, b)) in jobs.iter().enumerate() {
+            let t = frames[f].t;
+            if let Some(labels) = by_job.remove(&j) {
+                self.cache.store(b, &centers[j], labels);
+            }
+            let labels = self.cache.labels(b, &centers[j]);
+            for (i, ring) in rings[j].iter().enumerate() {
+                self.samples.push(TargetSample { t, hp: ring.hp, label: labels.map(|l| l[i].clone()) });
+            }
+        }
+    }
+
+    /// Each roster pilot's HP per tick (keyed by `t.to_bits()`): every ring whose label matches
+    /// the pilot (`overview::targets::match_label`), the median per arc when several observers
+    /// had them locked, then a 3-tick running median to drop one-tick misreads (combat text
+    /// drawn across a ring).
+    fn pilot_hp(&self, per_observer: &[Vec<Track>], roster: &[Pilot]) -> Vec<BTreeMap<u64, Hp>> {
+        let mut per_pilot: Vec<BTreeMap<u64, Vec<Hp>>> = vec![BTreeMap::new(); roster.len()];
+        if self.samples.is_empty() {
+            return vec![BTreeMap::new(); roster.len()];
+        }
+        let ship_types = ShipTypes::builtin();
+        let distances: Vec<BTreeMap<u64, Vec<f64>>> = roster.iter().map(|p| pilot_distances(per_observer, p)).collect();
+        let mut candidates: HashMap<u64, Vec<(String, Vec<f64>)>> = HashMap::new();
+        let (mut matched, mut unmatched) = (0usize, 0usize);
+        for s in &self.samples {
+            let Some(label) = &s.label else { continue };
+            let key = s.t.to_bits();
+            let at_t = candidates.entry(key).or_insert_with(|| {
+                roster
+                    .iter()
+                    .zip(&distances)
+                    .map(|(p, d)| (ship_type_at(per_observer, p, s.t), d.get(&key).cloned().unwrap_or_default()))
+                    .collect()
+            });
+            let cands: Vec<Candidate> = roster
+                .iter()
+                .zip(at_t.iter())
+                .map(|(p, (ty, d))| Candidate { name: &p.name, ship_type: ty, ranges_m: d.clone() })
+                .collect();
+            match match_label(label, &cands, &ship_types) {
+                Some(i) => {
+                    per_pilot[i].entry(key).or_default().push(s.hp);
+                    matched += 1;
+                }
+                None => unmatched += 1,
+            }
+        }
+        let pilots = per_pilot.iter().filter(|m| !m.is_empty()).count();
+        println!(
+            "  locked targets: HP for {pilots} pilot(s) from {matched} ring readings; {unmatched} readings matched no pilot, {} had no label",
+            self.samples.iter().filter(|s| s.label.is_none()).count()
+        );
+        per_pilot.into_iter().map(|m| smooth_hp(&m)).collect()
+    }
+}
+
+/// A pilot's distance from each observer that read one, per tick (keyed by `t.to_bits()`).
+fn pilot_distances(per_observer: &[Vec<Track>], pilot: &Pilot) -> BTreeMap<u64, Vec<f64>> {
+    let mut out: BTreeMap<u64, Vec<f64>> = BTreeMap::new();
+    for &(o, i) in &pilot.members {
+        for s in &per_observer[o][i].samples {
+            if let Some(d) = s.distance_m {
+                out.entry(s.t.to_bits()).or_default().push(d);
+            }
+        }
+    }
+    out
+}
+
+/// The median of each arc across `hps`.
+fn median_hp(hps: &[Hp]) -> Hp {
+    let m = |f: fn(&Hp) -> f32| median(hps.iter().map(|h| f(h) as f64).collect()).unwrap_or_default() as f32;
+    Hp { shield: m(|h| h.shield), armor: m(|h| h.armor), hull: m(|h| h.hull) }
+}
+
+/// Per tick, the median of the readings, then of it and its neighbouring ticks.
+fn smooth_hp(readings: &BTreeMap<u64, Vec<Hp>>) -> BTreeMap<u64, Hp> {
+    let ticks: Vec<(u64, Hp)> = readings.iter().map(|(&t, v)| (t, median_hp(v))).collect();
+    (0..ticks.len())
+        .map(|k| {
+            let window: Vec<Hp> = ticks[k.saturating_sub(1)..(k + 2).min(ticks.len())].iter().map(|&(_, h)| h).collect();
+            (ticks[k].0, median_hp(&window))
+        })
+        .collect()
+}
+
 fn csv_field(s: &str) -> String {
     if s.contains([',', '"', '\n']) {
         format!("\"{}\"", s.replace('"', "\"\""))
@@ -512,17 +1032,19 @@ fn csv_field(s: &str) -> String {
 }
 
 /// One line per (tick, pilot) with a position fix. Speed is blank where no observer could read
-/// it. Direction is blank where the ship is stationary or too few fixes surround the tick. With
+/// it. Direction is blank where the ship is stationary or too few fixes surround the tick.
+/// Shield, armor and hull (`hp`, per pilot) are blank where no observer had the pilot locked. With
 /// `eve_origin` (the EVE time at `t` = 0), each line ends with its EVE time.
 fn positions_csv(
     per_observer: &[Vec<Track>],
     roster: &[Pilot],
     readings: &[PilotReadings],
     solved: &[Vec<Fix>],
+    hp: &[BTreeMap<u64, Hp>],
     eve_origin: Option<DateTime<Utc>>,
 ) -> String {
     let mut rows: Vec<(f64, String)> = Vec::new();
-    for ((pilot, r), fixes) in roster.iter().zip(readings).zip(solved) {
+    for (((pilot, r), fixes), hp) in roster.iter().zip(readings).zip(solved).zip(hp) {
         for (i, f) in fixes.iter().enumerate() {
             let mut line = format!(
                 "{:.3},{},{},{:.0},{:.0},{:.0},",
@@ -543,6 +1065,12 @@ fn positions_csv(
                 None => line.push_str(",,,"),
             }
             let _ = write!(line, ",{:.0}", f.residual_m);
+            match hp.get(&f.t.to_bits()) {
+                Some(h) => {
+                    let _ = write!(line, ",{:.3},{:.3},{:.3}", h.shield, h.armor, h.hull);
+                }
+                None => line.push_str(",,,"),
+            }
             if let Some(origin) = eve_origin {
                 let _ = write!(line, ",{}", eve_time(origin, f.t));
             }
@@ -552,7 +1080,8 @@ fn positions_csv(
     }
     // Tick-major like the old wide CSV; the sort is stable, so pilots stay in roster order.
     rows.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut out = String::from("t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m");
+    let mut out =
+        String::from("t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m,shield,armor,hull");
     out.push_str(if eve_origin.is_some() { ",eve_time\n" } else { "\n" });
     out.extend(rows.into_iter().map(|(_, l)| l));
     out
@@ -623,13 +1152,33 @@ mod tests {
 
     #[test]
     fn pair_selection() {
-        assert!(pick_pair(&[], None).is_err());
-        assert_eq!(pick_pair(&[(4, 38)], None).unwrap(), (4, 38));
+        use MatchSel::{All, One};
+        assert!(pick_pairs(&[], None).is_err());
+        assert!(pick_pairs(&[], Some(All)).is_err());
+        assert_eq!(pick_pairs(&[(4, 38)], None).unwrap(), [(1, (4, 38))]);
         let two = [(8, 41), (59, 95)];
-        assert!(pick_pair(&two, None).is_err());
-        assert_eq!(pick_pair(&two, Some(2)).unwrap(), (59, 95));
-        assert!(pick_pair(&two, Some(0)).is_err());
-        assert!(pick_pair(&two, Some(3)).is_err());
+        assert!(pick_pairs(&two, None).is_err());
+        assert_eq!(pick_pairs(&two, Some(One(2))).unwrap(), [(2, (59, 95))]);
+        assert!(pick_pairs(&two, Some(One(0))).is_err());
+        assert!(pick_pairs(&two, Some(One(3))).is_err());
+        assert_eq!(pick_pairs(&two, Some(All)).unwrap(), [(1, (8, 41)), (2, (59, 95))]);
+    }
+
+    #[test]
+    fn match_sel_parses() {
+        assert_eq!("all".parse(), Ok(MatchSel::All));
+        assert_eq!("ALL".parse(), Ok(MatchSel::All));
+        assert_eq!("2".parse(), Ok(MatchSel::One(2)));
+        assert!("0".parse::<MatchSel>().is_err());
+        assert!("x".parse::<MatchSel>().is_err());
+    }
+
+    #[test]
+    fn output_stem_drops_time() {
+        assert_eq!(output_stem("2026-10-04 05-58-36"), "2026-10-04");
+        assert_eq!(output_stem("2026-10-04_05-58-36 drac"), "2026-10-04 drac");
+        assert_eq!(output_stem("match"), "match");
+        assert_eq!(output_stem("2026-10-04 notatime"), "2026-10-04 notatime");
     }
 
     #[test]
@@ -644,6 +1193,23 @@ mod tests {
     }
 
     #[test]
+    fn gamelog_trimmed_to_match() {
+        let log = "------\r\n  Gamelog\r\n  Listener: Some Pilot\r\n  Session Started: 2026.04.04 17:00:00\r\n------\r\n\
+            [ 2026.04.04 17:43:58 ] (combat) before\r\n\
+            [ 2026.04.04 17:44:00 ] (combat) during\r\n\
+            [ 2026.04.04 17:44:01 ] (notify) multi\r\nline\r\n\
+            [ 2026.04.04 17:45:01 ] (combat) after\r\n";
+        let t = |s| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").unwrap();
+        let trimmed = trim_gamelog(log, t("2026-04-04 17:44:00"), t("2026-04-04 17:45:00")).unwrap();
+        assert!(trimmed.starts_with("------\r\n  Gamelog\r\n  Listener: Some Pilot\r\n"));
+        assert!(trimmed.contains("(combat) during\r\n"));
+        assert!(trimmed.ends_with("(notify) multi\r\nline\r\n"));
+        assert!(!trimmed.contains("before") && !trimmed.contains("after"));
+        assert!(trim_gamelog("[ 2026.04.04 17:44:00 ] (combat) x\n", t("2026-04-04 17:44:00"),
+            t("2026-04-04 17:45:00")).is_none());
+    }
+
+    #[test]
     fn scene_chat_rect_is_optional() {
         let without: Scene = serde_json::from_str(r#"{"panels": []}"#).unwrap();
         assert!(without.chat.is_none());
@@ -651,5 +1217,30 @@ mod tests {
             serde_json::from_str(r#"{"panels": [], "chat": {"x": 0, "y": 1200, "w": 1280, "h": 400}}"#)
                 .unwrap();
         assert_eq!(with.chat.unwrap().y, 1200);
+    }
+
+    #[test]
+    fn hp_takes_the_median_across_observers_and_ticks() {
+        let hp = |s: f32| Hp { shield: s, armor: 1.0, hull: 1.0 };
+        let mut readings: BTreeMap<u64, Vec<Hp>> = BTreeMap::new();
+        for (t, v) in [(0.0f64, vec![hp(0.9)]), (1.0, vec![hp(0.9), hp(0.2), hp(0.8)]), (2.0, vec![hp(0.0)]), (3.0, vec![hp(0.8)])] {
+            readings.insert(t.to_bits(), v);
+        }
+        let smooth = smooth_hp(&readings);
+        let at = |t: f64| smooth[&t.to_bits()].shield;
+        // Tick 1's median is 0.8; tick 2's lone 0.0 is a one-tick dip, smoothed away.
+        assert_eq!([at(0.0), at(1.0), at(2.0), at(3.0)], [0.9, 0.8, 0.8, 0.8]);
+    }
+
+    #[test]
+    fn scene_target_blocks_are_optional() {
+        let without: Scene = serde_json::from_str(r#"{"panels": []}"#).unwrap();
+        assert!(without.targets.is_empty());
+        let with: Scene = serde_json::from_str(
+            r#"{"panels": [], "targets": [{"x": 2560, "y": 928, "w": 576, "h": 672}]}"#,
+        )
+        .unwrap();
+        assert_eq!(with.targets.len(), 1);
+        assert_eq!(with.targets[0].x, 2560);
     }
 }

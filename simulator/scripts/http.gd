@@ -12,6 +12,9 @@ const HEADERS := ["User-Agent: scrimSimulator (EVE scrim replay tool)"]
 static func fetch(parent: Node, url: String, headers: Array = [], to_file := "",
 		progress := Callable(), timeout := 30.0) -> Dictionary:
 	var req := HTTPRequest.new()
+	if OS.has_feature("web"):
+		url = WebBackend.rewrite_url(url)
+		req.accept_gzip = false  # The browser has already decompressed the body.
 	req.timeout = timeout if to_file == "" else 0.0
 	if to_file != "":
 		req.download_file = to_file

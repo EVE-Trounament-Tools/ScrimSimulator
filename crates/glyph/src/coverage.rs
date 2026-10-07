@@ -74,11 +74,24 @@ fn modal_bg(img: &RgbImage, x0: u32, y0: u32, w: u32, h: u32) -> [u8; 3] {
     // `BTreeMap` iterates in a fixed key order, making both tie-breaks reproducible.
     use std::collections::BTreeMap;
     let mut counts: BTreeMap<[u8; 3], u32> = BTreeMap::new();
+    // Flat backgrounds make long runs of one colour; count a run locally and touch the map once
+    // per run rather than once per pixel.
+    let mut run: Option<([u8; 3], u32)> = None;
     for y in y0..y0 + h {
         for x in x0..x0 + w {
             let Rgb(p) = *img.get_pixel(x, y);
-            *counts.entry(p).or_insert(0) += 1;
+            match &mut run {
+                Some((c, n)) if *c == p => *n += 1,
+                _ => {
+                    if let Some((c, n)) = run.replace((p, 1)) {
+                        *counts.entry(c).or_insert(0) += n;
+                    }
+                }
+            }
         }
+    }
+    if let Some((c, n)) = run {
+        *counts.entry(c).or_insert(0) += n;
     }
     // Quantise to buckets of 4 to merge near-identical background shades before taking the mode.
     let mut bucket_counts: BTreeMap<[u8; 3], u32> = BTreeMap::new();

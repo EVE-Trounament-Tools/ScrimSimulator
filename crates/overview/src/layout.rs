@@ -347,18 +347,54 @@ const INK_THRESHOLD: f32 = 40.0;
 /// row is "local" because each overview row (and the header/tab strip above it) is one flat
 /// background colour across its full width, so a single per-row median is a clean background
 /// estimate — unlike one bg/fg pair for the whole multi-coloured panel.
+///
+/// Vertical lines are left out: vertical runs, at least [`MIN_VLINE_LEN`] tall, of *thin* ink
+/// (ink that also contrasts with the pixels [`VLINE_PROBE_PX`] to either side) — e.g. the light
+/// border another window draws through a scene panel. Counted in, such a line bridges every gap
+/// between text lines and the whole panel reads as one line. Glyphs are far shorter than that,
+/// and the edge of a wide area (a row background narrower than `rect`) isn't thin, so both still
+/// count as they always did.
 fn row_ink_signal(img: &RgbImage, rect: Rect) -> Vec<f32> {
-    (0..rect.h)
-        .map(|dy| row_ink_level(img, rect.x, rect.y + dy, rect.w))
-        .collect()
+    let (w, h) = (rect.w as usize, rect.h as usize);
+    let k = VLINE_PROBE_PX;
+    let mut thin = vec![false; w * h];
+    let mut diffs: Vec<Vec<f32>> = (0..h)
+        .map(|dy| {
+            let y = rect.y + dy as u32;
+            let med = row_median_color(img, rect.x, y, rect.w);
+            let px = |x: usize| img.get_pixel(rect.x + x as u32, y);
+            let diff: Vec<f32> = (0..w).map(|x| max_channel_diff(px(x), med)).collect();
+            for x in k..w.saturating_sub(k) {
+                let c = px(x).0.map(f32::from);
+                thin[dy * w + x] = diff[x] >= INK_THRESHOLD
+                    && max_channel_diff(px(x - k), c) >= INK_THRESHOLD
+                    && max_channel_diff(px(x + k), c) >= INK_THRESHOLD;
+            }
+            diff
+        })
+        .collect();
+    for x in 0..w {
+        let mut y = 0;
+        while y < h {
+            let run = (y..h).take_while(|&yy| thin[yy * w + x]).count();
+            if run >= MIN_VLINE_LEN {
+                for row in &mut diffs[y..y + run] {
+                    row[x] = 0.0;
+                }
+            }
+            y += run.max(1);
+        }
+    }
+    diffs.iter().map(|row| row.iter().copied().fold(0.0, f32::max)).collect()
 }
 
-fn row_ink_level(img: &RgbImage, x0: u32, y: u32, w: u32) -> f32 {
-    let med = row_median_color(img, x0, y, w);
-    (0..w)
-        .map(|dx| max_channel_diff(img.get_pixel(x0 + dx, y), med))
-        .fold(0.0, f32::max)
-}
+/// Shortest vertical run (px) of thin ink [`row_ink_signal`] treats as a line rather than a glyph
+/// stroke: twice the tallest header/row text band (~23px), and taller than the gap it'd bridge.
+const MIN_VLINE_LEN: usize = 48;
+
+/// How far (px) to each side [`row_ink_signal`] looks to tell a thin line from the edge of a wide
+/// area: wider than a 2px border resampled by up to [`crate::panel`]'s 1.5x, plus Lanczos ringing.
+const VLINE_PROBE_PX: usize = 8;
 
 fn row_median_color(img: &RgbImage, x0: u32, y: u32, w: u32) -> [f32; 3] {
     let mut rs = Vec::with_capacity(w as usize);
