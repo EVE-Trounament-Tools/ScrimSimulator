@@ -38,8 +38,8 @@ func test_sides_are_mirrored() -> void:
 	var b := _panel()
 	b.add_row(L, "a", Color.RED)
 	b.add_row(R, "b", Color.BLUE)
-	assert_eq(_row_ids(b, "a"), ["pts", "name", "speed", "hull", "armor", "shield", "ship", "ewar"])
-	assert_eq(_row_ids(b, "b"), ["ewar", "ship", "shield", "armor", "hull", "speed", "name", "pts"])
+	assert_eq(_row_ids(b, "a"), ["pts", "name", "mjd", "speed", "hull", "armor", "shield", "ship", "ewar"])
+	assert_eq(_row_ids(b, "b"), ["ewar", "ship", "shield", "armor", "hull", "speed", "mjd", "name", "pts"])
 	assert_eq(b.rows["a"].button.get_parent(), b.sides[L].rows)
 	assert_eq(b.rows["b"].button.get_parent(), b.sides[R].rows)
 	assert_eq(b.cell_text("a", "pts"), "0")
@@ -58,6 +58,18 @@ func test_ewar_capped() -> void:
 	b.set_ewar("a", _items(7))
 	assert_eq(box.get_child(0), first, "same items: not rebuilt")
 	b.set_ewar("a", [])
+	assert_eq(box.get_child_count(), 0)
+
+
+func test_mjd_icon_beside_speed() -> void:
+	var b := _panel()
+	b.add_row(L, "a", Color.RED)
+	var box: HBoxContainer = b.rows["a"].mjd
+	assert_eq(box.get_child_count(), 0)
+	b.set_mjd("a", [{"key": "mjd", "texture": null, "text": "MJD", "tooltip": "jumps in 5 s"}])
+	assert_eq(box.get_child_count(), 1)
+	assert_eq(box.get_child(0).get_meta("key"), "mjd")
+	b.set_mjd("a", [])
 	assert_eq(box.get_child_count(), 0)
 
 

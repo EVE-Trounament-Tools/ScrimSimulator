@@ -79,6 +79,10 @@ const AUDIO_BUS := "Match audio"
 const EVENT_LEAD_S := 2.0
 ## A micro jump's take-off -> landing line stays up this long (match s) after the jump.
 const MJD_TRAIL_S := 5.0
+## Radius (screen px) of the spool ring drawn around a ship spooling its micro jump drive, and of
+## the marker at its projected landing.
+const MJD_RING_PX := 24.0
+const MJD_RING_SEGMENTS := 48
 ## Jump range drawn around the corner and centre beacons (debug menu).
 const BEACON_JUMP_KM := 5.0
 const VECTOR_SECONDS := 3.0
@@ -118,12 +122,14 @@ var debug := {}
 var vector_seconds := VECTOR_SECONDS
 
 ## pilot -> { node, visual, model_id, icon, select_icon, label, ship_type, radius, dead, color, tint, death_t,
-## death_marker, heading, heading_t, vector, vector_tip, spheres }; `heading` is the model's
+## death_marker, heading, heading_t, vector, vector_tip, spheres, mjd_ring, mjd_projection,
+## mjd_lines, mjd_label, mjd_dir, mjd_land }; `heading` is the model's
 ## rotation as of match time `heading_t`; `radius` is the true hull radius in scene units (0 if
 ## unknown), `visual` the sphere or model under `node`, `model_id` the type ID it shows
 ## (0 = sphere), `tint` the colour the ship is currently drawn in; `vector` the debug movement
 ## line (ending at `vector_tip`, relative to the ship) and `spheres` the node holding its debug
-## range spheres.
+## range spheres; `mjd_ring` and `mjd_projection` (lines `mjd_lines` and label `mjd_label`, in
+## world space) draw its micro jump drive spool-up, aimed along `mjd_dir` to `mjd_land`.
 var ships := {}
 var ships_root: Node3D
 var boundary: Node3D
@@ -155,6 +161,11 @@ var play_button: Button
 var start_button: Button
 var timeline: HSlider
 var event_strip: EventStrip
+## Draw micro jump drive spool-ups in space (setting `display/mjd_spoolup`); the broadcast panel's
+## MJD icon shows regardless.
+var mjd_on := true
+var mjd_button: Button
+var mjd_setting: CheckBox
 ## { t: float, node: Node3D } per micro jump: a line from take-off to landing.
 var mjd_trails: Array = []
 var time_label: Label
@@ -227,6 +238,7 @@ func _ready() -> void:
 	smooth_on = Settings.get_value("display/smooth_motion")
 	broadcast_on = Settings.get_value("display/broadcast_roster")
 	damage_on = Settings.get_value("display/damage_highlight")
+	mjd_on = Settings.get_value("display/mjd_spoolup")
 	for field in OVERLAY_FIELDS:
 		ship_overlay[field] = Settings.get_value("overlay/" + field)
 	get_window().content_scale_factor = Settings.get_value("display/ui_scale")
@@ -548,6 +560,7 @@ func _process(delta: float) -> void:
 	_update_ships()
 	_update_vectors()
 	_update_mjd_trails()
+	_update_mjd_spool()
 	if tracked != "" and ships[tracked].node.visible:
 		camera.set_target(ships[tracked].node.position)
 	_update_measure()
@@ -633,14 +646,23 @@ func _add_ship(pilot: String) -> void:
 	var label := _label(color)
 	node.add_child(label)
 
-	var vector := MeshInstance3D.new()
-	vector.mesh = ImmediateMesh.new()
-	vector.material_override = vector_material
-	vector.visible = false
+	var vector := _lines_mesh()
 	node.add_child(vector)
 
 	var spheres := Node3D.new()
 	node.add_child(spheres)
+
+	var mjd_ring := _lines_mesh()
+	node.add_child(mjd_ring)
+	var mjd_projection := Node3D.new()
+	mjd_projection.top_level = true  # drawn in world space
+	mjd_projection.visible = false
+	var mjd_lines := _lines_mesh()
+	mjd_lines.visible = true
+	mjd_projection.add_child(mjd_lines)
+	var mjd_label := _label(MJD_COLOR)
+	mjd_projection.add_child(mjd_label)
+	node.add_child(mjd_projection)
 
 	node.visible = false
 	ships_root.add_child(node)
@@ -650,12 +672,23 @@ func _add_ship(pilot: String) -> void:
 		"ship_type": "", "radius": 0.0, "dead": false, "color": color, "tint": color,
 		"death_t": INF, "death_marker": null, "heading": Quaternion.IDENTITY, "heading_t": -INF,
 		"vector": vector, "vector_tip": Vector3.ZERO, "spheres": spheres,
+		"mjd_ring": mjd_ring, "mjd_projection": mjd_projection, "mjd_lines": mjd_lines,
+		"mjd_label": mjd_label, "mjd_dir": Vector3.ZERO, "mjd_land": Vector3.ZERO,
 	}
 	_apply_debug(pilot)
 	if data.deaths.has(pilot):
 		var death: Dictionary = data.deaths[pilot]
 		ships[pilot].death_t = death.t
 		ships[pilot].death_marker = _death_marker(pilot, death, color)
+
+
+## An empty, hidden line mesh drawn in its vertex colours over everything.
+func _lines_mesh() -> MeshInstance3D:
+	var mesh := MeshInstance3D.new()
+	mesh.mesh = ImmediateMesh.new()
+	mesh.material_override = vector_material
+	mesh.visible = false
+	return mesh
 
 
 func _sphere() -> MeshInstance3D:
@@ -780,6 +813,85 @@ func _mjd_trail(e: Dictionary) -> Node3D:
 func _update_mjd_trails() -> void:
 	for trail in mjd_trails:
 		trail.node.visible = time >= trail.t and time - trail.t <= MJD_TRAIL_S
+
+
+## Draws each micro jump drive spool-up (`mjd_on`): a ring around the ship filling over the
+## `MatchData.MJD_SPOOL_S`, and an arrow to where it would land if it jumped now, 100 km along its
+## current heading (`_mjd_heading`), labelled with the seconds left.
+func _update_mjd_spool() -> void:
+	for pilot in ships:
+		var ship: Dictionary = ships[pilot]
+		var spool := -1.0
+		if mjd_on and ship.node.visible and time < ship.death_t:
+			spool = data.mjd_spool(pilot, time)
+			_track_mjd_heading(pilot)
+		var on := spool >= 0.0
+		ship.mjd_ring.visible = on
+		if not on:
+			ship.mjd_projection.visible = false
+			continue
+		var pos: Vector3 = ship.node.position
+		var r := maxf(ship.radius * 1.5, _units_per_px(camera.global_position.distance_to(pos)) * MJD_RING_PX)
+		var ring: ImmediateMesh = ship.mjd_ring.mesh
+		ring.clear_surfaces()
+		ring.surface_begin(Mesh.PRIMITIVE_LINES)
+		_add_ring(ring, Vector3.ZERO, r, 1.0, Color(MJD_COLOR, 0.3))
+		for k in [1.0, 1.08, 1.16]:
+			_add_ring(ring, Vector3.ZERO, r * k, spool, MJD_COLOR)
+		ring.surface_end()
+
+		var dir := _mjd_heading(ship)
+		ship.mjd_projection.visible = dir != Vector3.ZERO
+		if dir == Vector3.ZERO:
+			continue
+		var land := pos + dir * MatchData.MJD_DISTANCE_M * M_TO_UNITS
+		ship.mjd_land = land
+		var land_r := _units_per_px(camera.global_position.distance_to(land)) * MJD_RING_PX
+		var lines: ImmediateMesh = ship.mjd_lines.mesh
+		lines.clear_surfaces()
+		lines.surface_begin(Mesh.PRIMITIVE_LINES)
+		lines.surface_set_color(Color(MJD_COLOR, 0.8))
+		for p in _arrow_points(pos + dir * r, land - dir * land_r):
+			lines.surface_add_vertex(p)
+		_add_ring(lines, land, land_r, 1.0, MJD_COLOR)
+		_add_ring(lines, land, land_r * 0.3, 1.0, MJD_COLOR)
+		lines.surface_end()
+		ship.mjd_label.text = "%s MJD %d s" % [_pilot_name(pilot), _mjd_seconds_left(spool)]
+		ship.mjd_label.position = land + camera.global_basis.y * land_r * 1.6
+
+
+## Adds the first `fraction` (clockwise from the top) of a camera-facing circle of `radius` around
+## `centre` to `lines` (an open `PRIMITIVE_LINES` surface), in `color`.
+func _add_ring(lines: ImmediateMesh, centre: Vector3, radius: float, fraction: float, color: Color) -> void:
+	var x := camera.global_basis.x * radius
+	var y := camera.global_basis.y * radius
+	var n := ceili(MJD_RING_SEGMENTS * fraction)
+	lines.surface_set_color(color)
+	for j in n:
+		for k in [j, j + 1]:
+			var a: float = TAU * fraction * k / n
+			lines.surface_add_vertex(centre + x * sin(a) + y * cos(a))
+
+
+## Keeps `pilot`'s `mjd_dir` (its last known heading) up to date: the direction of its velocity
+## over the last `HEADING_WINDOW_S`, never looking ahead (which would give away where a jump
+## lands); left as it was while the ship is (nearly) stopped.
+func _track_mjd_heading(pilot: String) -> void:
+	var prev := data.sample(pilot, time - HEADING_WINDOW_S)
+	var now := data.sample(pilot, time)
+	if prev.is_empty() or now.is_empty() or now.t <= prev.t:
+		return
+	var v: Vector3 = (now.pos - prev.pos) / (now.t - prev.t)
+	if v.length() >= MIN_HEADING_SPEED:
+		ships[pilot].mjd_dir = v.normalized()
+
+
+## Unit direction `ship` is heading now, for its projected micro jump: its last known heading
+## (`_track_mjd_heading`), else its model's facing. ZERO when unknown.
+func _mjd_heading(ship: Dictionary) -> Vector3:
+	if ship.mjd_dir == Vector3.ZERO and ship.model_id != 0 and ship.heading_t > -INF:
+		return Basis(ship.heading).z.normalized()
+	return ship.mjd_dir
 
 
 ## Seeks to the lead-up of the next (`dir` 1) or previous (-1) event from now.
@@ -1225,14 +1337,20 @@ func _update_vectors() -> void:
 			continue
 		var tip := v * vector_seconds * M_TO_UNITS
 		ship.vector_tip = tip
-		var dir := tip.normalized()
-		var side := dir.cross(Vector3.UP if absf(dir.y) < 0.99 else Vector3.RIGHT).normalized()
-		var head := tip.length() * ARROW_FRACTION
 		lines.surface_begin(Mesh.PRIMITIVE_LINES)
 		lines.surface_set_color(Color(ship.tint, 1.0))
-		for p in [Vector3.ZERO, tip, tip, tip - (dir - side * 0.5) * head, tip, tip - (dir + side * 0.5) * head]:
+		for p in _arrow_points(Vector3.ZERO, tip):
 			lines.surface_add_vertex(p)
 		lines.surface_end()
+
+
+## Line vertex pairs of an arrow from `from` to `to`: the shaft, then an arrowhead
+## `ARROW_FRACTION` of its length.
+static func _arrow_points(from: Vector3, to: Vector3) -> Array:
+	var dir := (to - from).normalized()
+	var side := dir.cross(Vector3.UP if absf(dir.y) < 0.99 else Vector3.RIGHT).normalized()
+	var head := from.distance_to(to) * ARROW_FRACTION
+	return [from, to, to, to - (dir - side * 0.5) * head, to, to - (dir + side * 0.5) * head]
 
 
 func _set_vector(pilot: String, on: bool) -> void:
@@ -1641,6 +1759,14 @@ func _build_ui() -> void:
 	row.add_child(damage_button)
 	_update_damage_controls()
 
+	mjd_button = Button.new()
+	mjd_button.text = "MJD"
+	mjd_button.toggle_mode = true
+	mjd_button.button_pressed = mjd_on
+	mjd_button.tooltip_text = "Show micro jump drive spool-ups in space: a ring around the ship and its projected landing"
+	mjd_button.toggled.connect(_set_mjd_on)
+	row.add_child(mjd_button)
+
 	ruleset_option = OptionButton.new()
 	ruleset_option.tooltip_text = "Ruleset the broadcast panel's points follow"
 	for id in Ruleset.available():
@@ -1787,6 +1913,12 @@ func _build_settings(layer: CanvasLayer) -> void:
 	damage_setting.button_pressed = damage_on
 	damage_setting.toggled.connect(_set_damage_on)
 	box.add_child(damage_setting)
+
+	mjd_setting = CheckBox.new()
+	mjd_setting.text = "Show micro jump drive spool-ups in space (ring, projected landing)"
+	mjd_setting.button_pressed = mjd_on
+	mjd_setting.toggled.connect(_set_mjd_on)
+	box.add_child(mjd_setting)
 
 	var smooth_setting := CheckBox.new()
 	smooth_setting.text = "Smooth ship movement between position samples (instead of straight lines)"
@@ -1946,6 +2078,13 @@ func _set_damage_on(on: bool) -> void:
 	_update_roster_cells()
 
 
+func _set_mjd_on(on: bool) -> void:
+	mjd_on = on
+	Settings.set_value("display/mjd_spoolup", on)
+	mjd_button.set_pressed_no_signal(on)
+	mjd_setting.set_pressed_no_signal(on)
+
+
 ## The damage highlight needs HP: its button is disabled for a match without any.
 func _update_damage_controls() -> void:
 	var has_hp := data != null and data.has_hp
@@ -2073,7 +2212,7 @@ func _update_roster_cells() -> void:
 
 
 ## Copies `pilot`'s roster row (ship, speed, `hp`, taking damage: `hit`) into the broadcast panel,
-## with the electronic warfare on it. Ships that died (out of bounds: `dead`, or podded) grey out
+## with the electronic warfare on it and a micro jump drive icon while it spools. Ships that died (out of bounds: `dead`, or podded) grey out
 ## their row and keep the hull they lost.
 func _update_broadcast_row(pilot: String, dead: bool, hp: Vector3, hit: bool) -> void:
 	var lost := data.lost_hull(pilot, time)
@@ -2085,6 +2224,21 @@ func _update_broadcast_row(pilot: String, dead: bool, hp: Vector3, hit: bool) ->
 	broadcast_panel.set_damaged(pilot, hit and not dead)
 	var ewar := combat_stats.has("ewar_in") and not dead
 	broadcast_panel.set_ewar(pilot, _ewar_icons(pilot, false) if ewar else [])
+	broadcast_panel.set_mjd(pilot, [] if dead else _mjd_icons(data.mjd_spool(pilot, time)))
+
+
+## The broadcast panel's micro jump drive icon for a drive `spool` of the way spooled up (see
+## `MatchData.mjd_spool`), or none when it isn't spooling.
+func _mjd_icons(spool: float) -> Array:
+	if spool < 0.0:
+		return []
+	return [{"key": "mjd", "texture": assets.ewar_texture("mjd"), "text": "MJD",
+		"tooltip": "Micro jump drive spooling: jumps in %d s" % _mjd_seconds_left(spool)}]
+
+
+## Whole seconds (rounded up) until a micro jump drive `spool` of the way spooled up jumps.
+static func _mjd_seconds_left(spool: float) -> int:
+	return ceili((1.0 - spool) * MatchData.MJD_SPOOL_S - 0.001)
 
 
 ## Roster icons for the electronic warfare on `pilot` (`outgoing`: by it) now: one per type, its

@@ -25,6 +25,8 @@ const LINE_TOLERANCE_M := 10000.0
 ## one, which keeps pod warps out.
 const MJD_DISTANCE_M := 100000.0
 const MJD_TOLERANCE_M := 15000.0
+## A micro jump drive spools up for 12 server ticks before the jump.
+const MJD_SPOOL_S := 12.0
 const CAPSULE := "Capsule"
 ## Shield, armor and hull of a pilot whose HP isn't known.
 const NAN_HP := Vector3(NAN, NAN, NAN)
@@ -54,6 +56,8 @@ var deaths: Dictionary = {}
 ## pos: Vector3 (metres), ship_type: String (hull lost / flown) }; MJDs add `to_pos`, where the
 ## ship landed (`pos` is where it jumped from).
 var events: Array = []
+## pilot name -> match times (sorted) of its micro jumps (the landing samples).
+var mjd_times: Dictionary = {}
 ## Whether any sample has HP.
 var has_hp := false
 ## pilot name -> match times (sorted) at which an HP reading showed a hit (see `DAMAGE_MIN_DROP`).
@@ -285,6 +289,7 @@ func _find_mjds() -> void:
 ## Collects podding (first capsule sample after a hull), boundary crossings and MJDs into `events`.
 func _find_events() -> void:
 	events.clear()
+	mjd_times.clear()
 	for pilot in tracks:
 		var track: Array = tracks[pilot]
 		for i in range(1, track.size()):
@@ -296,6 +301,9 @@ func _find_events() -> void:
 			if b.ship_type == CAPSULE and a.ship_type != CAPSULE:
 				events.append({"t": t, "pilot": pilot, "kind": Event.DEATH, "pos": b.pos, "ship_type": a.ship_type})
 			if b.get("mjd", false):
+				if not mjd_times.has(pilot):
+					mjd_times[pilot] = PackedFloat64Array()
+				mjd_times[pilot].append(t)
 				events.append({
 					"t": t, "pilot": pilot, "kind": Event.MJD, "pos": a.pos, "to_pos": b.pos,
 					"ship_type": a.ship_type,
@@ -348,6 +356,16 @@ func taking_damage(pilot: String, t: float) -> bool:
 		return false
 	var i := hits.bsearch(t, false)  # first hit after t
 	return i > 0 and t - hits[i - 1] < DAMAGE_HOLD_S
+
+
+## How far `pilot`'s micro jump drive has spooled (0-1) at match time `t`, within the
+## `MJD_SPOOL_S` before one of its jumps; -1 when it isn't spooling.
+func mjd_spool(pilot: String, t: float) -> float:
+	var jumps: PackedFloat64Array = mjd_times.get(pilot, PackedFloat64Array())
+	var i := jumps.bsearch(t, false)  # first jump after t
+	if i >= jumps.size() or jumps[i] - t > MJD_SPOOL_S:
+		return -1.0
+	return 1.0 - (jumps[i] - t) / MJD_SPOOL_S
 
 
 ## `pilot`'s remaining shield, armor and hull (0-1) at match time `t`: those of the latest sample

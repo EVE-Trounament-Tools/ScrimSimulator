@@ -179,6 +179,12 @@ locked). **Damage** (bottom bar, or Settings) highlights the rows of ships whose
 a layer lower than its last reading and more than 3% below its best of the previous 3 s, held for
 2 s.
 
+A micro jump (a 100 km hop) is taken to spool up for the 12 ticks before it lands. Meanwhile the
+broadcast panel shows the MJD module icon beside the ship's speed, and **MJD** (bottom bar, or
+Settings) draws the spool-up in space: a ring around the ship filling as it spools, and an arrow to
+where it would land if it jumped now — 100 km along its current heading, updated live, not where
+it actually lands.
+
 The broadcast panel scores the match under a tournament ruleset (picker in the bottom bar, saved
 per match; the newest by default). Each row's **PTS** is its ship's points, inflated by the
 hull's per-copy rate when a team fields the same ship more than once. A team's score is the points

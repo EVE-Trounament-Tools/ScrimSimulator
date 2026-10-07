@@ -59,7 +59,8 @@ const BRACKET_KEYWORDS := [
 	["blockade", "industrial"],
 ]
 const DEFAULT_BRACKET := "frigate"
-## T1 module whose image server icon stands for each `CombatStats.EWAR_TYPES` key.
+## T1 module whose image server icon stands for each `CombatStats.EWAR_TYPES` key, plus "mjd" for
+## the micro jump drive spool-up icon.
 const EWAR_TYPE_IDS := {
 	"scram": 447,  # Warp Scrambler I
 	"disrupt": 3242,  # Warp Disruptor I
@@ -72,6 +73,7 @@ const EWAR_TYPE_IDS := {
 	"tp": 12709,  # Target Painter I
 	"rsb": 1963,  # Remote Sensor Booster I
 	"rtc": 2103,  # Remote Tracking Computer I
+	"mjd": 4383,  # Micro Jump Drive
 }
 
 ## Type ID -> model path relative to `GALLERY`.

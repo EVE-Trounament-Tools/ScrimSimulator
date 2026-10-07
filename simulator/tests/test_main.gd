@@ -1560,6 +1560,75 @@ func test_roster_right_click_opens_debug_menu() -> void:
 	assert_true(m.ship_debug_menu.visible)
 
 
+## "jumper" (corner 0) flies +Y at 100 m/s, then micro jumps 100 km along +X at 21 s; "other"
+## (corner 7) sits still.
+func _mjd_main() -> Main:
+	var m := _main()
+	var rows := []
+	for t in 21:
+		rows.append(row(t, "jumper", "Test Hull", on_line(0, 0.5) + Vector3.UP * 100 * t))
+		rows.append(row(t, "other", "Test Hull", on_line(7, 0.5)))
+	rows.append(row(21, "jumper", "Test Hull", on_line(0, 0.5) + Vector3.UP * 2000 + X * 100000))
+	m.load_match(write_csv(rows))
+	return m
+
+
+func test_mjd_spool_up_graphics() -> void:
+	var m := _mjd_main()
+	var ship: Dictionary = m.ships["jumper"]
+	m._seek(5.0)
+	m._process(0.0)
+	assert_false(ship.mjd_ring.visible, "not spooling yet")
+	assert_false(ship.mjd_projection.visible)
+	assert_eq(m.broadcast_panel.rows["jumper"].mjd.get_child_count(), 0)
+
+	m._seek(15.0)
+	m._process(0.0)
+	assert_true(ship.mjd_ring.visible)
+	assert_true(ship.mjd_projection.visible)
+	assert_eq(ship.mjd_label.text, "jumper MJD 6 s")
+	# 100 km ahead along its current heading (+Y), not where it actually lands (+X).
+	var pos := (on_line(0, 0.5) + Vector3.UP * 1500) * Main.M_TO_UNITS
+	assert_almost(ship.mjd_land, pos + Vector3.UP * 100.0)
+	var icons: HBoxContainer = m.broadcast_panel.rows["jumper"].mjd
+	assert_eq(icons.get_child_count(), 1)
+	assert_eq(icons.get_child(0).tooltip_text, "Micro jump drive spooling: jumps in 6 s")
+	assert_eq(m.broadcast_panel.rows["other"].mjd.get_child_count(), 0)
+
+	m.mjd_button.button_pressed = false
+	assert_false(Settings.get_value("display/mjd_spoolup"))
+	assert_false(m.mjd_setting.button_pressed, "settings checkbox follows")
+	m._process(0.0)
+	assert_false(ship.mjd_ring.visible, "space graphics are behind the toggle")
+	assert_false(ship.mjd_projection.visible)
+	assert_eq(icons.get_child_count(), 1, "broadcast icon shows regardless")
+
+	m.mjd_setting.button_pressed = true
+	m._seek(21.0)
+	m._process(0.0)
+	assert_false(ship.mjd_ring.visible, "landed")
+	assert_eq(icons.get_child_count(), 0)
+
+
+func test_mjd_projection_holds_heading_when_stopped() -> void:
+	var m := _main()
+	var rows := []
+	for t in 21:
+		var y := 100 * mini(t, 5)  # stops at 5 s
+		rows.append(row(t, "jumper", "Test Hull", on_line(0, 0.5) + Vector3.UP * y))
+		rows.append(row(t, "other", "Test Hull", on_line(7, 0.5)))
+	rows.append(row(21, "jumper", "Test Hull", on_line(0, 0.5) + Vector3.UP * 500 + X * 100000))
+	m.load_match(write_csv(rows))
+	var ship: Dictionary = m.ships["jumper"]
+	m._seek(3.0)
+	m._process(0.0)
+	m._seek(15.0)
+	m._process(0.0)
+	assert_true(ship.mjd_projection.visible, "keeps the heading it had while moving")
+	var pos := (on_line(0, 0.5) + Vector3.UP * 500) * Main.M_TO_UNITS
+	assert_almost(ship.mjd_land, pos + Vector3.UP * 100.0)
+
+
 func test_movement_vector_projects_velocity() -> void:
 	var m := _select_main()
 	var ship: Dictionary = m.ships["blue"]

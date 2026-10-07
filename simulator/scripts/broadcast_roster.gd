@@ -1,7 +1,8 @@
 class_name BroadcastRoster
 extends PanelContainer
 ## Tournament-broadcast style ship data: one team down each side, mirrored about a centre column
-## with the match clock. Each row shows points, pilot, speed, shield/armor/hull bars, ship type
+## with the match clock. Each row shows points, pilot, speed (with a micro jump drive icon while it
+## spools), shield/armor/hull bars, ship type
 ## and the electronic warfare on the ship (nearest the centre, at most `MAX_EWAR_ICONS`). Rows can
 ## be highlighted while their ship takes damage. Points (team score, each ship's value) are set
 ## by the caller.
@@ -16,6 +17,7 @@ enum Side { LEFT, RIGHT }
 const COLUMNS := {
 	"pts": {"title": "PTS", "align": HORIZONTAL_ALIGNMENT_LEFT, "width": 36},
 	"name": {"title": "NAME", "align": HORIZONTAL_ALIGNMENT_LEFT, "width": 140},
+	"mjd": {"title": "", "align": HORIZONTAL_ALIGNMENT_LEFT, "width": RosterTable.ICON_PX + 4},
 	"speed": {"title": "SPEED", "align": HORIZONTAL_ALIGNMENT_LEFT, "width": 72},
 	"hull": {"title": "HULL", "align": HORIZONTAL_ALIGNMENT_CENTER, "width": 44, "bar": true},
 	"armor": {"title": "ARM", "align": HORIZONTAL_ALIGNMENT_CENTER, "width": 44, "bar": true},
@@ -41,7 +43,7 @@ const BACKGROUND := Color(0.04, 0.05, 0.07, 0.92)
 var sides := {}
 var clock: Label
 ## pilot -> { side, color, dead, button, cells (HBoxContainer), labels: { column id -> Label or
-## `HpBar` }, ewar (HBoxContainer), damage (ColorRect behind the cells, shown while taking damage) }.
+## `HpBar` }, ewar and mjd (HBoxContainers of icons), damage (ColorRect behind the cells, shown while taking damage) }.
 var rows := {}
 
 
@@ -194,6 +196,7 @@ func add_row(side: int, pilot: String, color: Color) -> Button:
 	button.add_child(cells)
 	var labels := {}
 	var ewar: HBoxContainer
+	var mjd: HBoxContainer
 	for id in column_ids(side):
 		var cell: Control
 		if COLUMNS[id].get("bar", false):
@@ -205,6 +208,14 @@ func add_row(side: int, pilot: String, color: Color) -> Button:
 			ewar.custom_minimum_size.x = EWAR_W
 			ewar.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			cell = ewar
+		elif id == "mjd":
+			# Hugs the speed text next to it.
+			mjd = HBoxContainer.new()
+			mjd.alignment = BoxContainer.ALIGNMENT_END if side == Side.LEFT else BoxContainer.ALIGNMENT_BEGIN
+			mjd.custom_minimum_size.x = COLUMNS[id].width
+			mjd.clip_contents = true
+			mjd.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			cell = mjd
 		else:
 			cell = _cell(id, side)
 			cell.add_theme_color_override("font_color", color)
@@ -215,7 +226,7 @@ func add_row(side: int, pilot: String, color: Color) -> Button:
 	button.custom_minimum_size = Vector2(size.x, maxf(size.y, RosterTable.ICON_PX) + 2.0)
 	rows[pilot] = {
 		"side": side, "color": color, "dead": false, "button": button, "cells": cells, "labels": labels,
-		"ewar": ewar, "damage": damage,
+		"ewar": ewar, "mjd": mjd, "damage": damage,
 	}
 	return button
 
@@ -234,6 +245,13 @@ func set_ewar(pilot: String, items: Array) -> void:
 	var row: Dictionary = rows[pilot]
 	var color: Color = row.labels.ship.get_theme_color("font_color")
 	RosterTable.fill_icons(row.ewar, items.slice(0, MAX_EWAR_ICONS), color)
+
+
+## Shows `items` (as `RosterTable.set_cell_icons`; the micro jump drive icon while it spools, or
+## none) beside `pilot`'s speed.
+func set_mjd(pilot: String, items: Array) -> void:
+	var row: Dictionary = rows[pilot]
+	RosterTable.fill_icons(row.mjd, items, row.labels.speed.get_theme_color("font_color"))
 
 
 ## Shows `pilot`'s remaining shield, armor and hull (`hp` x, y, z: 0-1, NAN when unknown).
