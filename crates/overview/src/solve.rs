@@ -5,8 +5,9 @@
 //! Three spheres meet in two points mirrored through the observers' plane. The cube resolves that
 //! twice. First, [`infer_corners`] tries every ordered corner triple and keeps the one whose
 //! trilaterated starting positions are consistent (the spheres actually meet) and lie inside the
-//! cube, and whose tracks move at the speed the overview shows. Second, [`solve_track`] picks a
-//! pilot's first root by the same inside-the-cube rule and follows later roots by continuity.
+//! cube, and whose tracks move at the speed the overview shows. Second, [`solve_track`] starts a
+//! pilot at the root inside the cube and from there follows a filtered, smoothed track, which
+//! keeps it on its side of the observers' plane and irons out the distances' 1 km rounding.
 
 pub type V3 = [f64; 3];
 
@@ -226,8 +227,7 @@ const SPEED_MIN_READINGS: usize = 5;
 pub fn speed_error(obs: [V3; 3], pilots: &[Vec<Reading>]) -> Option<f64> {
     let mut errs: Vec<f64> = Vec::new();
     for p in pilots {
-        let triples: Vec<(f64, [f64; 3])> = p.iter().map(|r| (r.t, r.d)).collect();
-        let fixes = solve_track(obs, &triples);
+        let fixes = solve_track(obs, p);
         let mut k = 0;
         for i in 0..fixes.len() {
             while k < fixes.len() && fixes[k].t - fixes[i].t < SPEED_WINDOW_S {
@@ -267,36 +267,213 @@ pub struct Fix {
     pub residual_m: f64,
 }
 
-/// Gap (s) beyond which the last two fixes are too old to extrapolate from; the root nearest the
-/// last fix is used instead.
-const PREDICT_MAX_GAP_S: f64 = 5.0;
+/// How hard ships can accelerate: the standard deviation of the white acceleration noise in the
+/// tracking filter's constant-velocity model, in m/s². Frigates reach several km/s in seconds.
+const ACCEL_NOISE_MPS2: f64 = 300.0;
+/// Noise of one displayed distance: rounding to whole km is uniform over ±500 m, σ = 1 km/√12.
+const DISTANCE_SIGMA_M: f64 = 288.675;
+/// Noise of the overview's Velocity reading.
+const SPEED_SIGMA_MPS: f64 = 50.0;
+/// Below this filtered speed the direction of `v` is meaningless, so speed readings are skipped.
+const SPEED_UPDATE_MIN_MPS: f64 = 1.0;
+/// A reading this far (any one distance) from the filter's prediction is a teleport: a micro
+/// jump, a warp, a pod. The track restarts there instead of being dragged across.
+const RESET_GATE_M: f64 = 8_000.0;
+/// Uncertainty a (re)started track begins with.
+const START_POS_SIGMA_M: f64 = 3_000.0;
+const START_VEL_SIGMA_MPS: f64 = 1_000.0;
 
-/// Solve one pilot's track from its time-ordered `(t, [d_A, d_B, d_C])` readings. The first
-/// fix takes the root inside the cube (pilots start there). Later fixes take the root nearest a
-/// constant-velocity extrapolation of the previous two fixes. Plain nearest-to-last would bounce
-/// a ship that crosses the observers' plane back to the side it came from.
-pub fn solve_track(obs: [V3; 3], readings: &[(f64, [f64; 3])]) -> Vec<Fix> {
+use nalgebra::{DMatrix, DVector};
+
+type Vec6 = nalgebra::Vector6<f64>;
+type Mat6 = nalgebra::Matrix6<f64>;
+
+/// One filtered tick, kept for the backward (smoothing) pass.
+struct Step {
+    t: f64,
+    d: [f64; 3],
+    /// Filtered state `[p, v]` and covariance.
+    x: Vec6,
+    p: Mat6,
+    /// The prediction this tick was filtered from, and the transition that made it (identity on a
+    /// track's first tick).
+    x_pred: Vec6,
+    p_pred: Mat6,
+    f: Mat6,
+}
+
+impl Step {
+    /// A track (re)starting at `p0` with velocity `v0`.
+    fn start(t: f64, d: [f64; 3], p0: V3, v0: V3) -> Step {
+        let x = Vec6::new(p0[0], p0[1], p0[2], v0[0], v0[1], v0[2]);
+        let mut p = Mat6::zeros();
+        for k in 0..3 {
+            p[(k, k)] = START_POS_SIGMA_M.powi(2);
+            p[(k + 3, k + 3)] = START_VEL_SIGMA_MPS.powi(2);
+        }
+        Step { t, d, x, p, x_pred: x, p_pred: p, f: Mat6::identity() }
+    }
+
+    /// Predict from `self` to `r` and fold `r` in, with the squared, noise-normalised mismatch
+    /// between prediction and readings. `None` when `r` is a teleport ([`RESET_GATE_M`]).
+    fn next(&self, r: &Reading, obs: [V3; 3]) -> Option<(Step, f64)> {
+        let (x_pred, p_pred, f) = predict(self, r.t);
+        let at = pos(&x_pred);
+        let miss: Vec<f64> = obs.iter().zip(r.d).map(|(o, d)| d - dist(at, *o)).collect();
+        if miss.iter().any(|m| m.abs() > RESET_GATE_M) {
+            return None;
+        }
+        let mut cost: f64 = miss.iter().map(|m| (m / DISTANCE_SIGMA_M).powi(2)).sum();
+        if let Some(v) = r.speed_mps {
+            cost += ((v - norm([x_pred[3], x_pred[4], x_pred[5]])) / SPEED_SIGMA_MPS).powi(2);
+        }
+        let mut step = Step { t: r.t, d: r.d, x: x_pred, p: p_pred, x_pred, p_pred, f };
+        step.update(obs, r.speed_mps);
+        Some((step, cost))
+    }
+
+    /// Fold in this tick's distances and (when read) speed, all linearised at the prediction.
+    fn update(&mut self, obs: [V3; 3], speed_mps: Option<f64>) {
+        let at = pos(&self.x);
+        let v = [self.x[3], self.x[4], self.x[5]];
+        let s = norm(v);
+        let mut rows: Vec<(Vec6, f64, f64)> = obs
+            .iter()
+            .zip(self.d)
+            .map(|(o, d)| {
+                let r = sub(at, *o);
+                let n = norm(r).max(1.0);
+                (Vec6::new(r[0] / n, r[1] / n, r[2] / n, 0.0, 0.0, 0.0), d - n, DISTANCE_SIGMA_M.powi(2))
+            })
+            .collect();
+        if let Some(measured) = speed_mps.filter(|_| s > SPEED_UPDATE_MIN_MPS) {
+            rows.push((Vec6::new(0.0, 0.0, 0.0, v[0] / s, v[1] / s, v[2] / s), measured - s, SPEED_SIGMA_MPS.powi(2)));
+        }
+        let m = rows.len();
+        let h = DMatrix::from_fn(m, 6, |i, j| rows[i].0[j]);
+        let y = DVector::from_fn(m, |i, _| rows[i].1);
+        let r = DMatrix::from_fn(m, m, |i, j| if i == j { rows[i].2 } else { 0.0 });
+        let p = DMatrix::from_column_slice(6, 6, self.p.as_slice());
+        let s_inv = match (&h * &p * h.transpose() + r).try_inverse() {
+            Some(inv) => inv,
+            None => return,
+        };
+        let k = &p * h.transpose() * s_inv;
+        let dx = &k * y;
+        let p_new = (DMatrix::identity(6, 6) - &k * &h) * &p;
+        self.x += Vec6::from_column_slice(dx.as_slice());
+        self.p = Mat6::from_column_slice(p_new.as_slice());
+        self.p = (self.p + self.p.transpose()) * 0.5;
+    }
+}
+
+fn pos(x: &Vec6) -> V3 {
+    [x[0], x[1], x[2]]
+}
+
+/// Constant-velocity transition over `dt`, and its white-acceleration process noise.
+fn predict(prev: &Step, t: f64) -> (Vec6, Mat6, Mat6) {
+    let dt = t - prev.t;
+    let mut f = Mat6::identity();
+    let mut q = Mat6::zeros();
+    let a2 = ACCEL_NOISE_MPS2.powi(2);
+    for k in 0..3 {
+        f[(k, k + 3)] = dt;
+        q[(k, k)] = a2 * dt.powi(3) / 3.0;
+        q[(k, k + 3)] = a2 * dt.powi(2) / 2.0;
+        q[(k + 3, k)] = a2 * dt.powi(2) / 2.0;
+        q[(k + 3, k + 3)] = a2 * dt;
+    }
+    (f * prev.x, f * prev.p * f.transpose() + q, f)
+}
+
+/// Rauch–Tung–Striebel backward pass over one uninterrupted stretch of track, appending its fixes.
+fn smooth_into(fixes: &mut Vec<Fix>, seg: &[Step], obs: [V3; 3]) {
+    let Some(last) = seg.last() else { return };
+    let mut xs = vec![last.x; seg.len()];
+    for k in (0..seg.len() - 1).rev() {
+        let next = &seg[k + 1];
+        xs[k] = match next.p_pred.try_inverse() {
+            Some(inv) => seg[k].x + seg[k].p * next.f.transpose() * inv * (xs[k + 1] - next.x_pred),
+            None => seg[k].x,
+        };
+    }
+    for (s, x) in seg.iter().zip(xs) {
+        let p = pos(&x);
+        let sq: f64 = (0..3).map(|k| (dist(p, obs[k]) - s.d[k]).powi(2)).sum();
+        fixes.push(Fix { t: s.t, p, residual_m: (sq / 3.0).sqrt() });
+    }
+}
+
+/// Solve one pilot's track from its time-ordered readings.
+///
+/// Trilaterating each tick alone is hopeless near the observers' plane: the out-of-plane
+/// coordinate, `sqrt(d² − x² − y²)`, swings by many km when one displayed distance ticks over by
+/// 1 km. So the track is an extended Kalman filter over position and velocity (constant velocity
+/// plus [`ACCEL_NOISE_MPS2`] of acceleration noise), fed each tick's three distances and the
+/// overview's speed, then smoothed backwards (Rauch–Tung–Striebel) since the whole match is known.
+/// Continuity also keeps the track on its side of the observers' plane, mirror roots and all.
+///
+/// The track starts at the closed-form root inside the cube (pilots start there; ties go to the
+/// one nearer the centre). A reading more than [`RESET_GATE_M`] from the prediction is a teleport
+/// (micro jump, warp): the track restarts there, at whichever root the following readings fit
+/// better with the velocity carried over ([`lookahead_cost`]), and each stretch is smoothed
+/// separately so the hop stays a single tick. One fix per reading.
+pub fn solve_track(obs: [V3; 3], readings: &[Reading]) -> Vec<Fix> {
     let centre = [CUBE_M / 2.0; 3];
     let mut fixes: Vec<Fix> = Vec::with_capacity(readings.len());
-    for &(t, d) in readings {
-        let tri = trilaterate(obs, d);
-        let target = match fixes.as_slice() {
-            [] => None,
-            [.., a, b] if t - b.t <= PREDICT_MAX_GAP_S && b.t - a.t > 0.0 => {
-                let v = scale(sub(b.p, a.p), 1.0 / (b.t - a.t));
-                Some(add(b.p, scale(v, t - b.t)))
+    let mut seg: Vec<Step> = Vec::new();
+    for (i, r) in readings.iter().enumerate() {
+        let roots = trilaterate(obs, r.d).roots;
+        let step = match seg.last() {
+            None => {
+                let cost = |p: V3| (outside_cube_m(p), dist(p, centre));
+                let (c0, c1) = (cost(roots[0]), cost(roots[1]));
+                let first = c1.0 < c0.0 || (c1.0 == c0.0 && c1.1 < c0.1);
+                started(r, obs, roots[usize::from(first)], [0.0; 3])
             }
-            [.., b] => Some(b.p),
+            Some(prev) => match prev.next(r, obs) {
+                Some((step, _)) => step,
+                None => {
+                    // Teleport: restart on whichever side of the observers' plane carries on
+                    // best, keeping the velocity (a micro jump does).
+                    let v = [prev.x[3], prev.x[4], prev.x[5]];
+                    smooth_into(&mut fixes, &seg, obs);
+                    seg.clear();
+                    let fit = |root: V3| lookahead_cost(started(r, obs, root, v), &readings[i + 1..], obs);
+                    let mirror = fit(roots[1]) < fit(roots[0]);
+                    started(r, obs, roots[usize::from(mirror)], v)
+                }
+            },
         };
-        let cost = |p: V3| match target {
-            Some(q) => (dist(p, q), 0.0),
-            None => (outside_cube_m(p), dist(p, centre)),
-        };
-        let (c0, c1) = (cost(tri.roots[0]), cost(tri.roots[1]));
-        let p = if c1.0 < c0.0 || (c1.0 == c0.0 && c1.1 < c0.1) { tri.roots[1] } else { tri.roots[0] };
-        fixes.push(Fix { t, p, residual_m: tri.residual_m });
+        seg.push(step);
     }
+    smooth_into(&mut fixes, &seg, obs);
     fixes
+}
+
+/// How many readings after a restart [`lookahead_cost`] runs the filter over to pick a side.
+const LOOKAHEAD_TICKS: usize = 10;
+
+/// A track started on reading `r` at `p0` with velocity `v0`, `r` folded in.
+fn started(r: &Reading, obs: [V3; 3], p0: V3, v0: V3) -> Step {
+    let mut step = Step::start(r.t, r.d, p0, v0);
+    step.update(obs, r.speed_mps);
+    step
+}
+
+/// Mean mismatch of the filter run from `step` over the next [`LOOKAHEAD_TICKS`] readings (up to
+/// the next teleport), so a restart can tell its two mirror-image roots apart by which one moves
+/// on consistently.
+fn lookahead_cost(mut step: Step, readings: &[Reading], obs: [V3; 3]) -> f64 {
+    let (mut total, mut n) = (0.0, 0);
+    for r in readings.iter().take(LOOKAHEAD_TICKS) {
+        let Some((next, cost)) = step.next(r, obs) else { break };
+        total += cost;
+        n += 1;
+        step = next;
+    }
+    if n == 0 { 0.0 } else { total / n as f64 }
 }
 
 /// A fitted displacement over the window shorter than this is within the 1 km display rounding
@@ -443,19 +620,92 @@ mod tests {
         }
     }
 
+    /// What the overview shows for a ship flying `path` (one point per second): distances rounded
+    /// to whole km, and its speed.
+    fn observe(obs: [V3; 3], path: &[V3]) -> Vec<Reading> {
+        path.iter()
+            .enumerate()
+            .map(|(t, &p)| {
+                let speed = match (t.checked_sub(1).map(|i| path[i]), path.get(t + 1)) {
+                    (_, Some(&next)) => dist(next, p),
+                    (Some(prev), None) => dist(p, prev),
+                    (None, None) => 0.0,
+                };
+                Reading { t: t as f64, d: rounded(obs, p), speed_mps: Some(speed) }
+            })
+            .collect()
+    }
+
+    fn max_error(fixes: &[Fix], path: &[V3]) -> f64 {
+        fixes.iter().zip(path).map(|(f, p)| dist(f.p, *p)).fold(0.0, f64::max)
+    }
+
+    fn max_step(fixes: &[Fix]) -> f64 {
+        fixes.windows(2).map(|w| dist(w[1].p, w[0].p)).fold(0.0, f64::max)
+    }
+
     #[test]
     fn track_stays_on_its_branch_across_the_observers_plane() {
         let c = corners();
         let obs = [c[0], c[1], c[2]]; // the z = 0 face
         // Starts inside the cube, flies down through z = 0 and out the other side.
-        let path: Vec<(f64, V3)> = (0..40)
-            .map(|t| (t as f64, [30_000.0 + 500.0 * t as f64, 40_000.0, 20_000.0 - 1_000.0 * t as f64]))
+        let path: Vec<V3> = (0..40)
+            .map(|t| [30_000.0 + 500.0 * t as f64, 40_000.0, 20_000.0 - 1_000.0 * t as f64])
             .collect();
-        let readings: Vec<(f64, [f64; 3])> = path.iter().map(|&(t, p)| (t, ranges(obs, p))).collect();
-        let fixes = solve_track(obs, &readings);
-        for (f, (_, p)) in fixes.iter().zip(&path) {
-            assert!(dist(f.p, *p) < 1.0, "t={}: {:?} vs {:?}", f.t, f.p, p);
+        let fixes = solve_track(obs, &observe(obs, &path));
+        // Once out of the plane by more than the rounding can blur, it's on the right side.
+        for (f, p) in fixes.iter().zip(&path).filter(|(_, p)| p[2].abs() > 5_000.0) {
+            assert!(f.p[2].signum() == p[2].signum(), "t={}: {:?} vs {:?}", f.t, f.p, p);
         }
+        assert!(max_error(&fixes, &path) < 2_500.0, "{}", max_error(&fixes, &path));
+    }
+
+    #[test]
+    fn rounding_near_the_observers_plane_does_not_throw_the_track_around() {
+        let c = corners();
+        let obs = [c[0], c[3], c[7]]; // their plane, x = y, runs through the centre
+        // Drifting at 100 m/s, about 5 km off the plane, ~80 km from the observers.
+        let path: Vec<V3> = (0..120)
+            .map(|t| {
+                let s = t as f64 * 100.0 / 2f64.sqrt();
+                [55_000.0 + s, 50_000.0 + s, 45_000.0]
+            })
+            .collect();
+        let readings = observe(obs, &path);
+        let per_tick: Vec<(f64, [f64; 3])> = readings.iter().map(|r| (r.t, r.d)).collect();
+        // Per-tick trilateration really is that bad here, as the filter's reason to exist.
+        let jumpy = per_tick.iter().map(|&(_, d)| trilaterate(obs, d).roots).collect::<Vec<_>>();
+        let worst = jumpy.windows(2).map(|w| dist(w[1][0], w[0][0]).min(dist(w[1][0], w[0][1]))).fold(0.0, f64::max);
+        assert!(worst > 3_000.0, "{worst}");
+
+        let fixes = solve_track(obs, &readings);
+        assert!(max_step(&fixes) < 1_000.0, "{}", max_step(&fixes));
+        let rms = (fixes.iter().zip(&path).map(|(f, p)| dist(f.p, *p).powi(2)).sum::<f64>()
+            / path.len() as f64)
+            .sqrt();
+        assert!(rms < 2_000.0, "{rms}");
+    }
+
+    #[test]
+    fn a_micro_jump_stays_a_single_hop() {
+        let c = corners();
+        let obs = [c[5], c[0], c[7]];
+        // Starts inside the cube, flies 1 km/s along x, jumps 100 km along y in one tick at
+        // t = 30, then flies on.
+        let path: Vec<V3> = (0..60)
+            .map(|t| {
+                let hop = if t >= 30 { 100_000.0 } else { 0.0 };
+                [20_000.0 + 1_000.0 * t as f64, 5_000.0 + hop, 40_000.0]
+            })
+            .collect();
+        let mut readings = observe(obs, &path);
+        readings[29].speed_mps = Some(1_000.0); // the jump isn't flown
+        let fixes = solve_track(obs, &readings);
+        let hop = dist(fixes[30].p, fixes[29].p);
+        assert!((hop - 100_000.0).abs() < 5_000.0, "{hop}");
+        let others = fixes.windows(2).enumerate().filter(|(i, _)| *i != 29).map(|(_, w)| dist(w[1].p, w[0].p));
+        assert!(others.fold(0.0, f64::max) < 2_500.0);
+        assert!(max_error(&fixes, &path) < 3_000.0, "{}", max_error(&fixes, &path));
     }
 
     #[test]

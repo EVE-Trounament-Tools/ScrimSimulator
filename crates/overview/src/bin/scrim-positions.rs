@@ -2,8 +2,9 @@
 //! the video shows the three observers' overviews at once (an OBS scene described by a
 //! `scene.json`, see `overview::panel`). Each panel is OCR'd and tracked independently, and the
 //! per-observer tracks are merged into one roster by pilot name. Each pilot's three distances per
-//! tick are then trilaterated (`overview::solve`): the observers sit on three unknown corners of a
-//! 100 km cube that every pilot starts inside, and the corners are inferred from the data. The
+//! tick, with their speed, are then solved into a smoothed track (`overview::solve`): the observers
+//! sit on three unknown corners of a 100 km cube that every pilot starts inside, and the corners
+//! are inferred from the data. The
 //! observers don't move during a video, so with several matches every match is OCR'd first and
 //! the corners are inferred once from all of them.
 //! Speed is the overview's own Velocity column. Direction is the slope of the solved positions,
@@ -329,7 +330,7 @@ fn main() -> Result<()> {
             continue;
         }
         let pilots: Vec<Vec<Reading>> =
-            reads.iter().flat_map(|(_, m)| m.readings.iter().map(PilotReadings::for_inference)).collect();
+            reads.iter().flat_map(|(_, m)| m.readings.iter().map(PilotReadings::as_readings)).collect();
         let fit = infer_corners(&pilots);
         println!("== {}: observers, from {} match(es)", video.display(), reads.len());
         let names: Vec<&str> = scene.panels.iter().map(|p| p.name.as_str()).collect();
@@ -664,7 +665,7 @@ fn process_video(
 /// and return the EVE times of its first and last rows (when known).
 fn solve_match(m: &MatchRead, corners: [solve::V3; 3], out: &Path) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>> {
     let MatchRead { out_stem, window, per_observer, roster, readings, hp, times } = m;
-    let solved: Vec<Vec<Fix>> = readings.iter().map(|r| solve_track(corners, &r.distances)).collect();
+    let solved: Vec<Vec<Fix>> = readings.iter().map(|r| solve_track(corners, &r.as_readings())).collect();
 
     let path = out.join(format!("{out_stem}.positions.csv"));
     std::fs::write(
@@ -776,8 +777,8 @@ fn readings_csv(roster: &[Pilot], readings: &[PilotReadings]) -> String {
 }
 
 impl PilotReadings {
-    /// This pilot's distance ticks with their speeds, as corner inference takes them.
-    fn for_inference(&self) -> Vec<Reading> {
+    /// This pilot's distance ticks with their speeds, as corner inference and the solve take them.
+    fn as_readings(&self) -> Vec<Reading> {
         self.distances
             .iter()
             .map(|&(t, d)| Reading { t, d, speed_mps: self.speed.get(&t.to_bits()).copied() })
