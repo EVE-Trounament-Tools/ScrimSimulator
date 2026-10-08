@@ -493,6 +493,11 @@ func _update_file_label() -> void:
 
 ## New SDE data: reload the match so sizes and boundary deaths use it, keeping playback state.
 func _on_sizes_changed() -> void:
+	_reload_match()
+
+
+## Reloads the open match from its CSV, keeping playback state.
+func _reload_match() -> void:
 	if data == null:
 		return
 	var t := time
@@ -1228,6 +1233,9 @@ func _update_info() -> void:
 			lines.append("Speed: %s" % _fmt_speed(motion.speed))
 		var d: float = motion.dist_km
 		lines.append("From centre: %.1f km (boundary %.1f km)" % [d, BOUNDARY_KM - d])
+		var exit := data.plane_exit_at(selected, time)
+		if not exit.is_empty():
+			lines.append("Plane exit %d: %s" % [exit.id, DebugMenu.turn_name(exit.turn)])
 	var ship: Dictionary = ships[selected]
 	for e in data.events:
 		if e.pilot == selected and e.kind == MatchData.Event.DEATH and time >= e.t:
@@ -1508,7 +1516,8 @@ func _open_ship_debug_menu(pilot: String, at: Vector2) -> void:
 
 func _refresh_ship_debug_menu() -> void:
 	var state := _debug(debug_pilot)
-	ship_debug_menu.show_state(_pilot_name(debug_pilot), state.vector, state.spheres, combat_stats.has("dmg_in"))
+	ship_debug_menu.show_state(_pilot_name(debug_pilot), state.vector, state.spheres,
+			combat_stats.has("dmg_in"), data.plane_exit_at(debug_pilot, time))
 
 
 func _open_all_debug_menu() -> void:
@@ -1536,6 +1545,7 @@ func _build_debug_menus(layer: CanvasLayer) -> void:
 	ship_debug_menu.rename_requested.connect(func(): _ask_rename_pilot(debug_pilot))
 	ship_debug_menu.damage_breakdown_requested.connect(func():
 		_open_damage_breakdown(layer, debug_pilot, ship_debug_menu.position))
+	ship_debug_menu.plane_exit_flip_requested.connect(func(id): _flip_plane_exit(debug_pilot, id))
 
 	all_debug_menu = DebugMenu.new(true)
 	all_debug_menu.seconds_spin.set_value_no_signal(vector_seconds)
@@ -1551,6 +1561,17 @@ func _build_debug_menus(layer: CanvasLayer) -> void:
 	all_debug_menu.beacon_range_toggled.connect(_set_beacon_range)
 	all_debug_menu.link_toggled.connect(_set_link)
 	all_debug_menu.link_color_changed.connect(_set_link_color)
+
+
+## Mirrors `pilot`'s plane exit `id` to the other side of the observers' plane in the open
+## match's CSV (the library copy, or the file opened with `--csv`) and reloads it.
+func _flip_plane_exit(pilot: String, id: int) -> void:
+	if not MatchData.flip_plane_exit(match_path, pilot, id):
+		file_label.text = "Couldn't flip the plane exit in %s" % match_path.get_file()
+		return
+	_reload_match()
+	if OS.has_feature("web"):
+		WebLibrary.local_changed()
 
 
 ## Opens a new damage breakdown window for `pilot` with its top-left corner near `at` (kept on

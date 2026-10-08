@@ -19,6 +19,9 @@ signal link_color_changed(kind: String, color: Color)
 signal rename_requested
 ## "Get Damage Breakdown" pressed (per-ship menu only).
 signal damage_breakdown_requested
+## "Flip plane exit" pressed (per-ship menu only): mirror plane exit `id` of the ship to the
+## other side and save it in the match's CSV.
+signal plane_exit_flip_requested(id: int)
 
 const DEFAULT_RADIUS_KM := 10.0
 const DEFAULT_COLOR := Color(0.3, 1.0, 0.75)
@@ -35,6 +38,10 @@ var title_label: Label
 var rename_button: Button
 ## Per-ship menu only.
 var damage_button: Button
+## Per-ship menu only; shown while the ship is in an ambiguous plane exit.
+var flip_button: Button
+## The plane exit `flip_button` flips: { turn, id } (see `MatchData.plane_exit_at`).
+var plane_exit := {}
 var vector_check: CheckBox
 ## One row per sphere (per-ship menu only): swatch, range, remove button.
 var sphere_list: VBoxContainer
@@ -75,6 +82,13 @@ func _init(all := false) -> void:
 			hide()
 			damage_breakdown_requested.emit())
 		box.add_child(damage_button)
+		flip_button = Button.new()
+		flip_button.tooltip_text = ("The distances can't tell which side of the observers' plane this ship left it on.\n"
+			+ "Mirror it to the other side until its next plane exit, and save that in the match file.")
+		flip_button.pressed.connect(func():
+			hide()
+			plane_exit_flip_requested.emit(plane_exit.id))
+		box.add_child(flip_button)
 
 	vector_check = CheckBox.new()
 	vector_check.text = "Movement vectors on all ships" if all else "Movement vector"
@@ -158,11 +172,18 @@ func _init(all := false) -> void:
 
 ## Fills the menu: `title`, the vector checkbox, and (per-ship menu) a row per sphere in
 ## `spheres` ({ radius_km, color }) and whether the damage breakdown has data (`has_damage`).
-func show_state(title: String, vector_on: bool, spheres: Array, has_damage := false) -> void:
+## `exit` is the plane exit the ship is in ({ turn, id }, or {} for none; per-ship menu only).
+func show_state(title: String, vector_on: bool, spheres: Array, has_damage := false, exit := {}) -> void:
 	title_label.text = title
 	if damage_button:
 		damage_button.disabled = not has_damage
 		damage_button.tooltip_text = "" if has_damage else "Add combat logs to the match first"
+	if flip_button:
+		plane_exit = exit
+		flip_button.visible = not exit.is_empty()
+		if not exit.is_empty():
+			flip_button.text = "Flip plane exit (%s → %s)" % [
+				turn_name(exit.turn), turn_name("cw" if exit.turn == "ccw" else "ccw")]
 	vector_check.set_pressed_no_signal(vector_on)
 	for c in sphere_list.get_children():
 		sphere_list.remove_child(c)
@@ -186,6 +207,11 @@ func show_state(title: String, vector_on: bool, spheres: Array, has_damage := fa
 		remove.tooltip_text = "Remove this sphere"
 		remove.pressed.connect(func(): sphere_removed.emit(i))
 		row.add_child(remove)
+
+
+## "clockwise" / "counterclockwise" for a CSV `plane_exit` value.
+static func turn_name(turn: String) -> String:
+	return "counterclockwise" if turn == "ccw" else "clockwise"
 
 
 ## Sets the activity line rows from `state` (kind -> { on, color }) without emitting.

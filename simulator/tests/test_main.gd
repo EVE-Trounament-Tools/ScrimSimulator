@@ -1200,6 +1200,34 @@ func test_ship_menu_rename_pilot() -> void:
 	assert_eq(m.ship_debug_menu.title_label.text, "Blue Leader")
 
 
+func test_ship_menu_flips_plane_exit_and_saves_it() -> void:
+	# "blue" sits in the plane y = z until 2 s, then exit 1 takes it toward y > z (clockwise).
+	var plane := "0.000000 -0.707107 0.707107 0"
+	var path := write_csv([
+		"0,blue,Test Hull,50000,50000,50000,0,1,0,0,0,,,",
+		"2,blue,Test Hull,50000,50000,50000,0,1,0,0,0,,,",
+		"4,blue,Test Hull,50000,60000,40000,0,0,0.7071,-0.7071,0,cw,1," + plane,
+		"6,blue,Test Hull,50000,70000,30000,0,0,0.7071,-0.7071,0,cw,1," + plane,
+	], DEFAULT_HEADER + ",plane_exit,plane_exit_id,plane")
+	var m := _main()
+	m.load_match(path)
+	var at := func(csv_t: float) -> float: return csv_t - m.data.start_time
+	m._seek(at.call(2.0))
+	m._open_ship_debug_menu("blue", Vector2(10, 10))
+	assert_false(m.ship_debug_menu.flip_button.visible, "not in an exit yet")
+	m._seek(at.call(6.0))
+	m._open_ship_debug_menu("blue", Vector2(10, 10))
+	assert_true(m.ship_debug_menu.flip_button.visible)
+	assert_eq(m.ship_debug_menu.flip_button.text, "Flip plane exit (clockwise → counterclockwise)")
+	m.ship_debug_menu.flip_button.pressed.emit()
+	assert_eq(m.time, at.call(6.0), "playback state kept")
+	assert_eq(m.data.sample("blue", at.call(6.0)).pos, Vector3(50000, 30000, 70000))
+	assert_eq(m.data.plane_exit_at("blue", at.call(6.0)).turn, "ccw")
+	assert_true(FileAccess.get_file_as_string(path).contains("50000,30000,70000"), "saved to the CSV")
+	m._select("blue")
+	assert_true(m.info_label.text.contains("Plane exit 1: counterclockwise"), m.info_label.text)
+
+
 func test_ship_menu_damage_breakdown_windows() -> void:
 	var m := _main()
 	m.load_match(_match_csv())

@@ -4,6 +4,7 @@
 - gpu acceleration
 - the ~/Videos/AG7/2026-10-04 05-58-36.mkv: finding the match with ScrimTrimmer step takes far too much time compared to triming a normal gamepaly vid with the scrimTrimmer
 - hp tracking will break with even a tiny change to the setup, need a way to correct for this or a more robust way to calculate it from the image data
+- mirror ambiguity: a track and its mirror across the observers' plane give the same distances and speeds, so a pilot starting on/near the plane gets a coin-flip side (5 of 20 demo pilots switched sides between runs). Needs outside evidence, e.g. combat-log scrams (scrammer and target within ~10 km) or teammates' positions
 
 ## Test data (resouces)
 

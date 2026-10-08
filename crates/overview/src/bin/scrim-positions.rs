@@ -7,6 +7,10 @@
 //! are inferred from the data. The
 //! observers don't move during a video, so with several matches every match is OCR'd first and
 //! the corners are inferred once from all of them.
+//! Where a track grazes the observers' plane and the distances can't tell which side it left for,
+//! `overview::plane_exit` turns it clockwise unless the match (boundary, start, incoming motion,
+//! scrams in the combat logs) says otherwise, and the CSV's `plane_exit,plane_exit_id,plane`
+//! columns record the choice so the simulator can flip it.
 //! Speed is the overview's own Velocity column. Direction is the slope of the solved positions,
 //! because the overview shows speed only as a scalar.
 //!
@@ -38,6 +42,8 @@ use overview::layout::{Layout, Rect};
 use overview::panel::{calibrate, crop_scaled, PanelSpec, Scene};
 use overview::row::{read_rows, RowReading};
 use overview::ship_types::ShipTypes;
+use overview::gamelog;
+use overview::plane_exit::{self, Exit, PilotTrack, Plane, Scram, Turn};
 use overview::solve::{self, direction, infer_corners, solve_track, Fix, Reading};
 use overview::targets::{
     label_image, match_label, ocr_label, read_rings, BlockGeometry, Candidate, Hp, Label, LabelCache, Ring,
@@ -358,21 +364,23 @@ fn read_match(cli: &Cli, scene: &Scene, font: &Font, video: &Path, out_stem: &st
 }
 
 /// Solve an OCR'd match with the observers at `corners` and save its CSV, audio and combat logs.
+/// The combat logs are saved first: their scrams are evidence for the plane exits in the CSV.
 fn write_match(cli: &Cli, video: &Path, m: &MatchRead, corners: [solve::V3; 3]) -> Result<()> {
-    let eve_span = solve_match(m, corners, &cli.out)?;
     let (out_stem, window) = (m.out_stem.as_str(), &m.window);
+    let eve_span = match_eve_span(m);
     if !cli.no_audio {
         save_audio(video, &cli.out, out_stem, window);
     }
+    let mut logs = Vec::new();
     if !cli.combat_logs.is_empty() {
         match eve_span {
-            Some(span) => save_combat_logs(&cli.combat_logs, &cli.out, out_stem, span),
+            Some(span) => logs = save_combat_logs(&cli.combat_logs, &cli.out, out_stem, span),
             None => eprintln!(
                 "  warning: no EVE times (give --chat-log or --t0); combat logs not saved"
             ),
         }
     }
-    Ok(())
+    solve_match(m, corners, &cli.out, &logs)
 }
 
 /// Extract the window's audio to `<out>/<out_stem>.mp3`. Audio is an extra, so a failure (or a
@@ -389,13 +397,13 @@ fn save_audio(video: &Path, out: &Path, out_stem: &str, window: &Window) {
 /// Save the part of each gamelog in `logs` (files, or folders of them) logged during `span` (EVE
 /// times of the first and last CSV rows) to `<out>/<out_stem>.positions.logs/`, skipping logs
 /// with no combat in it. Like audio, combat logs are an extra: failures are reported and the CSV
-/// is kept.
+/// is kept. Returns the saved logs.
 fn save_combat_logs(
     logs: &[PathBuf],
     out: &Path,
     out_stem: &str,
     span: (DateTime<Utc>, DateTime<Utc>),
-) {
+) -> Vec<PathBuf> {
     let dest = out.join(format!("{out_stem}.positions.logs"));
     let (first, last) = (span.0.naive_utc(), span.1.naive_utc());
     // A rerun replaces the previous run's logs rather than adding to them.
@@ -457,6 +465,7 @@ fn save_combat_logs(
         }
     }
     println!("  {} combat log(s) with combat during the match", saved.len());
+    saved.into_iter().collect()
 }
 
 /// Save gamelog `log` trimmed to `first..=last` in `dest`, returning where; None if it has no
@@ -661,28 +670,96 @@ fn process_video(
     Ok(MatchRead { out_stem: out_stem.to_string(), window, per_observer, roster, readings, hp, times })
 }
 
-/// Solve every pilot's track with the observers at `corners`, write `<out_stem>.positions.csv`,
-/// and return the EVE times of its first and last rows (when known).
-fn solve_match(m: &MatchRead, corners: [solve::V3; 3], out: &Path) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>> {
+/// EVE times of the match's first and last ticks, when known.
+fn match_eve_span(m: &MatchRead) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let (origin, first, last) = (m.window.eve_origin?, m.times.first()?, m.times.last()?);
+    let at = |t: f64| origin + TimeDelta::milliseconds((t * 1000.0).round() as i64);
+    Some((at(*first), at(*last)))
+}
+
+/// Solve every pilot's track with the observers at `corners`, settle its ambiguous plane exits
+/// (`overview::plane_exit`, with the scrams in `logs` as evidence) and write
+/// `<out_stem>.positions.csv`.
+fn solve_match(m: &MatchRead, corners: [solve::V3; 3], out: &Path, logs: &[PathBuf]) -> Result<()> {
     let MatchRead { out_stem, window, per_observer, roster, readings, hp, times } = m;
-    let solved: Vec<Vec<Fix>> = readings.iter().map(|r| solve_track(corners, &r.as_readings())).collect();
+    let plane = Plane::from_observers(corners);
+    let mut tracks: Vec<PilotTrack> = roster
+        .iter()
+        .zip(readings)
+        .map(|(pilot, r)| {
+            let fixes = solve_track(corners, &r.as_readings());
+            let capsule = fixes.iter().map(|f| ship_type_at(per_observer, pilot, f.t) == CAPSULE).collect();
+            PilotTrack { fixes, capsule }
+        })
+        .collect();
+    let scrams = window.eve_origin.map_or_else(Vec::new, |origin| load_scrams(logs, roster, origin));
+    let exits = plane_exit::resolve(&plane, &mut tracks, &scrams, match_start(readings));
+    let solved: Vec<Vec<Fix>> = tracks.into_iter().map(|t| t.fixes).collect();
 
     let path = out.join(format!("{out_stem}.positions.csv"));
     std::fs::write(
         &path,
-        positions_csv(per_observer, roster, readings, &solved, hp, window.eve_origin),
+        positions_csv(per_observer, roster, readings, &solved, hp, window.eve_origin, &plane, &exits),
     )?;
     print_summary(per_observer, roster, readings, &solved);
-    let eve_span = match (window.eve_origin, times.first(), times.last()) {
-        (Some(origin), Some(&first), Some(&last)) => {
-            println!("  EVE time {} -> {}", eve_time(origin, first), eve_time(origin, last));
-            let at = |t: f64| origin + TimeDelta::milliseconds((t * 1000.0).round() as i64);
-            Some((at(first), at(last)))
-        }
-        _ => None,
-    };
+    print_exits(roster, &exits, scrams.len());
+    if let Some((first, last)) = match_eve_span(m) {
+        println!("  EVE time {} -> {}", fmt_eve(first), fmt_eve(last));
+    }
     println!("  wrote {} ({} frames)", path.display(), times.len());
-    Ok(eve_span)
+    Ok(())
+}
+
+fn fmt_eve(t: DateTime<Utc>) -> String {
+    t.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
+/// Overview speed above which a ship has started moving (ships waiting out the countdown read
+/// 0-1 m/s), as the simulator's `MatchData.MOVE_SPEED_MPS`.
+const MOVE_SPEED_MPS: f64 = 10.0;
+
+/// The tick the match starts: the first any pilot's overview speed passes [`MOVE_SPEED_MPS`].
+fn match_start(readings: &[PilotReadings]) -> f64 {
+    readings
+        .iter()
+        .flat_map(|r| r.distances.iter().filter(|(t, _)| r.speed.get(&t.to_bits()).is_some_and(|&v| v > MOVE_SPEED_MPS)))
+        .map(|(t, _)| *t)
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// The warp scramble/disruption attempts in `logs` between two of the roster's pilots, at match
+/// times (`origin` is the EVE time of t = 0).
+fn load_scrams(logs: &[PathBuf], roster: &[Pilot], origin: DateTime<Utc>) -> Vec<Scram> {
+    let names: Vec<&str> = roster.iter().map(|p| p.name.as_str()).collect();
+    let mut out: Vec<Scram> = Vec::new();
+    for path in logs {
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        let log = gamelog::parse(&String::from_utf8_lossy(&bytes));
+        let listener = gamelog::resolve_pilot(&log.listener, &names);
+        let who = |name: &str| if name.is_empty() { listener } else { gamelog::resolve_pilot(name, &names) };
+        for s in &log.scrams {
+            let (Some(source), Some(target)) = (who(&s.source), who(&s.target)) else { continue };
+            let t = (s.eve.and_utc() - origin).num_milliseconds() as f64 / 1000.0;
+            let scram = Scram { t, source, target, disruption: s.disruption, source_ship: s.source_ship.clone() };
+            // Both pilots' logs show the same attempt.
+            if !out.iter().any(|o| o.t == t && o.source == source && o.target == target && o.disruption == s.disruption) {
+                out.push(scram);
+            }
+        }
+    }
+    out
+}
+
+/// One line for the plane exits, and one per exit that evidence turned counterclockwise.
+fn print_exits(roster: &[Pilot], exits: &[Vec<Exit>], n_scrams: usize) {
+    let total: usize = exits.iter().map(Vec::len).sum();
+    let ccw: usize = exits.iter().flatten().filter(|e| e.turn == Turn::Ccw).count();
+    println!("  plane exits: {total} ({ccw} counterclockwise; {n_scrams} scram(s) as evidence)");
+    for (pilot, exits) in roster.iter().zip(exits) {
+        for (k, e) in exits.iter().enumerate().filter(|(_, e)| e.turn == Turn::Ccw) {
+            println!("    {} exit {} at t={:.0}: {}", pilot.name, k + 1, e.t, e.reasons.join("; "));
+        }
+    }
 }
 
 /// How far apart, and how far either side of the match window, [`calibrate_elsewhere`] looks.
@@ -1111,6 +1188,7 @@ fn csv_field(s: &str) -> String {
 /// it. Direction is blank where the ship is stationary or too few fixes surround the tick.
 /// Shield, armor and hull (`hp`, per pilot) are blank where no observer had the pilot locked. With
 /// `eve_origin` (the EVE time at `t` = 0), each line ends with its EVE time.
+#[allow(clippy::too_many_arguments)]
 fn positions_csv(
     per_observer: &[Vec<Track>],
     roster: &[Pilot],
@@ -1118,9 +1196,12 @@ fn positions_csv(
     solved: &[Vec<Fix>],
     hp: &[BTreeMap<u64, Hp>],
     eve_origin: Option<DateTime<Utc>>,
+    plane: &Plane,
+    exits: &[Vec<Exit>],
 ) -> String {
+    let plane_field = format!("{:.6} {:.6} {:.6} {:.0}", plane.n[0], plane.n[1], plane.n[2], plane.d);
     let mut rows: Vec<(f64, String)> = Vec::new();
-    for (((pilot, r), fixes), hp) in roster.iter().zip(readings).zip(solved).zip(hp) {
+    for ((((pilot, r), fixes), hp), exits) in roster.iter().zip(readings).zip(solved).zip(hp).zip(exits) {
         for (i, f) in fixes.iter().enumerate() {
             let mut line = format!(
                 "{:.3},{},{},{:.0},{:.0},{:.0},",
@@ -1150,6 +1231,13 @@ fn positions_csv(
             if let Some(origin) = eve_origin {
                 let _ = write!(line, ",{}", eve_time(origin, f.t));
             }
+            // The exit whose tail this fix is in (its fixes after the one nearest the plane).
+            match exits.iter().enumerate().rev().find(|(_, e)| i > e.idx && i < e.end) {
+                Some((k, e)) => {
+                    let _ = write!(line, ",{},{},{plane_field}", e.turn.as_str(), k + 1);
+                }
+                None => line.push_str(",,,"),
+            }
             line.push('\n');
             rows.push((f.t, line));
         }
@@ -1158,7 +1246,8 @@ fn positions_csv(
     rows.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut out =
         String::from("t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m,shield,armor,hull");
-    out.push_str(if eve_origin.is_some() { ",eve_time\n" } else { "\n" });
+    out.push_str(if eve_origin.is_some() { ",eve_time" } else { "" });
+    out.push_str(",plane_exit,plane_exit_id,plane\n");
     out.extend(rows.into_iter().map(|(_, l)| l));
     out
 }
