@@ -51,19 +51,8 @@ jobs:
       - name: Build web export
         run: scripts/build.sh web
 
-      # Godot 4.6 sometimes segfaults on small runners while a test opens a window
-      # (test_ship_menu_damage_breakdown_windows): an engine crash (exit >= 128) is retried,
-      # failing tests (exit 1) are not.
       - name: Simulator tests
-        run: |
-          status=0
-          for attempt in 1 2 3; do
-            status=0
-            GODOT="$PWD/.cache/godot/Godot_v${GODOT_TAG}_linux.x86_64" scripts/test.sh || status=$?
-            if [ "$status" -lt 128 ]; then exit "$status"; fi
-            echo "::warning::Godot crashed (exit $status) on attempt $attempt"
-          done
-          exit "$status"
+        run: GODOT="$PWD/.cache/godot/Godot_v${GODOT_TAG}_linux.x86_64" scripts/test.sh
 
       - uses: actions/setup-node@v4
         with:

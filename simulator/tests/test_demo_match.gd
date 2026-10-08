@@ -52,11 +52,13 @@ func before_each() -> void:
 	Settings._cfg = null
 	Settings.set_value("sde/auto_update", false)
 	Settings.set_value("display/ship_models", false)
+	stub_sde()
 
 
 func after_each() -> void:
 	Settings.path = _saved_path
 	Settings._cfg = null
+	ShipSizes.dir = ""
 
 
 # --- the file itself ---------------------------------------------------------

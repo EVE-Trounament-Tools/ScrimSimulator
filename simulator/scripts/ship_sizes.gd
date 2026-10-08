@@ -36,6 +36,9 @@ var status := ""
 var _dir := ""
 var _thread: Thread
 
+## Replaces `data_dir()` when set (tests point it at a stub cache).
+static var dir := ""
+
 
 func _ready() -> void:
 	_dir = data_dir()
@@ -44,6 +47,8 @@ func _ready() -> void:
 
 ## `sde/` next to the project when run from source, next to the executable when exported.
 static func data_dir() -> String:
+	if dir != "":
+		return dir
 	if OS.has_feature("web"):
 		return "user://sde"
 	if OS.has_feature("editor"):
