@@ -68,7 +68,7 @@ const EVENT_COLORS := {
 	MatchData.Event.MJD: MJD_COLOR,
 }
 const EVENT_NAMES := {
-	MatchData.Event.DEATH: "Podded",
+	MatchData.Event.DEATH: "Died",
 	MatchData.Event.BOUNDARY: "Out of bounds",
 	MatchData.Event.MJD: "MJD",
 }
@@ -830,7 +830,7 @@ func _build_events() -> void:
 			mjd_trails.append({"t": e.t, "node": _mjd_trail(e)})
 
 
-## "03:42 Pilot — Podded (Venture)", with the pilot shown as `pilot_name`.
+## "03:42 Pilot — Died (Venture)", with the pilot shown as `pilot_name`.
 static func _event_text(e: Dictionary, pilot_name: String) -> String:
 	var what: String = EVENT_NAMES[e.kind]
 	if e.kind == MatchData.Event.MJD:
@@ -1220,7 +1220,7 @@ func _update_info() -> void:
 	var ship: Dictionary = ships[selected]
 	for e in data.events:
 		if e.pilot == selected and e.kind == MatchData.Event.DEATH and time >= e.t:
-			lines.append("Podded at %s (lost %s)" % [_fmt_time(e.t), e.ship_type])
+			lines.append("Died at %s (lost %s)" % [_fmt_time(e.t), e.ship_type])
 	if time >= ship.death_t:
 		lines.append("DEAD (out of bounds at %s)" % _fmt_time(ship.death_t))
 	lines.append("Following" if tracked == selected else "Double-click to follow")

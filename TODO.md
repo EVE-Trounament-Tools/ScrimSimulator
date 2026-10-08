@@ -14,8 +14,6 @@
 - selectable resolution
 - ability to center on beacons
 - button to re-center on center
-- when a ship dies it should show just a bar for the speed and distance rather than the true distance
 - shift + arrow keys to seek forward or back 10s
 - option to hide dead ships (or just movement of dead pilots)
 - timeline shoulden't care about being podded, just ships dying
-- For the ocr gui, I should need to just set a folder and the tool should look for the relevant logs, I shoulden't need to manually select the log files

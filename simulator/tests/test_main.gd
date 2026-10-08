@@ -624,7 +624,7 @@ func test_events_on_timeline() -> void:
 	assert_eq(marks[0].t, 3.0)
 	assert_eq(marks[0].color, Main.EVENT_COLORS[MatchData.Event.MJD])
 	assert_eq(marks[0].text, "00:03 hopper — MJD 100 km (Test Hull)")
-	assert_eq(marks[1].text, "00:06 hopper — Podded (Test Hull)")
+	assert_eq(marks[1].text, "00:06 hopper — Died (Test Hull)")
 	m.load_match(_match_csv())
 	assert_eq(m.event_strip.marks.size(), 1, "reload replaces marks (runner leaves the arena)")
 
@@ -687,7 +687,7 @@ func test_info_shows_podding() -> void:
 	m._select("hopper")
 	m._seek(7.0)
 	m._update_info()
-	assert_true("Podded at 00:06 (lost Test Hull)" in m.info_label.text)
+	assert_true("Died at 00:06 (lost Test Hull)" in m.info_label.text)
 
 
 func test_short_name() -> void:
