@@ -72,6 +72,9 @@ var radii: Dictionary = {}
 ## CSV time of match time 0: just before the first ship moves (or the first sample if none do,
 ## or if the lead-in is kept).
 var start_time := 0.0
+## Match time at which the first ship moves: the length of the kept lead-in (the pre-match
+## countdown), 0 when it is skipped or no ship moves.
+var lead_in := 0.0
 ## Match time of the last sample.
 var duration := 0.0
 ## EVE time (ISO 8601 UTC) of the CSV's first and last sample, for lining the match up with other
@@ -152,8 +155,9 @@ static func load_csv(path: String, ship_radii := {}, move_threshold_m := 0.0, ke
 	for pilot in data.tracks:
 		data.tracks[pilot].sort_custom(func(a, b): return a.t < b.t)
 	data._freeze_pods()
-	var first_move := INF if keep_lead_in else data._find_start(move_threshold_m)
-	data.start_time = first_move if first_move < INF else t_min
+	var first_move := data._find_start(move_threshold_m)
+	data.start_time = first_move if first_move < INF and not keep_lead_in else t_min
+	data.lead_in = first_move - data.start_time if first_move < INF else 0.0
 	data.first_t = t_min
 	data._end_t = t_max
 	for pilot in data.tracks:

@@ -235,6 +235,18 @@ func test_audio_keeps_countdown() -> void:
 	assert_true(m.audio_player.stream is AudioStreamWAV)
 
 
+func test_broadcast_clock_counts_down_to_first_move() -> void:
+	var path := _countdown_match()
+	MatchLibrary.set_audio(path, write_wav(10.0))
+	var m := _main()
+	m.load_match(path)
+	assert_eq(m.data.lead_in, 2.0)
+	for c in [[0.0, "-00:02"], [1.5, "-00:01"], [2.0, "00:00"], [5.0, "00:03"]]:
+		m._seek(c[0])
+		m._process(0.0)
+		assert_eq(m.broadcast_panel.clock.text, c[1], "at %s" % c[0])
+
+
 func test_audio_follows_playback() -> void:
 	var path := _countdown_match()
 	MatchLibrary.set_audio(path, write_wav(10.0))

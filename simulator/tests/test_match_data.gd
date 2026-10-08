@@ -97,6 +97,7 @@ func test_load_skips_countdown_before_first_move() -> void:
 		row(8, "A", "Rifter", C + X * 3000),
 	])
 	assert_eq(d.start_time, 5.0, "match starts at the sample before the first move")
+	assert_eq(d.lead_in, 0.0, "no countdown left")
 	assert_eq(d.duration, 3.0)
 	assert_eq(d.sample("A", 0.0).pos, C)
 	assert_eq(d.sample("A", 1.0).pos, C + X * 1000)
@@ -110,6 +111,7 @@ func test_load_keep_lead_in_starts_at_first_sample() -> void:
 		row(8, "A", "Rifter", C + X * 3000),
 	]), {}, 0.0, true)
 	assert_eq(d.start_time, 2.0, "countdown kept")
+	assert_eq(d.lead_in, 3.0, "first move 3 s in")
 	assert_eq(d.duration, 6.0)
 	assert_eq(d.sample("A", 4.0).pos, C + X * 1000)
 

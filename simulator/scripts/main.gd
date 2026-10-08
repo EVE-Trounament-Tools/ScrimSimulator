@@ -1629,6 +1629,12 @@ static func _fmt_time(t: float) -> String:
 	return "%02d:%02d" % [s / 60, s % 60]
 
 
+## Broadcast clock: like `_fmt_time`, but counts down to the match start (`t` < 0) as "-mm:ss",
+## rounding up so it reaches "00:00" as the first ship moves.
+static func _fmt_clock(t: float) -> String:
+	return "-" + _fmt_time(ceilf(-t)) if t < 0.0 else _fmt_time(t)
+
+
 ## Speed (m/s) for display: whole m/s below 1 km/s, else km/s to 1 decimal. Rounds first so
 ## 999.5 shows as 1.0 km/s, never 1000 m/s.
 static func _fmt_speed(mps: float) -> String:
@@ -2327,7 +2333,7 @@ func _update_roster_cells() -> void:
 		roster_table.set_row_damaged(pilot, hit)
 		if broadcast_panel.rows.has(pilot):
 			_update_broadcast_row(pilot, dead, hp, hit)
-	broadcast_panel.set_clock(_fmt_time(time))
+	broadcast_panel.set_clock(_fmt_clock(time - data.lead_in))
 	for side in [BroadcastRoster.Side.LEFT, BroadcastRoster.Side.RIGHT]:
 		var team := MatchData.Team.RED if side == BroadcastRoster.Side.LEFT else MatchData.Team.BLUE
 		broadcast_panel.set_points(side, "%d" % score.score(team, time) if score != null else "0")
