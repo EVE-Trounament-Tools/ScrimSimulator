@@ -251,6 +251,8 @@ in every match, and an empty name restores the original.
 | M | Toggle hull models and icons vs. plain spheres |
 | B | Toggle the 125 km arena boundary |
 
+**Hotkeys…** (in the bar and on the match menu) shows this list top left.
+
 ![Measuring from one ship to another](docs/media/measure.gif)
 
 **Settings…** has the remaining options: interface scale, **Ship overlay…** (which of name, type,

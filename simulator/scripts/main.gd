@@ -216,6 +216,9 @@ var damage_setting: CheckBox
 var damage_on := false
 var info_panel: PanelContainer
 var info_label: Label
+## Toggles `hotkeys_panel`, shown top left above `info_panel`.
+var hotkeys_button: Button
+var hotkeys_panel: HotkeysPanel
 var select_texture: Texture2D
 ## Debug menus: one ship's (for `debug_pilot`) and every ship's.
 var ship_debug_menu: DebugMenu
@@ -1871,6 +1874,13 @@ func _build_ui() -> void:
 	debug_button.pressed.connect(_open_all_debug_menu)
 	row.add_child(debug_button)
 
+	hotkeys_button = Button.new()
+	hotkeys_button.text = "Hotkeys…"
+	hotkeys_button.toggle_mode = true
+	hotkeys_button.tooltip_text = "Show every hotkey and mouse control (top left)"
+	hotkeys_button.toggled.connect(func(on): hotkeys_panel.visible = on)
+	row.add_child(hotkeys_button)
+
 	broadcast_button = Button.new()
 	broadcast_button.text = "Broadcast"
 	broadcast_button.toggle_mode = true
@@ -1955,11 +1965,18 @@ func _build_ui() -> void:
 	assets_dialog.confirmed.connect(assets.full_download)
 	layer.add_child(assets_dialog)
 
+	# Hotkeys list and the selected ship's details, stacked top left.
+	var top_left := VBoxContainer.new()
+	top_left.position = Vector2(12, 12)
+	top_left.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	top_left.add_theme_constant_override("separation", 8)
+	layer.add_child(top_left)
+	hotkeys_panel = HotkeysPanel.new()
+	top_left.add_child(hotkeys_panel)
 	info_panel = PanelContainer.new()
-	info_panel.position = Vector2(12, 12)
 	info_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	info_panel.visible = false
-	layer.add_child(info_panel)
+	top_left.add_child(info_panel)
 	info_label = Label.new()
 	info_panel.add_child(info_label)
 

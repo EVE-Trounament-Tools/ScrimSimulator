@@ -1319,6 +1319,30 @@ func test_pick_ignores_hidden_and_behind_camera() -> void:
 	assert_ne(m._pick_ship(m.get_viewport().get_visible_rect().size / 2.0), "blue")
 
 
+func test_hotkeys_button_toggles_list() -> void:
+	var m := _select_main()
+	assert_false(m.hotkeys_panel.visible)
+	m.hotkeys_button.button_pressed = true
+	assert_true(m.hotkeys_panel.visible)
+	assert_eq(m.hotkeys_panel.grid.get_child_count(), HotkeysPanel.HOTKEYS.size() * 2)
+	_click(m, _screen(m, "blue"))
+	assert_true(m.info_panel.visible, "ship details still shown")
+	assert_eq(m.info_panel.get_parent(), m.hotkeys_panel.get_parent())
+	assert_true(m.info_panel.get_index() > m.hotkeys_panel.get_index(), "details stack below the list")
+	m.hotkeys_button.button_pressed = false
+	assert_false(m.hotkeys_panel.visible)
+
+
+func test_menu_hotkeys_button_toggles_list() -> void:
+	var m := _main()
+	assert_false(m.menu.hotkeys_panel.visible)
+	m.menu.hotkeys_button.button_pressed = true
+	assert_true(m.menu.hotkeys_panel.visible)
+	assert_eq(m.menu.hotkeys_panel.grid.get_child_count(), HotkeysPanel.HOTKEYS.size() * 2)
+	m.menu.hotkeys_button.button_pressed = false
+	assert_false(m.menu.hotkeys_panel.visible)
+
+
 func test_click_selects_and_shows_info() -> void:
 	var m := _select_main()
 	assert_false(m.info_panel.visible)

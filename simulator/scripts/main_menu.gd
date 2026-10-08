@@ -27,6 +27,13 @@ const AUDIO_ICON_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" he
 const FOLDER_ICON_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
 <path d="M1.5 3.5h5l1.5 1.5h6.5v8h-13z" fill="#d9b25f"/>
 </svg>"""
+## Match list controls, listed under the viewer's hotkeys by **Hotkeys…**.
+const MENU_CONTROLS := [
+	["Double-click a match", "Open it"],
+	["Right-click", "Rename, remove, audio, combat logs and folders"],
+	["Drag a match or folder", "Move it into a folder"],
+	["Drop a *.positions.csv or folder", "Add it to the library"],
+]
 
 var list: LibraryTree
 var open_button: Button
@@ -34,6 +41,9 @@ var rename_button: Button
 var remove_button: Button
 var audio_button: Button
 var resume_button: Button
+## Toggles `hotkeys_panel`, shown top left over the menu.
+var hotkeys_button: Button
+var hotkeys_panel: HotkeysPanel
 var error_label: Label
 var empty_label: Label
 var add_dialog: FileDialog
@@ -154,6 +164,13 @@ func _init() -> void:
 	audio_button.pressed.connect(_ask_audio)
 	buttons.add_child(audio_button)
 
+	hotkeys_button = Button.new()
+	hotkeys_button.text = "Hotkeys…"
+	hotkeys_button.toggle_mode = true
+	hotkeys_button.tooltip_text = "Show every hotkey and mouse control (top left)"
+	hotkeys_button.toggled.connect(func(on): hotkeys_panel.visible = on)
+	buttons.add_child(hotkeys_button)
+
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	buttons.add_child(spacer)
@@ -163,6 +180,14 @@ func _init() -> void:
 	resume_button.visible = false
 	resume_button.pressed.connect(func(): resumed.emit())
 	buttons.add_child(resume_button)
+
+	# Overlay so the list can sit top left instead of filling the menu like `center`.
+	var overlay := Control.new()
+	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(overlay)
+	hotkeys_panel = HotkeysPanel.new({"title": "Match list", "rows": MENU_CONTROLS})
+	hotkeys_panel.position = Vector2(12, 12)
+	overlay.add_child(hotkeys_panel)
 
 	add_dialog = FileDialog.new()
 	add_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
