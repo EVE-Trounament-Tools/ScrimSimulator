@@ -236,6 +236,7 @@ in every match, and an empty name restores the original.
 |---|---|
 | Space / **Play** | Play or pause (matches open paused) |
 | ← / → | Pause and step one tick (1 s) |
+| Shift + ← / → | Seek back / forward 10 s |
 | `[` / `]` | Jump to the previous / next event on the timeline (kills, boundary deaths, micro jumps) |
 | Timeline slider | Scrub |
 | Left drag (empty space) | Orbit the camera |

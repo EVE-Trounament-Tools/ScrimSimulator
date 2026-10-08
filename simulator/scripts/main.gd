@@ -10,6 +10,8 @@ const CUBE := 100.0
 const SPEEDS := [0.5, 1.0, 2.0, 5.0, 10.0, 30.0]
 ## The server tick: samples are 1 s apart, so ←/→ step one sample.
 const TICK_S := 1.0
+## Shift+←/→ seeks this far without pausing.
+const SKIP_S := 10.0
 ## Ships are drawn at their real hull radius, but never smaller than this angle (radians) as
 ## seen from the camera, so frigates stay visible from across the arena.
 const MIN_VISIBLE_ANGLE := 0.005
@@ -655,9 +657,15 @@ func _input(event: InputEvent) -> void:
 			if not event.echo:
 				_toggle_play()
 		KEY_LEFT:
-			_step_tick(-1)
+			if event.shift_pressed:
+				_seek(time - SKIP_S)
+			else:
+				_step_tick(-1)
 		KEY_RIGHT:
-			_step_tick(1)
+			if event.shift_pressed:
+				_seek(time + SKIP_S)
+			else:
+				_step_tick(1)
 		KEY_BRACKETLEFT:
 			_jump_event(-1)
 		KEY_BRACKETRIGHT:

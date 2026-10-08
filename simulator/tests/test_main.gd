@@ -507,6 +507,29 @@ func test_seek_clamps() -> void:
 	assert_eq(m.timeline.value, 7.5)
 
 
+func test_shift_arrows_skip_ten_seconds() -> void:
+	var m := _main()
+	m.load_match(_match_csv())
+	var key := func(code):
+		var ev := InputEventKey.new()
+		ev.keycode = code
+		ev.shift_pressed = true
+		ev.pressed = true
+		m._input(ev)
+	m._seek(2.5)
+	m._set_playing(true)
+	key.call(KEY_RIGHT)
+	assert_almost(m.time, 12.5)
+	assert_true(m.playing, "skipping keeps playback going")
+	key.call(KEY_RIGHT)
+	assert_eq(m.time, 20.0, "clamped to the end")
+	key.call(KEY_LEFT)
+	assert_almost(m.time, 10.0)
+	key.call(KEY_LEFT)
+	key.call(KEY_LEFT)
+	assert_eq(m.time, 0.0, "clamped to the start")
+
+
 func test_step_tick_pauses_and_snaps_to_whole_ticks() -> void:
 	var m := _main()
 	m.load_match(_match_csv())
