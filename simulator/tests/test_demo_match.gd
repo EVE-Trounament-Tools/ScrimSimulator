@@ -89,14 +89,29 @@ func test_load() -> void:
 	var d := _load()
 	assert_not_null(d)
 	assert_eq(d.tracks.size(), PILOTS)
-	assert_eq(d.start_time, 13.0, "countdown skipped")
-	assert_eq(d.duration, 313.0)
+	assert_eq(d.start_time, 12.0, "countdown skipped")
+	assert_eq(d.duration, 314.0)
 	var samples := 0
 	for pilot in d.tracks:
 		samples += d.tracks[pilot].size()
 	assert_eq(samples, 4761, "pods' tracks end where they died")
 	assert_eq(d.eve_start, "2026-10-06T01:08:52.000Z", "countdown's first number")
 	assert_eq(d.eve_end, "2026-10-06T01:14:18.000Z", "the second before WF")
+
+
+## Ships parked through the countdown stay put in the CSV: positions solved from distances alone
+## once slid up to 12 km toward where the ships later flew (scrim-positions' solve.rs).
+func test_ships_hold_still_through_the_countdown() -> void:
+	var d := _load()
+	for pilot in d.tracks:
+		var track: Array = d.tracks[pilot]
+		for s in track:
+			if s.t > d.start_time:
+				break
+			var drift: float = s.pos.distance_to(track[0].pos)
+			if drift > 50.0:
+				fail("%s drifted %.0f m by t=%s, before the match started" % [pilot, drift, s.t])
+				break
 
 
 func test_tracks_sorted() -> void:
@@ -164,7 +179,7 @@ func test_sample() -> void:
 	var pilot := "Amarr Citizen 0220922"
 	var s := d.sample(pilot, 89.0)
 	assert_eq(s.ship_type, "Porpoise")
-	assert_almost(s.pos, Vector3(54042, 68125, 78278))
+	assert_almost(s.pos, Vector3(79215, 69636, 52964))
 
 	var a := d.sample(pilot, 89.0)
 	var b := d.sample(pilot, 90.0)
@@ -172,7 +187,7 @@ func test_sample() -> void:
 	assert_almost(mid.pos, a.pos.lerp(b.pos, 0.5))
 
 	assert_eq(d.sample(pilot, -d.start_time - 1.0), {}, "before the recording")
-	assert_eq(d.sample(pilot, 314.0), {}, "after the match")
+	assert_eq(d.sample(pilot, 315.0), {}, "after the match")
 
 
 # --- HP ----------------------------------------------------------------------
@@ -197,16 +212,16 @@ func test_hp_at() -> void:
 	var d := _load()
 	var pilot := "Amarr Citizen 0220922"
 	assert_eq(d.hp_at(pilot, 89.0), Vector3(1, 1, 1), "untouched")
-	assert_almost(d.hp_at(pilot, 120.0), Vector3(0.0, 0.857, 1.0), 1e-3, "shield gone, into armor")
+	assert_almost(d.hp_at(pilot, 120.0), Vector3(0.0, 0.889, 1.0), 1e-3, "shield gone, into armor")
 	assert_true(is_nan(d.hp_at(pilot, 155.0).x), "podded: no HP")
 
 
 func test_damage_times() -> void:
 	var d := _load()
 	var pilot := "Amarr Citizen 0220922"
-	assert_eq(d.damage_times[pilot].slice(0, 3), PackedFloat64Array([104.0, 106.0, 107.0]))
+	assert_eq(d.damage_times[pilot].slice(0, 3), PackedFloat64Array([105.0, 107.0, 108.0]))
 	assert_false(d.taking_damage(pilot, 100.0))
-	assert_true(d.taking_damage(pilot, 104.0))
+	assert_true(d.taking_damage(pilot, 105.0))
 	assert_false(d.damage_times.has("Amarr Citizen 5054432"), "never hit")
 
 
@@ -233,7 +248,7 @@ func test_viewer_loads_demo() -> void:
 	assert_eq(m.ships.size(), PILOTS)
 	assert_true("hp" in m.roster_table.visible_ids())
 	assert_false(m.damage_button.disabled)
-	assert_eq(m.timeline.max_value, 313.0)
+	assert_eq(m.timeline.max_value, 314.0)
 	assert_eq(m.file_label.text,
 		"demo.positions.csv — 20 pilots (blue 10 / red 10 / unknown 0), 0 out of bounds")
 
@@ -268,7 +283,7 @@ func test_demo_log_syncs_to_match() -> void:
 	assert_eq(gamelog.pilot, "", "the listener observed and isn't one of the pilots")
 	assert_eq(gamelog.entries.size(), 30)
 	var first: Dictionary = gamelog.entries[0]
-	assert_eq(first.t, 10.0, "01:09:15 is 23 s after the CSV starts, 10 s after match time 0")
+	assert_eq(first.t, 11.0, "01:09:15 is 23 s after the CSV starts, 11 s after match time 0")
 	assert_eq(first.kind, CombatLog.Kind.SCRAM)
 	assert_eq(first.source_pilot, "Caldari Citizen 9942864")
 	assert_eq(first.target_pilot, "Caldari Citizen 8777524")
@@ -309,7 +324,7 @@ func test_viewer_shows_demo_combat_columns() -> void:
 		assert_true(m.roster_table.unavailable.has(id), "%s hidden" % id)
 	m._set_playing(false)
 	# 01:09:15: Venture [Caldari Citizen 9942864] scrams Prospect [Caldari Citizen 8777524].
-	_show_at(m, 10.0)
+	_show_at(m, 11.0)
 	var box := m.roster_table.icon_box("Caldari Citizen 8777524", "ewar_in")
 	var scram := box.get_children().filter(func(c): return c.get_meta("key") == "scram")
 	assert_eq(scram.size(), 1)
@@ -324,5 +339,5 @@ func test_viewer_plays_through() -> void:
 	m.speed = 10.0
 	for i in 60:
 		m._process(1.0)
-	assert_eq(m.time, 313.0)
+	assert_eq(m.time, 314.0)
 	assert_false(m.playing)

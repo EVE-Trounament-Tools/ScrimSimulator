@@ -85,6 +85,8 @@ The CSV has one row per pilot per second:
 `t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m,shield,armor,hull`.
 Positions are a smoothed track, not each second's distances solved on their own: the overview
 rounds distances to whole km, which near the observers' plane would throw a ship many km about.
+A ship the overview shows at 0 m/s (waiting out the countdown, say) is held still. The simulator
+starts the match (time 0) a second before the first ship's speed passes 10 m/s.
 `residual_m` is how far, on average, the three distances at the smoothed position differ from
 what the overview showed (around 0.2 km is normal).
 `shield`, `armor` and `hull` are the pilot's remaining HP (0–1), read off the rings of the locked

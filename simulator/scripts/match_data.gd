@@ -28,6 +28,9 @@ const MJD_TOLERANCE_M := 15000.0
 ## A micro jump drive spools up for 12 server ticks before the jump.
 const MJD_SPOOL_S := 12.0
 const CAPSULE := "Capsule"
+## An overview speed above this means the ship has started moving (ships waiting out the
+## countdown read 0–1 m/s).
+const MOVE_SPEED_MPS := 10.0
 ## Shield, armor and hull of a pilot whose HP isn't known.
 const NAN_HP := Vector3(NAN, NAN, NAN)
 ## A pilot is taking damage when a layer reads lower than its previous reading and more than
@@ -94,10 +97,13 @@ var combat_logs: Array = []
 var smooth := false
 
 
-## A ship further than `move_threshold_m` from its first sample has started moving; the match
-## (time 0) begins at the sample before the earliest such move, skipping the pre-match countdown.
-## 0 counts any change of position. `keep_lead_in` starts the match at the first sample instead
-## (a match with audio, which starts there too).
+## A ship whose overview speed is above `MOVE_SPEED_MPS` has started moving; the match (time 0)
+## begins at the sample before the earliest such move, skipping the pre-match countdown. A CSV
+## whose speeds never get that high (or has none) goes by position instead: further than
+## `move_threshold_m` from the pilot's first sample, 0 counting any change. Solved positions can
+## wander while a ship sits still, so speed is the better sign when the CSV has it.
+## `keep_lead_in` starts the match at the first sample instead (a match with audio, which starts
+## there too).
 static func load_csv(path: String, ship_radii := {}, move_threshold_m := 0.0, keep_lead_in := false) -> MatchData:
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
@@ -216,16 +222,24 @@ static func _parse_hp(row: PackedStringArray, cols: Array) -> Vector3:
 	return hp
 
 
-## CSV time of the sample before the earliest move of any ship (beyond `threshold_m` from its
-## first sample), or INF if no ship ever moves.
+## CSV time of the sample before the earliest move of any ship, or INF if no ship ever moves.
+## A move is an overview speed over `MOVE_SPEED_MPS` when the CSV's speeds ever get there, else
+## a position beyond `threshold_m` from the pilot's first sample.
 func _find_start(threshold_m: float) -> float:
+	var by_speed := false
+	for pilot in tracks:
+		if tracks[pilot].any(func(s): return s.speed > MOVE_SPEED_MPS):
+			by_speed = true
+			break
 	var start := INF
 	for pilot in tracks:
 		var track: Array = tracks[pilot]
 		for i in range(1, track.size()):
 			if track[i - 1].t >= start:
 				break
-			if track[i].pos.distance_to(track[0].pos) > threshold_m:
+			var moved: bool = track[i].speed > MOVE_SPEED_MPS if by_speed \
+				else track[i].pos.distance_to(track[0].pos) > threshold_m
+			if moved:
 				start = track[i - 1].t
 				break
 	return start

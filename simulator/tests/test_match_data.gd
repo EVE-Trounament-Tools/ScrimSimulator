@@ -127,6 +127,33 @@ func test_load_ignores_jitter_under_threshold_when_finding_start() -> void:
 	assert_eq(_load(rows).start_time, 0.0, "without a threshold any movement starts the match")
 
 
+## `row` with the overview speed filled in.
+static func moving(t: float, pilot: String, pos: Vector3, speed: float) -> Array:
+	var r := row(t, pilot, "Rifter", pos)
+	r[6] = speed
+	return r
+
+
+func test_load_finds_start_by_overview_speed() -> void:
+	var d := _load([
+		moving(0, "A", C, 0),
+		moving(1, "A", C + X * 3000, 1), # the solved position wanders; the ship sits still
+		moving(2, "A", C + X * 5000, 0),
+		moving(3, "A", C + X * 5000, 150),
+		moving(4, "A", C + X * 6000, 600),
+	], {}, 500.0)
+	assert_eq(d.start_time, 2.0, "the sample before the first speed over MOVE_SPEED_MPS")
+
+
+func test_load_without_moving_speeds_finds_start_by_position() -> void:
+	var d := _load([
+		moving(0, "A", C, 0),
+		moving(1, "A", C, 5),
+		moving(2, "A", C + X * 1000, 5),
+	])
+	assert_eq(d.start_time, 1.0, "speeds never over MOVE_SPEED_MPS say nothing")
+
+
 func test_load_starts_at_earliest_mover() -> void:
 	var d := _load([
 		row(0, "late", "Rifter", C),

@@ -276,6 +276,20 @@ const DISTANCE_SIGMA_M: f64 = 288.675;
 const SPEED_SIGMA_MPS: f64 = 50.0;
 /// Below this filtered speed the direction of `v` is meaningless, so speed readings are skipped.
 const SPEED_UPDATE_MIN_MPS: f64 = 1.0;
+/// An overview speed of at most this (parked ships read 0 or 1 m/s) holds the whole velocity at 0.
+/// Without it, a ship sitting through the countdown has no velocity reading at all, and smoothing
+/// slides it km along whatever direction its rounded distances can't see, toward where it later
+/// flies. Any faster reading, however slow, is a real speed and updates `|v|` as usual.
+const STILL_SPEED_MPS: f64 = 1.0;
+/// Noise of such a reading: a 0 or 1 is exact to the m/s, unlike a moving ship's speed, which
+/// [`SPEED_SIGMA_MPS`] allows to be read a little before or after its distances. As loose as
+/// that, a parked ship could keep 20 m/s under a reading of 0 and slide hundreds of metres.
+const STILL_SIGMA_MPS: f64 = 1.0;
+/// Acceleration noise between two still readings, in place of [`ACCEL_NOISE_MPS2`]: a ship that
+/// reads 0–1 m/s at both ends of a tick hasn't burned in between. Holding the velocity alone isn't
+/// enough, as the full noise still lets position wander ~90 m a tick on its own, which smoothing
+/// spends leaning a parked ship toward where it's about to fly.
+const STILL_ACCEL_MPS2: f64 = 1.0;
 /// A reading this far (any one distance) from the filter's prediction is a teleport: a micro
 /// jump, a warp, a pod. The track restarts there instead of being dragged across.
 const RESET_GATE_M: f64 = 8_000.0;
@@ -300,24 +314,32 @@ struct Step {
     x_pred: Vec6,
     p_pred: Mat6,
     f: Mat6,
+    /// This tick's overview speed said the ship was still ([`is_still`]).
+    still: bool,
+}
+
+/// The overview shows the ship standing still ([`STILL_SPEED_MPS`]).
+fn is_still(speed_mps: Option<f64>) -> bool {
+    speed_mps.is_some_and(|v| v <= STILL_SPEED_MPS)
 }
 
 impl Step {
     /// A track (re)starting at `p0` with velocity `v0`.
-    fn start(t: f64, d: [f64; 3], p0: V3, v0: V3) -> Step {
+    fn start(t: f64, d: [f64; 3], p0: V3, v0: V3, still: bool) -> Step {
         let x = Vec6::new(p0[0], p0[1], p0[2], v0[0], v0[1], v0[2]);
         let mut p = Mat6::zeros();
         for k in 0..3 {
             p[(k, k)] = START_POS_SIGMA_M.powi(2);
             p[(k + 3, k + 3)] = START_VEL_SIGMA_MPS.powi(2);
         }
-        Step { t, d, x, p, x_pred: x, p_pred: p, f: Mat6::identity() }
+        Step { t, d, x, p, x_pred: x, p_pred: p, f: Mat6::identity(), still }
     }
 
     /// Predict from `self` to `r` and fold `r` in, with the squared, noise-normalised mismatch
     /// between prediction and readings. `None` when `r` is a teleport ([`RESET_GATE_M`]).
     fn next(&self, r: &Reading, obs: [V3; 3]) -> Option<(Step, f64)> {
-        let (x_pred, p_pred, f) = predict(self, r.t);
+        let still = is_still(r.speed_mps);
+        let (x_pred, p_pred, f) = predict(self, r.t, self.still && still);
         let at = pos(&x_pred);
         let miss: Vec<f64> = obs.iter().zip(r.d).map(|(o, d)| d - dist(at, *o)).collect();
         if miss.iter().any(|m| m.abs() > RESET_GATE_M) {
@@ -327,7 +349,7 @@ impl Step {
         if let Some(v) = r.speed_mps {
             cost += ((v - norm([x_pred[3], x_pred[4], x_pred[5]])) / SPEED_SIGMA_MPS).powi(2);
         }
-        let mut step = Step { t: r.t, d: r.d, x: x_pred, p: p_pred, x_pred, p_pred, f };
+        let mut step = Step { t: r.t, d: r.d, x: x_pred, p: p_pred, x_pred, p_pred, f, still };
         step.update(obs, r.speed_mps);
         Some((step, cost))
     }
@@ -346,8 +368,20 @@ impl Step {
                 (Vec6::new(r[0] / n, r[1] / n, r[2] / n, 0.0, 0.0, 0.0), d - n, DISTANCE_SIGMA_M.powi(2))
             })
             .collect();
-        if let Some(measured) = speed_mps.filter(|_| s > SPEED_UPDATE_MIN_MPS) {
-            rows.push((Vec6::new(0.0, 0.0, 0.0, v[0] / s, v[1] / s, v[2] / s), measured - s, SPEED_SIGMA_MPS.powi(2)));
+        match speed_mps {
+            // Standing still: pin each component of `v` to 0, the only way a speed says anything
+            // about a velocity that has no direction yet.
+            _ if is_still(speed_mps) => {
+                for k in 0..3 {
+                    let mut row = Vec6::zeros();
+                    row[k + 3] = 1.0;
+                    rows.push((row, -v[k], STILL_SIGMA_MPS.powi(2)));
+                }
+            }
+            Some(measured) if s > SPEED_UPDATE_MIN_MPS => {
+                rows.push((Vec6::new(0.0, 0.0, 0.0, v[0] / s, v[1] / s, v[2] / s), measured - s, SPEED_SIGMA_MPS.powi(2)));
+            }
+            _ => {}
         }
         let m = rows.len();
         let h = DMatrix::from_fn(m, 6, |i, j| rows[i].0[j]);
@@ -371,12 +405,13 @@ fn pos(x: &Vec6) -> V3 {
     [x[0], x[1], x[2]]
 }
 
-/// Constant-velocity transition over `dt`, and its white-acceleration process noise.
-fn predict(prev: &Step, t: f64) -> (Vec6, Mat6, Mat6) {
+/// Constant-velocity transition over `dt`, and its white-acceleration process noise ([`STILL_ACCEL_MPS2`]
+/// when the ship reads still at both ends).
+fn predict(prev: &Step, t: f64, still: bool) -> (Vec6, Mat6, Mat6) {
     let dt = t - prev.t;
     let mut f = Mat6::identity();
     let mut q = Mat6::zeros();
-    let a2 = ACCEL_NOISE_MPS2.powi(2);
+    let a2 = if still { STILL_ACCEL_MPS2 } else { ACCEL_NOISE_MPS2 }.powi(2);
     for k in 0..3 {
         f[(k, k + 3)] = dt;
         q[(k, k)] = a2 * dt.powi(3) / 3.0;
@@ -457,7 +492,7 @@ const LOOKAHEAD_TICKS: usize = 10;
 
 /// A track started on reading `r` at `p0` with velocity `v0`, `r` folded in.
 fn started(r: &Reading, obs: [V3; 3], p0: V3, v0: V3) -> Step {
-    let mut step = Step::start(r.t, r.d, p0, v0);
+    let mut step = Step::start(r.t, r.d, p0, v0, is_still(r.speed_mps));
     step.update(obs, r.speed_mps);
     step
 }
@@ -684,6 +719,52 @@ mod tests {
             / path.len() as f64)
             .sqrt();
         assert!(rms < 2_000.0, "{rms}");
+    }
+
+    /// A ship parked through a 13 s countdown (the overview reading 0 or 1 m/s), then burning
+    /// off along `dir` at up to 2 km/s.
+    fn countdown_then_burn(obs: [V3; 3], start: V3, dir: V3) -> Vec<Reading> {
+        let path: Vec<V3> = (0..60)
+            .map(|t| {
+                let s = (t as f64 - 13.0).max(0.0);
+                let along = 0.5 * 300.0 * s.min(7.0).powi(2) + 2_100.0 * (s - 7.0).max(0.0);
+                add(start, scale(dir, along))
+            })
+            .collect();
+        let mut readings = observe(obs, &path);
+        for (i, r) in readings[..13].iter_mut().enumerate() {
+            r.speed_mps = Some((i % 2) as f64); // `observe` sees the burn a tick early
+        }
+        readings
+    }
+
+    #[test]
+    fn a_ship_holding_still_through_the_countdown_does_not_move() {
+        // The observers of a real scrim, whose plane (x = z) the starts sit close to: with no
+        // speed to hold them, smoothing slid parked ships up to 22 km toward where they later flew.
+        let obs = [[100_000.0, 0.0, 100_000.0], [0.0; 3], [100_000.0; 3]];
+        let starts = [[71_000.0, 32_000.0, 65_000.0], [73_000.0, 71_000.0, 73_000.0], [66_000.0; 3], [79_000.0, 76_000.0, 78_000.0]];
+        let dirs = [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [-0.6, 0.0, 0.8], [0.0, 1.0, 0.0]];
+        for start in starts {
+            for dir in dirs {
+                let fixes = solve_track(obs, &countdown_then_burn(obs, start, dir));
+                let drift = fixes[..13].iter().map(|f| dist(f.p, fixes[0].p)).fold(0.0, f64::max);
+                assert!(drift < 10.0, "{start:?} {dir:?}: drifted {drift} m before moving");
+            }
+        }
+    }
+
+    #[test]
+    fn a_slow_ship_is_not_held_still() {
+        let c = corners();
+        let obs = [c[0], c[3], c[7]]; // their plane runs through the centre
+        // Crawls at 25 m/s for 100 s, where only the speed shows which way along the plane.
+        let path: Vec<V3> = (0..100).map(|t| [40_000.0 + 25.0 * t as f64, 30_000.0, 60_000.0]).collect();
+        let fixes = solve_track(obs, &observe(obs, &path));
+        let rms = (fixes.iter().zip(&path).map(|(f, p)| dist(f.p, *p).powi(2)).sum::<f64>()
+            / path.len() as f64)
+            .sqrt();
+        assert!(rms < 4_000.0, "{rms}");
     }
 
     #[test]

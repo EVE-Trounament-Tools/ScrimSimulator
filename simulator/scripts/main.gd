@@ -2094,6 +2094,7 @@ func _build_settings(layer: CanvasLayer) -> void:
 	jitter_setting = CheckBox.new()
 	jitter_setting.text = "Ignore position jitter when finding the match start: movement under"
 	jitter_setting.button_pressed = Settings.get_value("match/ignore_jitter")
+	jitter_setting.tooltip_text = "Only for CSVs without overview speeds; with them, the first ship over %d m/s starts the match." % MatchData.MOVE_SPEED_MPS
 	jitter.add_child(jitter_setting)
 	jitter_spin = SpinBox.new()
 	jitter_spin.min_value = 0.0
