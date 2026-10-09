@@ -84,6 +84,23 @@ func test_match_swaps_count_when_added() -> void:
 	assert_eq(TeamDb.read("S1").pilots["a2"], "t2")
 
 
+func test_internal_match_is_left_out() -> void:
+	_add({"a1": 0, "a2": 0, "b1": 7, "b2": 7})
+	var path := MatchLibrary.add(write_csv([
+		row(0, "a1", "Test Hull", on_line(0, 0.5)),
+		row(0, "a3", "Test Hull", on_line(0, 0.5)),
+		row(0, "a2", "Test Hull", on_line(7, 0.5)),
+	]), "S1", true)
+	TeamDb.ingest_paths([path])
+	var db := TeamDb.read("S1")
+	assert_false(db.pilots.has("a3"), "an internal match adds no pilots")
+	assert_eq(db.matches.size(), 1)
+	assert_eq(TeamDb.rebuild("S1", "b").pilots.size(), 4, "nor when rebuilt")
+	MatchLibrary.set_internal(path, false)
+	TeamDb.rebuild_season("S1")
+	assert_true(TeamDb.read("S1").pilots.has("a3"), "joins once it isn't internal")
+
+
 func test_seasons_are_separate() -> void:
 	_add({"a1": 0, "b1": 7}, "S1/vs B")
 	_add({"a1": 7, "c1": 0}, "S2")

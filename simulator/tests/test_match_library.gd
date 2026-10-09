@@ -132,6 +132,28 @@ func test_meta_log_pilots_round_trip() -> void:
 	assert_eq(MatchLibrary.load_meta(path).log_pilots, {"a.txt": "Some Pilot"})
 
 
+func test_internal_flag() -> void:
+	var path := MatchLibrary.add(_file("m.csv", "1"))
+	assert_false(MatchLibrary.is_internal(path))
+	MatchLibrary.save_meta(path, {"teams": {"a": 1}})
+	MatchLibrary.set_internal(path, true)
+	assert_true(MatchLibrary.is_internal(path))
+	assert_eq(MatchLibrary.load_meta(path), {"teams": {"a": 1}, "internal": true}, "keeps the rest")
+	MatchLibrary.set_internal(path, false)
+	assert_eq(MatchLibrary.load_meta(path), {"teams": {"a": 1}})
+
+
+func test_add_internal() -> void:
+	assert_true(MatchLibrary.is_internal(MatchLibrary.add(_file("a.csv", "1"), "", true)))
+	assert_false(MatchLibrary.is_internal(MatchLibrary.add(_file("b.csv", "2"))))
+	var src := temp_dir().path_join("vs X")
+	DirAccess.make_dir_recursive_absolute(src)
+	DirAccess.copy_absolute(_match_file(), src.path_join("m1.positions.csv"))
+	var added := MatchLibrary.add_folder(src, "", true)
+	assert_eq(added.matches.size(), 1)
+	assert_true(MatchLibrary.is_internal(added.matches[0]))
+
+
 ## A positions CSV named `name` with EVE times 14:03:14 (t=0) to 14:03:24 (t=10).
 func _match_file(name := "m.positions.csv") -> String:
 	var body := "t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m,eve_time\n"

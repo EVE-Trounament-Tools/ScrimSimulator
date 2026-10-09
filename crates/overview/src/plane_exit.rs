@@ -547,6 +547,18 @@ mod tests {
     }
 
     #[test]
+    fn observers_far_enough_out_leave_no_plane_in_the_arena() {
+        use crate::solve::observers_at;
+        // Three corners of the bottom face, 235 km from the centre: the plane is 135.7 km below it.
+        let plane = Plane::from_observers(observers_at([0, 1, 2], 235_000.0));
+        let centre = [CUBE_M / 2.0; 3];
+        assert!(plane.offset(centre).abs() > BOUNDARY_RADIUS_M + GRAZE_M);
+        // A ship skimming the bottom of the arena never comes near it.
+        let fixes = path(&[[50.0, 50.0, -70.0], [100.0, 80.0, -70.0], [150.0, 50.0, -60.0]], &[60, 60]);
+        assert!(find_exits(&plane, &fixes).is_empty());
+    }
+
+    #[test]
     fn each_exit_gets_its_own_tail() {
         let plane = central_plane();
         // Off to z > y, back into the plane, along it, then off to y > z.

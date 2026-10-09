@@ -3,10 +3,11 @@
 //! `scene.json`, see `overview::panel`). Each panel is OCR'd and tracked independently, and the
 //! per-observer tracks are merged into one roster by pilot name. Each pilot's three distances per
 //! tick, with their speed, are then solved into a smoothed track (`overview::solve`): the observers
-//! sit on three unknown corners of a 100 km cube that every pilot starts inside, and the corners
-//! are inferred from the data. The
+//! sit on three of the centre->corner diagonals of a 100 km cube that every pilot starts inside,
+//! all the same distance from its centre (on the corners, or further out), and which diagonals and
+//! how far out are inferred from the data (or the distance given with `--observer-distance-km`). The
 //! observers don't move during a video, so with several matches every match is OCR'd first and
-//! the corners are inferred once from all of them.
+//! the observers' layout is inferred once from all of them.
 //! Where a track grazes the observers' plane and the distances can't tell which side it left for,
 //! `overview::plane_exit` turns it clockwise unless the match (boundary, start, incoming motion,
 //! scrams in the combat logs) says otherwise, and the CSV's `plane_exit,plane_exit_id,plane`
@@ -44,7 +45,7 @@ use overview::row::{read_rows, RowReading};
 use overview::ship_types::ShipTypes;
 use overview::gamelog;
 use overview::plane_exit::{self, Exit, PilotTrack, Plane, Scram, Turn};
-use overview::solve::{self, direction, infer_corners, solve_track, Fix, Reading};
+use overview::solve::{self, direction, infer_observers, solve_track, Fix, Reading};
 use overview::targets::{
     label_image, match_label, ocr_label, read_rings, BlockGeometry, Candidate, Hp, Label, LabelCache, Ring,
 };
@@ -81,6 +82,10 @@ struct Cli {
     /// `<video>.positions.logs/`. Needs EVE times (`--chat-log` or `--t0`).
     #[arg(long = "combat-log", value_name = "PATH")]
     combat_logs: Vec<PathBuf>,
+    /// How far the observers are from the cube's centre, along its centre->corner diagonals, in
+    /// km (all three the same; 86.6 is on the corners). Fitted from the match when not given.
+    #[arg(long = "observer-distance-km", value_name = "KM")]
+    observer_distance_km: Option<f64>,
     /// EVE Local chat log covering the recording (repeatable). Finds the match's CD -> WF/GF
     /// window and the EVE time base with ScrimTrimmer; only the match is processed, and the CSV
     /// gains an `eve_time` column.
@@ -314,8 +319,8 @@ fn main() -> Result<()> {
         let stem = output_stem(&video.file_stem().unwrap_or_default().to_string_lossy());
         let n = windows.len();
         // The observers don't move during a video, so every match is OCR'd first and the
-        // corners are inferred once from all of them: a match whose start can't tell the
-        // corners apart borrows the evidence of the others.
+        // layout is inferred once from all of them: a match whose start can't tell the
+        // layout apart borrows the evidence of the others.
         let mut reads: Vec<(Option<usize>, MatchRead)> = Vec::new();
         for (i, window) in windows {
             let Some(i) = i else {
@@ -337,7 +342,7 @@ fn main() -> Result<()> {
         }
         let pilots: Vec<Vec<Reading>> =
             reads.iter().flat_map(|(_, m)| m.readings.iter().map(PilotReadings::as_readings)).collect();
-        let fit = infer_corners(&pilots);
+        let fit = infer_observers(&pilots, cli.observer_distance_km.map(|km| km * 1000.0));
         println!("== {}: observers, from {} match(es)", video.display(), reads.len());
         let names: Vec<&str> = scene.panels.iter().map(|p| p.name.as_str()).collect();
         print_corners(&names, &fit);
@@ -810,21 +815,30 @@ fn calibrate_elsewhere(
 /// Seconds either side of a fix used to fit its direction.
 const DIRECTION_HALF_WINDOW_S: f64 = 3.0;
 
-fn print_corners(names: &[&str], fit: &solve::CornerFit) {
+fn print_corners(names: &[&str], fit: &solve::ObserverFit) {
     let fmt = |corners: [solve::V3; 3]| {
         let mut s = String::new();
         for (n, c) in names.iter().zip(corners) {
-            let _ = write!(s, " {n}=({:.0},{:.0},{:.0})", c[0] / 1e3, c[1] / 1e3, c[2] / 1e3);
+            let _ = write!(s, " {n}=({:.0},{:.0},{:.0})", c[0] / 1e3 + 0.0, c[1] / 1e3 + 0.0, c[2] / 1e3 + 0.0);
         }
         s
     };
     let speed = fit.cost.speed_err.map_or("n/a".to_string(), |e| format!("{e:.3}"));
     println!(
-        "  observer corners (km):{}  fit cost {:.0} m (start {:.0} m, speed error {speed}), next shape {:.0} m",
+        "  observers (km):{}  fit cost {:.0} m (start {:.0} m, speed error {speed}), next shape {:.0} m",
         fmt(fit.corners),
         fit.score,
         fit.cost.start_m,
         fit.runner_up
+    );
+    let plane = plane_exit::Plane::from_observers(fit.corners);
+    let gap = plane.offset([solve::CUBE_M / 2.0; 3]).abs();
+    println!(
+        "  observers {:.1} km from the centre ({:.1} km past the corners); their plane is {:.1} km from the centre, the arena edge {:.0} km",
+        fit.r_m / 1e3,
+        (fit.r_m - solve::CORNER_R_M) / 1e3,
+        gap / 1e3,
+        plane_exit::BOUNDARY_RADIUS_M / 1e3
     );
     if let Some(next) = fit.runner_up_corners {
         println!("  next shape (km):{}", fmt(next));
@@ -832,6 +846,23 @@ fn print_corners(names: &[&str], fit: &solve::CornerFit) {
     if fit.is_ambiguous() {
         eprintln!("  warning: corner choice is ambiguous; another observer layout fits almost as well");
     }
+    if gap < plane_exit::BOUNDARY_RADIUS_M + SAFE_PLANE_MARGIN_M {
+        println!(
+            "  note: the observers' plane cuts the arena, so a ship that flies along it can be mirrored. \
+             On three corners of one face, {:.0} km or more from the centre keeps it outside.",
+            safe_observer_distance_m() / 1e3
+        );
+    }
+}
+
+/// How far past the arena edge the observers' plane should be: the distances' rounding blurs
+/// which side a ship is on within a few km of it.
+const SAFE_PLANE_MARGIN_M: f64 = 5_000.0;
+
+/// Observers this far out along the diagonals of three corners of one face keep their plane
+/// [`SAFE_PLANE_MARGIN_M`] outside the arena: the plane is `R / √3` from the centre.
+fn safe_observer_distance_m() -> f64 {
+    (plane_exit::BOUNDARY_RADIUS_M + SAFE_PLANE_MARGIN_M) * 3f64.sqrt()
 }
 
 /// One pilot's per-tick inputs to the solve: the ticks where all three observers have an

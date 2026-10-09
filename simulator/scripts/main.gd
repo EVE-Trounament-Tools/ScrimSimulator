@@ -120,6 +120,9 @@ var team_names := {}
 ## "" for none); `team_sides` is empty when season teams are off or the match isn't in the library.
 var team_db := {}
 var team_sides := {}
+## Whether the open library match is internal (`MatchLibrary.is_internal`): its sides come only
+## from start positions, never from `team_db`.
+var match_internal := false
 ## Gamelog file name -> pilot it belongs to, where the listener's name doesn't pick the right one
 ## (see `CombatLog.sync`); saved like `team_overrides`.
 var log_pilots := {}
@@ -342,7 +345,8 @@ func load_match(path: String) -> bool:
 		start_button.visible = true
 	team_db = {}
 	team_sides = {}
-	if Settings.get_value("teams/season_db") and MatchLibrary.contains(path):
+	match_internal = MatchLibrary.contains(path) and MatchLibrary.is_internal(path)
+	if Settings.get_value("teams/season_db") and MatchLibrary.contains(path) and not match_internal:
 		team_db = TeamDb.read(TeamDb.season_of(path))
 		team_sides = TeamDb.apply(team_db, data)
 	for pilot in team_overrides:
@@ -404,6 +408,7 @@ func _on_menu_match_renamed(old_path: String, new_path: String) -> void:
 
 
 ## A library match's audio changed: the open one reloads, as its start (time 0) moves with it.
+## Also when a match is marked internal or not: the open one reloads its teams.
 func _on_menu_audio_changed(path: String) -> void:
 	if path != match_path or data == null:
 		return
@@ -454,6 +459,8 @@ func _save_meta() -> void:
 		var meta := {"teams": team_overrides, "team_names": team_names, "ruleset": ruleset_id}
 		if not log_pilots.is_empty():
 			meta.log_pilots = log_pilots
+		if match_internal:
+			meta.internal = true
 		MatchLibrary.save_meta(match_path, meta)
 
 
@@ -2020,6 +2027,7 @@ func _build_ui() -> void:
 	menu.resumed.connect(func(): menu.visible = false)
 	menu.match_renamed.connect(_on_menu_match_renamed)
 	menu.audio_changed.connect(_on_menu_audio_changed)
+	menu.internal_changed.connect(_on_menu_audio_changed)
 	menu.logs_changed.connect(_on_menu_logs_changed)
 	menu_layer.add_child(menu)
 

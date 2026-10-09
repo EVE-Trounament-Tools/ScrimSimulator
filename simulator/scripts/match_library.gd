@@ -239,8 +239,8 @@ static func _copy_tree(src: String, dest: String) -> bool:
 ## Copies `src` into library folder `folder` (made if missing) and returns the copy's path (""
 ## on failure). A file already there with the same name and contents is reused; a different file
 ## with the same name gets a " (2)", " (3)", … suffix. Gamelogs in the CSV's own `logs_dir` come
-## along.
-static func add(src: String, folder := "") -> String:
+## along. With `internal`, the copy is marked an internal match (`set_internal`).
+static func add(src: String, folder := "", internal := false) -> String:
 	if not FileAccess.file_exists(src):
 		push_error("Cannot add %s: no such file" % src)
 		return ""
@@ -257,6 +257,8 @@ static func add(src: String, folder := "") -> String:
 		var data := MatchData.load_csv(dest, {}, 0.0, true)
 		for gamelog in gamelogs:
 			add_log(dest, gamelog, data)
+	if dest != "" and internal:
+		set_internal(dest, true)
 	return dest
 
 
@@ -293,8 +295,9 @@ static func _numbered(to_dir: String, stem: String, ext: String, n: int) -> Stri
 ## of the matches they pair with (`pair_audio`), and each loose gamelog (`*.txt`) is added to
 ## every match it has combat during (`add_log`). Returns `{ folder, matches, failed,
 ## unpaired_audio }`: the folder, the added matches' paths, and the file names of CSVs that
-## couldn't be added and audio that paired with none; `folder` is "" if nothing was added.
-static func add_folder(src_dir: String, parent := "") -> Dictionary:
+## couldn't be added and audio that paired with none; `folder` is "" if nothing was added. With
+## `internal`, every added match is marked an internal match (`set_internal`).
+static func add_folder(src_dir: String, parent := "", internal := false) -> Dictionary:
 	var out := {"folder": "", "matches": [], "failed": [], "unpaired_audio": []}
 	if not DirAccess.dir_exists_absolute(src_dir):
 		push_error("Cannot add %s: no such folder" % src_dir)
@@ -317,7 +320,7 @@ static func add_folder(src_dir: String, parent := "") -> Dictionary:
 	var folder := parent.path_join(name if name != "" else "Scrim")
 	var added := {}
 	for csv in csvs:
-		var dest := add(csv, folder)
+		var dest := add(csv, folder, internal)
 		if dest == "":
 			out.failed.append(csv.get_file())
 		else:
@@ -602,8 +605,9 @@ static func load_audio(path: String) -> AudioStream:
 
 
 ## The match's saved edits: `{ teams: { pilot -> Team }, team_names: { Team -> String },
-## log_pilots: { gamelog file name -> pilot }, ruleset: `Ruleset` id }` (`log_pilots` overrides
-## who a gamelog is attributed to), each present only if saved. {} when there is no (readable) sidecar.
+## log_pilots: { gamelog file name -> pilot }, ruleset: `Ruleset` id, internal: true }`
+## (`log_pilots` overrides who a gamelog is attributed to; `internal` marks a match between pilots
+## of one team, see `is_internal`), each present only if saved. {} when there is no (readable) sidecar.
 static func load_meta(path: String) -> Dictionary:
 	var file := meta_path(path)
 	if not FileAccess.file_exists(file):
@@ -628,7 +632,26 @@ static func load_meta(path: String) -> Dictionary:
 			out.log_pilots[log_file] = str(parsed.log_pilots[log_file])
 	if parsed.get("ruleset") is String:
 		out.ruleset = parsed.ruleset
+	if parsed.get("internal") == true:
+		out.internal = true
 	return out
+
+
+## Whether library match `path` is an internal match: one team split against itself, so its
+## sides come only from start positions and it is left out of its season's `TeamDb`.
+static func is_internal(path: String) -> bool:
+	return load_meta(path).get("internal", false)
+
+
+## Marks library match `path` an internal match (`is_internal`) or not, keeping the rest of its
+## sidecar.
+static func set_internal(path: String, on: bool) -> void:
+	var meta := load_meta(path)
+	if on:
+		meta.internal = true
+	else:
+		meta.erase("internal")
+	save_meta(path, meta)
 
 
 ## Writes the sidecar of library match `path` (see `load_meta`).

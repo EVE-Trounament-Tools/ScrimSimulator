@@ -1118,6 +1118,19 @@ func test_season_teams_off_keeps_match_teams() -> void:
 	assert_true(m.team_sides.is_empty())
 
 
+func test_internal_match_keeps_match_teams() -> void:
+	_season_match(0, 7)
+	var flipped := _season_match(7, 0)
+	MatchLibrary.set_internal(flipped, true)
+	var m := _main()
+	m.load_match(flipped)
+	assert_eq(_roster(m), ["Blue (1)", "red", "Red (1)", "blue", "Unknown (1)", "late"])
+	assert_true(m.team_sides.is_empty())
+	m._swap_team("late")
+	assert_true(MatchLibrary.is_internal(flipped), "saving a swap keeps the flag")
+	assert_false(TeamDb.read("Season 1").manual.has("late"), "a swap doesn't touch the season")
+
+
 func test_ship_overlay_default_name_and_type() -> void:
 	var m := _main()
 	m.load_match(_match_csv())

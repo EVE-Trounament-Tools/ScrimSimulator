@@ -62,9 +62,38 @@ template's crops are made for this layout, so if every observer uses it there is
 
 ### Observer placement
 
-Put the three observers on three corners of the **same face** of the 100 km cube: two corners
-joined by one edge, and a third joined to one of them by another edge of that face (an L shape).
-Fight inside the cube.
+Pick three corners of the **same face** of the 100 km cube: two corners joined by one edge, and a
+third joined to one of them by another edge of that face (an L shape). Put each observer on the
+line from the cube's centre out through its corner, **past the corner**, all three the **same
+distance** from the centre:
+
+- **at least 225 km from the centre**: about 138 km past each corner beacon along that line
+  (130 km from the centre on each axis, so 80 km beyond the corner on each);
+- **235 km** for a comfortable margin (about 148 km past the beacon).
+
+Fight inside the cube as usual, and stop the observers dead. `scrim-positions` works out which
+corners' lines they're on and how far out they are from the match itself; if you know the
+distance, give it with `--observer-distance-km 235`.
+
+| Distance from centre | Past the corner beacon | Observers' plane from centre | Clear of the 125 km arena edge by |
+|---|---|---|---|
+| 86.6 km (on the corners) | 0 | 50 km | — (cuts through the arena) |
+| 216.5 km | 130 km | 125 km | 0 (just touches it) |
+| 225 km | 138 km | 130 km | 5 km (minimum safe) |
+| **235 km** | **148 km** | **136 km** | **11 km** |
+
+![Moving the observers out along their lines from the centre moves their plane out with them, until it clears the 125 km arena](docs/media/observer-distance.gif)
+
+The observers' plane (see below) is parallel to that face, `distance ÷ √3` from the centre. Once
+it's outside the arena, no ship inside the arena can ever be mirrored. The 5 km margin covers the
+overview's 1 km rounding, which blurs which side of the plane a ship is on within a few km of it.
+Keep all three the same distance out: one observer closer in tilts the plane back into the arena.
+Only this L of corners works. Three corners joined by face diagonals need over 375 km, and two
+corners on one edge with the third on the opposite edge always put the plane through the centre.
+
+If the observers can't go that far, put them on the three corners themselves (86.6 km out). The
+plane is then the face, 50 km from the centre: still every ship inside the cube is on one side of
+it, so only a ship that leaves the cube through that face can be mirrored.
 
 ![Observers on three corners of one face: the mirror image of every ship in the cube lies outside it](docs/media/observer-corners-ideal.png)
 
@@ -84,7 +113,9 @@ Other corner choices put that plane through the cube, where the ships are. The w
 corners on one edge and the third on the opposite edge, runs it through the centre. On one face,
 the plane is that face: every ship inside the cube is on the same side of it, and its mirror image
 is always outside the cube, so it is never picked. A ship can still cross the plane by leaving the
-cube through that face (the 125 km boundary reaches 75 km past it), so keep the fight inside.
+cube through that face (the 125 km boundary reaches 75 km past it). Moving the observers out
+along their lines moves the plane out with them, until at 225 km from the centre it's clear of
+the arena altogether (the table above).
 
 ## Processing a recording
 
@@ -269,6 +300,12 @@ season; an empty name gives back the temporary name. The team lists are rebuilt 
 the first time a new version runs, and swaps and names are kept. To get the old behaviour, turn
 off **Keep pilots on their season's team** in Settings. Team swaps and team names are then saved
 for that match only.
+
+An internal match, where one team splits and plays against itself, would mix up the season's
+teams. Tick **Internal** next to **Add folder…** before adding a match or folder to mark what you
+add as internal. You can also right-click a match and toggle **Internal match**. An internal
+match takes its teams only from where pilots start. It isn't added to the season's team list,
+and its team swaps and names are saved for that match only.
 
 Pilot renames (right-click a pilot → **Rename pilot…**) apply
 in every match, and an empty name restores the original.
