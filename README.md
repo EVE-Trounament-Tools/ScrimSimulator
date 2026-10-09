@@ -60,6 +60,63 @@ overview, and which video settings to use. Record near-lossless. The OCR needs c
 windowed, UI scale 1.75) and explains how to copy it onto each observer character. The OBS
 template's crops are made for this layout, so if every observer uses it there is nothing to crop.
 
+### Observer placement
+
+Pick three corners of the **same face** of the 100 km cube: two corners joined by one edge, and a
+third joined to one of them by another edge of that face (an L shape). Put each observer on the
+line from the cube's centre out through its corner, **past the corner**, all three the **same
+distance** from the centre:
+
+- **at least 225 km from the centre**: about 138 km past each corner beacon along that line
+  (130 km from the centre on each axis, so 80 km beyond the corner on each);
+- **235 km** for a comfortable margin (about 148 km past the beacon).
+
+Fight inside the cube as usual, and stop the observers dead. `scrim-positions` works out which
+corners' lines they're on and how far out they are from the match itself; if you know the
+distance, give it with `--observer-distance-km 235`.
+
+| Distance from centre | Past the corner beacon | Observers' plane from centre | Clear of the 125 km arena edge by |
+|---|---|---|---|
+| 86.6 km (on the corners) | 0 | 50 km | — (cuts through the arena) |
+| 216.5 km | 130 km | 125 km | 0 (just touches it) |
+| 225 km | 138 km | 130 km | 5 km (minimum safe) |
+| **235 km** | **148 km** | **136 km** | **11 km** |
+
+![Moving the observers out along their lines from the centre moves their plane out with them, until it clears the 125 km arena](docs/media/observer-distance.gif)
+
+The observers' plane (see below) is parallel to that face, `distance ÷ √3` from the centre. Once
+it's outside the arena, no ship inside the arena can ever be mirrored. The 5 km margin covers the
+overview's 1 km rounding, which blurs which side of the plane a ship is on within a few km of it.
+Keep all three the same distance out: one observer closer in tilts the plane back into the arena.
+Only this L of corners works. Three corners joined by face diagonals need over 375 km, and two
+corners on one edge with the third on the opposite edge always put the plane through the centre.
+
+If the observers can't go that far, put them on the three corners themselves (86.6 km out). The
+plane is then the face, 50 km from the centre: still every ship inside the cube is on one side of
+it, so only a ship that leaves the cube through that face can be mirrored.
+
+![Observers on three corners of one face: the mirror image of every ship in the cube lies outside it](docs/media/observer-corners-ideal.png)
+
+![Each observer's distance puts the ship on a sphere; two spheres meet in a circle; the third sphere crosses it at the ship and its mirror image](docs/media/observer-trilateration.gif)
+
+Three distances only fix a ship up to a mirror image: the ship and its reflection through the
+plane the three observers sit in are the same distance from each of them. `scrim-positions` picks
+the side that keeps the track continuous, but a ship flying *in* that plane has only one answer,
+and when it leaves the plane the distances it shows are the same whichever side it went.
+`scrim-positions` then turns it **clockwise** (seen from the ship's right with the plane's normal
+up; see the `plane_exit` column below) until the match shows that's wrong. If it's still on the
+wrong side, flip it in the simulator (right-click the ship → **Flip plane exit**).
+
+![Observers on corners whose plane cuts through the cube: a ship leaving the plane could have gone either way](docs/media/observer-plane-ambiguity.png)
+
+Other corner choices put that plane through the cube, where the ships are. The worst, two
+corners on one edge and the third on the opposite edge, runs it through the centre. On one face,
+the plane is that face: every ship inside the cube is on the same side of it, and its mirror image
+is always outside the cube, so it is never picked. A ship can still cross the plane by leaving the
+cube through that face (the 125 km boundary reaches 75 km past it). Moving the observers out
+along their lines moves the plane out with them, until at 225 km from the centre it's clear of
+the arena altogether (the table above).
+
 ## Processing a recording
 
 This uses `scrim-positions` from the separate `scrim-positions-…zip` download (or a source build).
@@ -82,14 +139,33 @@ don't want the mp3, and press **Run**. Its output is shown as it works, and your
 remembered for next time. It looks for `scrim-positions` and `scene.json` next to itself.
 
 The CSV has one row per pilot per second:
-`t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m,shield,armor,hull`.
+`t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m,shield,armor,hull`, then
+`plane_exit,plane_exit_id,plane`.
 Positions are a smoothed track, not each second's distances solved on their own: the overview
 rounds distances to whole km, which near the observers' plane would throw a ship many km about.
+A ship the overview shows at 0 m/s (waiting out the countdown, say) is held still. The simulator
+starts the match (time 0) a second before the first ship's speed passes 10 m/s.
 `residual_m` is how far, on average, the three distances at the smoothed position differ from
 what the overview showed (around 0.2 km is normal).
 `shield`, `armor` and `hull` are the pilot's remaining HP (0–1), read off the rings of the locked
 targets the OBS template records; they're blank while no observer has the pilot locked. Whose ring
 is whose comes from its label, read with Tesseract (on `PATH`, or `--tesseract`).
+`plane_exit` is filled in after a ship leaves the observers' plane where the distances can't tell
+which side it went (see [Observer placement](#observer-placement)): `cw` or `ccw`, the way it
+turned, until its next such exit. `plane_exit_id` numbers a pilot's exits and `plane` is the
+observers' plane (`"nx ny nz d"`). Clockwise is the ship leaving toward `−n`, where
+`n = (B − A) × (C − A)` for observers A, B, C in `scene.json` order. Every exit is clockwise
+unless the match shows otherwise:
+- the clockwise side has the ship outside the cube before the match starts,
+- it takes the ship more than 5 km out of bounds for 5 s or more and back in again (a ship can
+  linger outside before it's removed, so going out and staying out, or scraping the edge, doesn't
+  count),
+- the ship came into the plane heading for the other side and would have to turn back, or
+- with combat logs (`--combat-log`), a warp scramble or disruption on it, or by it, would be out
+  of range (15 km scram, 40 km point; 45 km and 90 km for heavy interdictors, Arazu, Lachesis and
+  Keres).
+
+The counterclockwise exits are listed, with the reasons, when it finishes.
 
 ### One match, with EVE timestamps
 
@@ -225,6 +301,12 @@ the first time a new version runs, and swaps and names are kept. To get the old 
 off **Keep pilots on their season's team** in Settings. Team swaps and team names are then saved
 for that match only.
 
+An internal match, where one team splits and plays against itself, would mix up the season's
+teams. Tick **Internal** next to **Add folder…** before adding a match or folder to mark what you
+add as internal. You can also right-click a match and toggle **Internal match**. An internal
+match takes its teams only from where pilots start. It isn't added to the season's team list,
+and its team swaps and names are saved for that match only.
+
 Pilot renames (right-click a pilot → **Rename pilot…**) apply
 in every match, and an empty name restores the original.
 
@@ -236,6 +318,7 @@ in every match, and an empty name restores the original.
 |---|---|
 | Space / **Play** | Play or pause (matches open paused) |
 | ← / → | Pause and step one tick (1 s) |
+| Shift + ← / → | Seek back / forward 10 s |
 | `[` / `]` | Jump to the previous / next event on the timeline (kills, boundary deaths, micro jumps) |
 | Timeline slider | Scrub |
 | Left drag (empty space) | Orbit the camera |
@@ -245,10 +328,12 @@ in every match, and an empty name restores the original.
 | Double-click a ship | Follow it with the camera |
 | Esc / click empty space | Clear the selection |
 | Left drag from a ship | Measure: a sphere grows from the ship and brackets every ship it reaches. Drag onto another ship for the hull-to-hull distance. |
-| Right-click a ship (in space or roster) | Its debug menu: rename, damage breakdown, movement vector and any number of coloured range spheres |
+| Right-click a ship (in space or roster) | Its debug menu: rename, damage breakdown, movement vector, any number of coloured range spheres, and **Flip plane exit** (mirrors the ship to the other side of the observers' plane until its next plane exit, and saves that in the match's CSV) |
 | D / **Debug…** | Debug menu for every ship at once, vector length, and the beacons' 5 km jump range |
 | M | Toggle hull models and icons vs. plain spheres |
 | B | Toggle the 125 km arena boundary |
+
+**Hotkeys…** (in the bar and on the match menu) shows this list top left.
 
 ![Measuring from one ship to another](docs/media/measure.gif)
 

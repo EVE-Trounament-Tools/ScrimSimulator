@@ -87,6 +87,16 @@ func add_node(node: Node) -> Node:
 	return node
 
 
+## Points `ShipSizes` at a temp dir holding an empty build-1 cache, so a `main.gd` added to the
+## tree neither prompts to download the SDE nor picks up the developer's real one. Leaving that
+## prompt open in every test makes Godot crash intermittently. Undo with `ShipSizes.dir = ""`.
+func stub_sde() -> void:
+	ShipSizes.dir = temp_dir()
+	var f := FileAccess.open(ShipSizes.dir.path_join("ship_sizes.json"), FileAccess.WRITE)
+	f.store_string(JSON.stringify({"build": 1, "ships": {}}))
+	f.close()
+
+
 ## Frees `node` after the current test without adding it to the tree (no `_ready`).
 func own(node: Node) -> Node:
 	_nodes.append(node)

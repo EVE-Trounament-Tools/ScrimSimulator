@@ -15,7 +15,8 @@ extends RefCounted
 ## most of its known pilots are on, or a new team with a temporary name ("Team 3"); a known
 ## pilot is never moved by that. Opening a match puts known pilots on their team's side
 ## (`apply`). The db is rebuilt from every match of the season the first time a new build runs
-## (`ensure_current`).
+## (`ensure_current`). Internal matches (`MatchLibrary.is_internal`: one team split against
+## itself) are left out of the db, and opening one doesn't `apply` it.
 
 const FILE := "pilot-teams.db.json"
 ## Bump when what `ingest` makes from a match changes, so every db is rebuilt.
@@ -161,8 +162,11 @@ static func add_teams(db: Dictionary, teams: Dictionary) -> void:
 
 ## Adds library match `path` to `db` (its season's): its geometric teams with the match's own
 ## swaps (`MatchLibrary.load_meta`) applied (`data` is the match loaded from `path`, if the caller
-## has it). False if it couldn't be read; a match already added with the same contents is skipped.
+## has it). False if it couldn't be read; a match already added with the same contents, or an
+## internal match, is skipped.
 static func ingest(db: Dictionary, path: String, data: MatchData = null) -> bool:
+	if MatchLibrary.is_internal(path):
+		return true
 	var key := _key(path)
 	var sha := FileAccess.get_sha256(path)
 	if db.matches.get(key) == sha:
@@ -226,7 +230,7 @@ static func apply(db: Dictionary, data: MatchData) -> Dictionary:
 	return sides
 
 
-## `season`'s db made again from all its matches, oldest first, for build `build`. What was
+## `season`'s db made again from all its (non-internal) matches, oldest first, for build `build`. What was
 ## set by hand in the old db is kept: each old team is matched with the new team most of its
 ## pilots are on, which takes its name if it was named, and pilots `assign`ed by hand go back
 ## to their team.
@@ -235,7 +239,7 @@ static func rebuild(season: String, build: String) -> Dictionary:
 	var db := empty(build)
 	var dated := []  # [when, path, sha, teams]
 	for entry in MatchLibrary.list():
-		if season_of(entry.path) != season:
+		if season_of(entry.path) != season or MatchLibrary.is_internal(entry.path):
 			continue
 		var data := MatchData.load_csv(entry.path, {}, 0.0, true)
 		if data == null:
@@ -288,15 +292,25 @@ static func ensure_current(build: String) -> void:
 		var db := read(season)
 		if FileAccess.file_exists(db_path(season)) and db.version == VERSION and db.build == build:
 			continue
-		if OS.has_feature("web"):
-			var ok := true
-			for entry in MatchLibrary.list():
-				if season_of(entry.path) == season and not await WebLibrary.fetch_match(entry.path, false):
-					ok = false
-					break
-			if not ok:
-				continue
-		save(season, rebuild(season, build))
+		await _rebuild_and_save(season, build)
+
+
+## Rebuilds (and saves) `season`'s db now, e.g. after one of its matches was marked internal or
+## not. On the web, its db and matches are downloaded first (if they can't be, it is left as it is).
+static func rebuild_season(season: String) -> void:
+	if OS.has_feature("web") and not await WebLibrary.fetch_file(db_path(season)):
+		return
+	await _rebuild_and_save(season, build_id())
+
+
+## `rebuild`s `season`'s db for `build` and saves it; on the web, after downloading its matches
+## (left as it is if they can't be).
+static func _rebuild_and_save(season: String, build: String) -> void:
+	if OS.has_feature("web"):
+		for entry in MatchLibrary.list():
+			if season_of(entry.path) == season and not await WebLibrary.fetch_match(entry.path, false):
+				return
+	save(season, rebuild(season, build))
 
 
 ## The build the db is made by: the site's build on the web (so the first visit after a deploy

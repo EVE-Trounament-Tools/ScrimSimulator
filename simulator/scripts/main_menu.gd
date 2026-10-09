@@ -3,7 +3,8 @@ extends PanelContainer
 ## Full-screen start menu: pick a match from the `MatchLibrary`, add a new CSV or a whole scrim
 ## folder to it, rename or remove one, attach audio to one, add combat logs (EVE gamelogs) to the
 ## matches of a folder, sort matches into folders (right-click for all of these, or drag to
-## move). Covers the viewer until a match is chosen.
+## move), mark matches internal (`MatchLibrary.is_internal`: when added with **Internal** ticked,
+## or by right-click). Covers the viewer until a match is chosen.
 
 ## The library path of the match to open.
 signal match_chosen(path: String)
@@ -15,8 +16,10 @@ signal match_renamed(old_path: String, new_path: String)
 signal audio_changed(path: String)
 ## Library match `path` got or lost combat logs.
 signal logs_changed(path: String)
+## Library match `path` was marked internal or not (`MatchLibrary.set_internal`).
+signal internal_changed(path: String)
 
-enum MenuItem { ADD_AUDIO, REMOVE_AUDIO, ADD_LOGS, REMOVE_LOGS, RENAME, REMOVE, NEW_FOLDER, ADD_FOLDER, ADD_MATCH }
+enum MenuItem { ADD_AUDIO, REMOVE_AUDIO, ADD_LOGS, REMOVE_LOGS, RENAME, REMOVE, NEW_FOLDER, ADD_FOLDER, ADD_MATCH, INTERNAL }
 
 ## Badge on matches with audio: a speaker.
 const AUDIO_ICON_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
@@ -27,13 +30,25 @@ const AUDIO_ICON_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" he
 const FOLDER_ICON_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
 <path d="M1.5 3.5h5l1.5 1.5h6.5v8h-13z" fill="#d9b25f"/>
 </svg>"""
+## Match list controls, listed under the viewer's hotkeys by **Hotkeys…**.
+const MENU_CONTROLS := [
+	["Double-click a match", "Open it"],
+	["Right-click", "Rename, remove, audio, combat logs, internal and folders"],
+	["Drag a match or folder", "Move it into a folder"],
+	["Drop a *.positions.csv or folder", "Add it to the library"],
+]
 
 var list: LibraryTree
 var open_button: Button
 var rename_button: Button
 var remove_button: Button
 var audio_button: Button
+## Ticked: matches added next (button, right-click or drop) are internal matches.
+var internal_check: CheckBox
 var resume_button: Button
+## Toggles `hotkeys_panel`, shown top left over the menu.
+var hotkeys_button: Button
+var hotkeys_panel: HotkeysPanel
 var error_label: Label
 var empty_label: Label
 var add_dialog: FileDialog
@@ -133,6 +148,11 @@ func _init() -> void:
 	add_folder_button.pressed.connect(func(): folder_dialog.popup_centered_ratio(0.6))
 	buttons.add_child(add_folder_button)
 
+	internal_check = CheckBox.new()
+	internal_check.text = "Internal"
+	internal_check.tooltip_text = "Matches added next are internal (one team against itself): teams come only from start positions, not the season's teams"
+	buttons.add_child(internal_check)
+
 	var new_folder_button := Button.new()
 	new_folder_button.text = "New folder…"
 	new_folder_button.pressed.connect(func(): ask_new_folder(target_folder()))
@@ -154,6 +174,13 @@ func _init() -> void:
 	audio_button.pressed.connect(_ask_audio)
 	buttons.add_child(audio_button)
 
+	hotkeys_button = Button.new()
+	hotkeys_button.text = "Hotkeys…"
+	hotkeys_button.toggle_mode = true
+	hotkeys_button.tooltip_text = "Show every hotkey and mouse control (top left)"
+	hotkeys_button.toggled.connect(func(on): hotkeys_panel.visible = on)
+	buttons.add_child(hotkeys_button)
+
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	buttons.add_child(spacer)
@@ -163,6 +190,14 @@ func _init() -> void:
 	resume_button.visible = false
 	resume_button.pressed.connect(func(): resumed.emit())
 	buttons.add_child(resume_button)
+
+	# Overlay so the list can sit top left instead of filling the menu like `center`.
+	var overlay := Control.new()
+	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(overlay)
+	hotkeys_panel = HotkeysPanel.new({"title": "Match list", "rows": MENU_CONTROLS})
+	hotkeys_panel.position = Vector2(12, 12)
+	overlay.add_child(hotkeys_panel)
 
 	add_dialog = FileDialog.new()
 	add_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
@@ -258,6 +293,8 @@ func refresh() -> void:
 		var logs := MatchLibrary.log_paths(e.path).size()
 		if logs > 0:
 			notes.append("%d combat log%s" % [logs, "" if logs == 1 else "s"])
+		if MatchLibrary.is_internal(e.path):
+			notes.append("Internal match")
 		item.set_tooltip_text(0, "\n".join(notes))
 	if not _select(was):
 		var matches := list.match_items()
@@ -297,7 +334,7 @@ func show_error(text: String) -> void:
 
 ## Copies `src` into the library (the `target_folder`), selects it, and asks for it to be opened.
 func add_file(src: String) -> void:
-	var path := MatchLibrary.add(src, target_folder())
+	var path := MatchLibrary.add(src, target_folder(), internal_check.button_pressed)
 	if path == "":
 		show_error("Failed to add %s" % src.get_file())
 		return
@@ -311,7 +348,7 @@ func add_file(src: String) -> void:
 ## Adds scrim folder `src_dir` to the library, in the `target_folder` (`MatchLibrary.add_folder`),
 ## and selects its first match; what couldn't be added or paired is named in the error line.
 func add_folder(src_dir: String) -> void:
-	var added := MatchLibrary.add_folder(src_dir, target_folder())
+	var added := MatchLibrary.add_folder(src_dir, target_folder(), internal_check.button_pressed)
 	if added.matches.is_empty():
 		show_error("No matches added from %s — it needs scrim-positions CSVs" % src_dir.simplify_path().get_file())
 		return
@@ -461,6 +498,18 @@ func remove_audio_selected() -> void:
 	audio_changed.emit(path)
 
 
+## Marks the selected match internal or not, and rebuilds its season's `TeamDb` so the match
+## leaves or joins it.
+func toggle_internal_selected() -> void:
+	var path := selected_path()
+	if path == "":
+		return
+	MatchLibrary.set_internal(path, not MatchLibrary.is_internal(path))
+	await TeamDb.rebuild_season(TeamDb.season_of(path))  # doesn't wait outside the web build
+	refresh()
+	internal_changed.emit(path)
+
+
 ## The selected match's library path, or "" (also when a folder is selected).
 func selected_path() -> String:
 	var meta := _selected_meta()
@@ -533,6 +582,11 @@ func open_context_menu(at: Vector2) -> void:
 			context_menu.add_item("Remove combat logs", MenuItem.REMOVE_LOGS)
 			context_menu.set_item_disabled(context_menu.get_item_index(MenuItem.REMOVE_LOGS),
 				MatchLibrary.log_paths(meta.path).is_empty())
+			context_menu.add_check_item("Internal match", MenuItem.INTERNAL)
+			context_menu.set_item_checked(context_menu.get_item_index(MenuItem.INTERNAL),
+				MatchLibrary.is_internal(meta.path))
+			context_menu.set_item_tooltip(context_menu.get_item_index(MenuItem.INTERNAL),
+				"One team against itself: teams come only from start positions, not the season's teams")
 			context_menu.add_separator()
 			_add_move_submenu(meta)
 			context_menu.add_item("Rename…", MenuItem.RENAME)
@@ -581,6 +635,8 @@ func _on_context_item(id: int) -> void:
 				logs_dialog.popup_centered_ratio(0.6)
 		MenuItem.REMOVE_LOGS:
 			remove_logs_selected()
+		MenuItem.INTERNAL:
+			toggle_internal_selected()
 		MenuItem.RENAME:
 			_ask_rename()
 		MenuItem.REMOVE:

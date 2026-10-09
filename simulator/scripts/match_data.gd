@@ -3,7 +3,10 @@ extends RefCounted
 ## Per-pilot position tracks loaded from a `scrim-positions` CSV:
 ## `t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m`, optionally
 ## `shield,armor,hull` (remaining HP 0-1, blank while no observer had the pilot locked), plus `eve_time` (each tick's EVE time, ISO 8601 UTC) when it was made with
-## `--chat-log` or `--t0`.
+## `--chat-log` or `--t0`, and `plane_exit,plane_exit_id,plane`: on the rows after a ship left
+## the observers' plane ambiguously, which way it turned (`cw`/`ccw`), which of its exits that
+## was (1, 2, …) and the plane (`"nx ny nz d"`: unit normal and offset, metres). See
+## `flip_plane_exit`.
 ## Positions are metres in the observers' cube frame (0..100 km per axis).
 
 ## Samples further apart than this are treated as a gap: the ship is hidden in between.
@@ -28,6 +31,9 @@ const MJD_TOLERANCE_M := 15000.0
 ## A micro jump drive spools up for 12 server ticks before the jump.
 const MJD_SPOOL_S := 12.0
 const CAPSULE := "Capsule"
+## An overview speed above this means the ship has started moving (ships waiting out the
+## countdown read 0–1 m/s).
+const MOVE_SPEED_MPS := 10.0
 ## Shield, armor and hull of a pilot whose HP isn't known.
 const NAN_HP := Vector3(NAN, NAN, NAN)
 ## A pilot is taking damage when a layer reads lower than its previous reading and more than
@@ -45,7 +51,8 @@ enum Event { DEATH, BOUNDARY, MJD }
 ## (m/s as read from the overview; NAN if the CSV has none), hp: Vector3 (remaining shield, armor,
 ## hull 0-1; `NAN_HP` when blank) }, sorted by t.
 ## A sample its ship micro jumped to also has `mjd: true`; with an `eve_time` column, every sample
-## has `eve_time: String`.
+## has `eve_time: String`; a sample in a plane exit's tail has `plane_exit: String` ("cw"/"ccw")
+## and `plane_exit_id: int`.
 ## A podded pilot's track ends at its first capsule sample (`pod: true`, with unknown speed and HP):
 ## nothing the pod does after is kept, and `sample` holds it there until the match ends.
 var tracks: Dictionary = {}
@@ -72,6 +79,9 @@ var radii: Dictionary = {}
 ## CSV time of match time 0: just before the first ship moves (or the first sample if none do,
 ## or if the lead-in is kept).
 var start_time := 0.0
+## Match time at which the first ship moves: the length of the kept lead-in (the pre-match
+## countdown), 0 when it is skipped or no ship moves.
+var lead_in := 0.0
 ## Match time of the last sample.
 var duration := 0.0
 ## EVE time (ISO 8601 UTC) of the CSV's first and last sample, for lining the match up with other
@@ -91,10 +101,13 @@ var combat_logs: Array = []
 var smooth := false
 
 
-## A ship further than `move_threshold_m` from its first sample has started moving; the match
-## (time 0) begins at the sample before the earliest such move, skipping the pre-match countdown.
-## 0 counts any change of position. `keep_lead_in` starts the match at the first sample instead
-## (a match with audio, which starts there too).
+## A ship whose overview speed is above `MOVE_SPEED_MPS` has started moving; the match (time 0)
+## begins at the sample before the earliest such move, skipping the pre-match countdown. A CSV
+## whose speeds never get that high (or has none) goes by position instead: further than
+## `move_threshold_m` from the pilot's first sample, 0 counting any change. Solved positions can
+## wander while a ship sits still, so speed is the better sign when the CSV has it.
+## `keep_lead_in` starts the match at the first sample instead (a match with audio, which starts
+## there too).
 static func load_csv(path: String, ship_radii := {}, move_threshold_m := 0.0, keep_lead_in := false) -> MatchData:
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
@@ -116,6 +129,8 @@ static func load_csv(path: String, ship_radii := {}, move_threshold_m := 0.0, ke
 	var speed_col: int = col.get("speed_mps", -1)
 	var eve_col: int = col.get("eve_time", -1)
 	var hp_cols: Array = ["shield", "armor", "hull"].map(func(c): return col.get(c, -1))
+	var exit_col: int = col.get("plane_exit", -1)
+	var exit_id_col: int = col.get("plane_exit_id", -1)
 	while not f.eof_reached():
 		var row := f.get_csv_line()
 		if row.size() < header.size():
@@ -134,6 +149,9 @@ static func load_csv(path: String, ship_radii := {}, move_threshold_m := 0.0, ke
 		}
 		if not is_nan(s.hp.x):
 			data.has_hp = true
+		if exit_col >= 0 and exit_id_col >= 0 and not row[exit_col].is_empty():
+			s.plane_exit = row[exit_col]
+			s.plane_exit_id = int(row[exit_id_col])
 		if eve_col >= 0:
 			s.eve_time = row[eve_col]
 			if t < t_min:
@@ -152,8 +170,9 @@ static func load_csv(path: String, ship_radii := {}, move_threshold_m := 0.0, ke
 	for pilot in data.tracks:
 		data.tracks[pilot].sort_custom(func(a, b): return a.t < b.t)
 	data._freeze_pods()
-	var first_move := INF if keep_lead_in else data._find_start(move_threshold_m)
-	data.start_time = first_move if first_move < INF else t_min
+	var first_move := data._find_start(move_threshold_m)
+	data.start_time = first_move if first_move < INF and not keep_lead_in else t_min
+	data.lead_in = first_move - data.start_time if first_move < INF else 0.0
 	data.first_t = t_min
 	data._end_t = t_max
 	for pilot in data.tracks:
@@ -170,6 +189,82 @@ static func load_csv(path: String, ship_radii := {}, move_threshold_m := 0.0, ke
 	data._find_events()
 	data._find_damage()
 	return data
+
+
+## The plane exit `pilot` is in at match time `t`: { turn: "cw"/"ccw", id: int } from its latest
+## sample at or before `t`, or {} when none is.
+func plane_exit_at(pilot: String, t: float) -> Dictionary:
+	var track: Array = tracks.get(pilot, [])
+	var i := track.bsearch_custom(t + start_time, func(s, v): return s.t <= v) - 1
+	if i < 0 or not track[i].has("plane_exit"):
+		return {}
+	return {"turn": track[i].plane_exit, "id": track[i].plane_exit_id}
+
+
+## Flips plane exit `exit_id` of `pilot` in the CSV at `path`: the rows of its tail are mirrored
+## through the observers' plane (positions and directions) and their turn swaps between "cw" and
+## "ccw". Distances to the observers are unchanged, so the flipped tail fits the overview just as
+## well. Every other row is kept as it was. False (with an error) if nothing could be flipped.
+static func flip_plane_exit(path: String, pilot: String, exit_id: int) -> bool:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		push_error("Cannot open %s: %s" % [path, error_string(FileAccess.get_open_error())])
+		return false
+	var header := f.get_csv_line()
+	var col := {}
+	for i in header.size():
+		col[header[i].strip_edges()] = i
+	for name in ["pilot", "x_m", "y_m", "z_m", "plane_exit", "plane_exit_id", "plane"]:
+		if not col.has(name):
+			push_error("%s: no '%s' column to flip a plane exit with" % [path, name])
+			return false
+	var rows: Array[PackedStringArray] = []
+	var flipped := 0
+	while not f.eof_reached():
+		var row := f.get_csv_line()
+		if row.size() == 1 and row[0].is_empty():
+			continue
+		if row.size() >= header.size() and row[col["pilot"]] == pilot \
+				and row[col["plane_exit_id"]] == str(exit_id) and not row[col["plane"]].is_empty():
+			_flip_row(row, col)
+			flipped += 1
+		rows.append(row)
+	f.close()
+	if flipped == 0:
+		push_error("%s: %s has no plane exit %d" % [path, pilot, exit_id])
+		return false
+	var tmp := path + ".tmp"
+	var out := FileAccess.open(tmp, FileAccess.WRITE)
+	if out == null:
+		push_error("Cannot write %s: %s" % [tmp, error_string(FileAccess.get_open_error())])
+		return false
+	out.store_csv_line(header)
+	for row in rows:
+		out.store_csv_line(row)
+	out.close()
+	var err := DirAccess.rename_absolute(tmp, path)
+	if err != OK:
+		push_error("Cannot replace %s: %s" % [path, error_string(err)])
+		DirAccess.remove_absolute(tmp)
+		return false
+	return true
+
+
+## Mirrors one CSV row through its `plane` and swaps its turn.
+static func _flip_row(row: PackedStringArray, col: Dictionary) -> void:
+	var plane := row[col["plane"]].split(" ", false)
+	var n := Vector3(float(plane[0]), float(plane[1]), float(plane[2]))
+	var d := float(plane[3])
+	var p := Vector3(float(row[col["x_m"]]), float(row[col["y_m"]]), float(row[col["z_m"]]))
+	p -= n * 2.0 * (n.dot(p) - d)
+	for k in 3:
+		row[col[["x_m", "y_m", "z_m"][k]]] = "%d" % roundi(p[k])
+	if col.has("dir_x") and not row[col["dir_x"]].is_empty():
+		var v := Vector3(float(row[col["dir_x"]]), float(row[col["dir_y"]]), float(row[col["dir_z"]]))
+		v -= n * 2.0 * n.dot(v)
+		for k in 3:
+			row[col[["dir_x", "dir_y", "dir_z"][k]]] = "%.4f" % v[k]
+	row[col["plane_exit"]] = "ccw" if row[col["plane_exit"]] == "cw" else "cw"
 
 
 ## Whether samples carry EVE times, so other EVE logs can be lined up with the match.
@@ -212,16 +307,24 @@ static func _parse_hp(row: PackedStringArray, cols: Array) -> Vector3:
 	return hp
 
 
-## CSV time of the sample before the earliest move of any ship (beyond `threshold_m` from its
-## first sample), or INF if no ship ever moves.
+## CSV time of the sample before the earliest move of any ship, or INF if no ship ever moves.
+## A move is an overview speed over `MOVE_SPEED_MPS` when the CSV's speeds ever get there, else
+## a position beyond `threshold_m` from the pilot's first sample.
 func _find_start(threshold_m: float) -> float:
+	var by_speed := false
+	for pilot in tracks:
+		if tracks[pilot].any(func(s): return s.speed > MOVE_SPEED_MPS):
+			by_speed = true
+			break
 	var start := INF
 	for pilot in tracks:
 		var track: Array = tracks[pilot]
 		for i in range(1, track.size()):
 			if track[i - 1].t >= start:
 				break
-			if track[i].pos.distance_to(track[0].pos) > threshold_m:
+			var moved: bool = track[i].speed > MOVE_SPEED_MPS if by_speed \
+				else track[i].pos.distance_to(track[0].pos) > threshold_m
+			if moved:
 				start = track[i - 1].t
 				break
 	return start

@@ -1,36 +1,43 @@
-//! Position from distances (DESIGN.md S2.1) for the three-observer cube setup: the observers sit
-//! on three distinct corners of a [`CUBE_M`]-sided cube, which three is not known up front, and
-//! every pilot starts inside the cube.
+//! Position from distances (DESIGN.md S2.1) for the three-observer cube setup: every pilot starts
+//! inside a [`CUBE_M`]-sided cube, and the observers sit on three distinct centre->corner
+//! diagonals of it, all the same distance `R` from the centre ([`observers_at`]). Which three
+//! diagonals, and `R`, are not known up front; `R` = [`CORNER_R_M`] puts them on the corners.
 //!
 //! Three spheres meet in two points mirrored through the observers' plane. The cube resolves that
-//! twice. First, [`infer_corners`] tries every ordered corner triple and keeps the one whose
-//! trilaterated starting positions are consistent (the spheres actually meet) and lie inside the
-//! cube, and whose tracks move at the speed the overview shows. Second, [`solve_track`] starts a
+//! twice. First, [`infer_observers`] tries every ordered corner triple over a range of `R` and
+//! keeps the one whose trilaterated starting positions are consistent (the spheres actually meet)
+//! and lie inside the cube, and whose tracks move at the speed the overview shows. Second, [`solve_track`] starts a
 //! pilot at the root inside the cube and from there follows a filtered, smoothed track, which
 //! keeps it on its side of the observers' plane and irons out the distances' 1 km rounding.
 
 pub type V3 = [f64; 3];
 
-/// Cube side length: the observers are on its corners.
+/// Cube side length: every pilot starts inside it, and the observers are on its centre->corner
+/// diagonals.
 pub const CUBE_M: f64 = 100_000.0;
+/// Distance from the cube's centre to its corners: observers this far out sit on the corners.
+pub const CORNER_R_M: f64 = CUBE_M / 2.0 * 1.732_050_807_568_877_2;
+/// The range of observer distances from the centre [`infer_observers`] searches.
+pub const MIN_OBSERVER_R_M: f64 = 20_000.0;
+pub const MAX_OBSERVER_R_M: f64 = 600_000.0;
 
-fn sub(a: V3, b: V3) -> V3 {
+pub(crate) fn sub(a: V3, b: V3) -> V3 {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-fn add(a: V3, b: V3) -> V3 {
+pub(crate) fn add(a: V3, b: V3) -> V3 {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
-fn scale(a: V3, k: f64) -> V3 {
+pub(crate) fn scale(a: V3, k: f64) -> V3 {
     [a[0] * k, a[1] * k, a[2] * k]
 }
 
-fn dot(a: V3, b: V3) -> f64 {
+pub(crate) fn dot(a: V3, b: V3) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn cross(a: V3, b: V3) -> V3 {
+pub(crate) fn cross(a: V3, b: V3) -> V3 {
     [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 
@@ -38,7 +45,7 @@ pub fn norm(a: V3) -> f64 {
     dot(a, a).sqrt()
 }
 
-fn dist(a: V3, b: V3) -> f64 {
+pub(crate) fn dist(a: V3, b: V3) -> f64 {
     norm(sub(a, b))
 }
 
@@ -51,6 +58,14 @@ pub fn corners() -> [V3; 8] {
             ((i >> 2) & 1) as f64 * CUBE_M,
         ]
     })
+}
+
+/// The observers on the diagonals toward corners `triple` (indices into [`corners`]), `r_m` from
+/// the cube's centre.
+pub fn observers_at(triple: [usize; 3], r_m: f64) -> [V3; 3] {
+    let c = corners();
+    let centre = [CUBE_M / 2.0; 3];
+    triple.map(|i| add(centre, scale(sub(c[i], centre), r_m / CORNER_R_M)))
 }
 
 /// How far `p` lies outside the cube (0 inside or on it).
@@ -100,11 +115,15 @@ pub struct Reading {
     pub speed_mps: Option<f64>,
 }
 
-/// The corner triple [`infer_corners`] settled on.
+/// The observer layout [`infer_observers`] settled on.
 #[derive(Clone, Copy, Debug)]
-pub struct CornerFit {
+pub struct ObserverFit {
     /// Positions of observers A, B, C (in the order of the distance triples).
     pub corners: [V3; 3],
+    /// The corners (indices into [`corners`]) whose diagonals they sit on...
+    pub triple: [usize; 3],
+    /// ...and how far from the centre ([`CORNER_R_M`] on the corners).
+    pub r_m: f64,
     /// Cost of the chosen triple: [`CornerCost::total`].
     pub score: f64,
     pub cost: CornerCost,
@@ -115,13 +134,13 @@ pub struct CornerFit {
     pub runner_up_corners: Option<[V3; 3]>,
 }
 
-/// How close (relative) the best other-shaped corner triple may score before the choice is
+/// How close (relative) the best other-shaped observer layout may score before the choice is
 /// ambiguous...
 const AMBIGUITY_RATIO: f64 = 1.5;
 /// ...or how close in absolute terms (metres of cost), which also catches a tie at 0.
 const AMBIGUITY_MARGIN_M: f64 = 500.0;
 
-impl CornerFit {
+impl ObserverFit {
     /// Whether another observer layout fits almost as well as the chosen one.
     pub fn is_ambiguous(&self) -> bool {
         self.runner_up < self.score * AMBIGUITY_RATIO || self.runner_up - self.score < AMBIGUITY_MARGIN_M
@@ -156,56 +175,122 @@ pub const START_TICKS: usize = 10;
 /// is when the start alone can't tell (every pilot far from every observer).
 pub const SPEED_ERR_WEIGHT_M: f64 = 10_000.0;
 
-/// Pick the observers' corners from the pilots' readings (each pilot's time-ordered).
-///
-/// Every ordered triple of distinct corners (8·7·6 = 336) gets a start cost: each early reading
-/// costs its trilateration residual plus how far its nearer-to-the-cube root sits outside the
-/// cube. Triples related by a cube symmetry score identically and give the same answer up to a
-/// rotation or reflection of the output frame, so only the best triple per shape goes on.
-///
-/// The start alone is ambiguous when every pilot starts far from every observer (near the
-/// centre): then every shape fits. So each shape's whole match is also solved and its speed
-/// compared with the overview's Velocity (see [`speed_error`]): a wrong shape distorts distances,
-/// so its tracks move at the wrong speed.
-pub fn infer_corners(pilots: &[Vec<Reading>]) -> CornerFit {
+/// Steps of the coarse log-spaced grid of observer distances [`infer_observers`] searches...
+const R_GRID: usize = 48;
+/// ...and golden-section steps refining the best of them.
+const R_REFINE_STEPS: usize = 16;
+
+/// Mean per-reading start cost (see [`CornerCost::start_m`]) of observers at `obs`.
+fn start_cost(obs: [V3; 3], pilots: &[Vec<Reading>]) -> f64 {
+    let n = pilots.iter().map(|p| p.len().min(START_TICKS)).sum::<usize>().max(1) as f64;
+    pilots
+        .iter()
+        .flat_map(|p| p.iter().take(START_TICKS))
+        .map(|r| {
+            let tri = trilaterate(obs, r.d);
+            let out = tri.roots.map(outside_cube_m);
+            tri.residual_m + out[0].min(out[1])
+        })
+        .sum::<f64>()
+        / n
+}
+
+/// One ordered triple of distinct corners per shape (side lengths in A/B/C order), the first in
+/// index order. Every triple of a shape is a cube symmetry of it, so all score the same and give
+/// the same answer up to a rotation or reflection of the output frame, at any `R`; always taking
+/// the first keeps the frame the same from run to run.
+fn shapes() -> Vec<[usize; 3]> {
     let c = corners();
-    let mut best: Vec<([u64; 3], [V3; 3], f64)> = Vec::new(); // best start cost per shape
-    let n_start = pilots.iter().map(|p| p.len().min(START_TICKS)).sum::<usize>().max(1) as f64;
+    let mut seen: Vec<[u64; 3]> = Vec::new();
+    let mut out = Vec::new();
     for a in 0..8 {
         for b in (0..8).filter(|&b| b != a) {
             for cc in (0..8).filter(|&x| x != a && x != b) {
-                let obs = [c[a], c[b], c[cc]];
-                let cost: f64 = pilots
-                    .iter()
-                    .flat_map(|p| p.iter().take(START_TICKS))
-                    .map(|r| {
-                        let tri = trilaterate(obs, r.d);
-                        let out = tri.roots.map(outside_cube_m);
-                        tri.residual_m + out[0].min(out[1])
-                    })
-                    .sum::<f64>()
-                    / n_start;
-                let shape = [dist(obs[0], obs[1]), dist(obs[0], obs[2]), dist(obs[1], obs[2])]
-                    .map(|s| s.round() as u64);
-                match best.iter_mut().find(|e| e.0 == shape) {
-                    Some(e) if cost < e.2 => *e = (shape, obs, cost),
-                    Some(_) => {}
-                    None => best.push((shape, obs, cost)),
+                let shape = [dist(c[a], c[b]), dist(c[a], c[cc]), dist(c[b], c[cc])].map(|s| s.round() as u64);
+                if !seen.contains(&shape) {
+                    seen.push(shape);
+                    out.push([a, b, cc]);
                 }
             }
         }
     }
-    let mut scored: Vec<([V3; 3], CornerCost)> = best
-        .into_iter()
-        .map(|(_, obs, start_m)| (obs, CornerCost { start_m, speed_err: speed_error(obs, pilots) }))
+    out
+}
+
+/// What observers on the diagonals toward `triple`, `r_m` from the centre, cost.
+fn cost_at(triple: [usize; 3], r_m: f64, pilots: &[Vec<Reading>]) -> CornerCost {
+    let obs = observers_at(triple, r_m);
+    CornerCost { start_m: start_cost(obs, pilots), speed_err: speed_error(obs, pilots) }
+}
+
+/// Pick the observers' diagonals and their distance from the centre from the pilots' readings
+/// (each pilot's time-ordered). With `fixed_r` the distance is known and only the diagonals are
+/// picked.
+///
+/// Each shape of corner triple ([`shapes`]) gets a start cost: each early reading costs its
+/// trilateration residual plus how far its nearer-to-the-cube root sits outside the cube. A wrong
+/// `R` stretches or squeezes every distance, so the spheres stop meeting and the
+/// starts leave the cube: each shape's `R` is the best of a log-spaced grid over
+/// [`MIN_OBSERVER_R_M`]..[`MAX_OBSERVER_R_M`], refined by golden-section search.
+///
+/// The start alone is ambiguous when every pilot starts far from every observer (near the
+/// centre): then every shape fits. So each candidate's whole match is also solved and its speed
+/// compared with the overview's Velocity (see [`speed_error`]): a wrong layout distorts distances,
+/// so its tracks move at the wrong speed.
+pub fn infer_observers(pilots: &[Vec<Reading>], fixed_r: Option<f64>) -> ObserverFit {
+    use rayon::prelude::*;
+    let total = |c: &CornerCost| c.total();
+    let mut scored: Vec<([usize; 3], f64, CornerCost)> = shapes()
+        .par_iter()
+        .map(|&triple| {
+            let at = |r: f64| (triple, r, cost_at(triple, r, pilots));
+            if let Some(r) = fixed_r {
+                return at(r);
+            }
+            let ratio = MAX_OBSERVER_R_M / MIN_OBSERVER_R_M;
+            let mut grid: Vec<f64> =
+                (0..R_GRID).map(|i| MIN_OBSERVER_R_M * ratio.powf(i as f64 / (R_GRID - 1) as f64)).collect();
+            grid.push(CORNER_R_M);
+            grid.sort_by(f64::total_cmp);
+            let costs: Vec<_> = grid.iter().map(|&r| at(r)).collect();
+            let k = (0..grid.len()).min_by(|&a, &b| total(&costs[a].2).total_cmp(&total(&costs[b].2))).unwrap();
+            let (mut lo, mut hi) = (grid[k.saturating_sub(1)], grid[(k + 1).min(grid.len() - 1)]);
+            let mut best = costs[k];
+            // Golden-section search between the grid neighbours of the best grid value.
+            let g = (5f64.sqrt() - 1.0) / 2.0;
+            let (mut x1, mut x2) = (hi - g * (hi - lo), lo + g * (hi - lo));
+            let (mut f1, mut f2) = (at(x1), at(x2));
+            for _ in 0..R_REFINE_STEPS {
+                if total(&f1.2) < total(&f2.2) {
+                    hi = x2;
+                    (x2, f2) = (x1, f1);
+                    x1 = hi - g * (hi - lo);
+                    f1 = at(x1);
+                } else {
+                    lo = x1;
+                    (x1, f1) = (x2, f2);
+                    x2 = lo + g * (hi - lo);
+                    f2 = at(x2);
+                }
+            }
+            for cand in [f1, f2] {
+                if total(&cand.2) < total(&best.2) {
+                    best = cand;
+                }
+            }
+            best
+        })
         .collect();
-    scored.sort_by(|x, y| x.1.total().total_cmp(&y.1.total()));
-    CornerFit {
-        corners: scored[0].0,
-        score: scored[0].1.total(),
-        cost: scored[0].1,
-        runner_up: scored.get(1).map_or(f64::INFINITY, |e| e.1.total()),
-        runner_up_corners: scored.get(1).map(|e| e.0),
+    scored.sort_by(|x, y| x.2.total().total_cmp(&y.2.total()));
+    let (triple, r_m, cost) = scored[0];
+    ObserverFit {
+        corners: observers_at(triple, r_m),
+        triple,
+        r_m,
+        score: cost.total(),
+        cost,
+        runner_up: scored.get(1).map_or(f64::INFINITY, |e| e.2.total()),
+        runner_up_corners: scored.get(1).map(|e| observers_at(e.0, e.1)),
     }
 }
 
@@ -276,6 +361,20 @@ const DISTANCE_SIGMA_M: f64 = 288.675;
 const SPEED_SIGMA_MPS: f64 = 50.0;
 /// Below this filtered speed the direction of `v` is meaningless, so speed readings are skipped.
 const SPEED_UPDATE_MIN_MPS: f64 = 1.0;
+/// An overview speed of at most this (parked ships read 0 or 1 m/s) holds the whole velocity at 0.
+/// Without it, a ship sitting through the countdown has no velocity reading at all, and smoothing
+/// slides it km along whatever direction its rounded distances can't see, toward where it later
+/// flies. Any faster reading, however slow, is a real speed and updates `|v|` as usual.
+const STILL_SPEED_MPS: f64 = 1.0;
+/// Noise of such a reading: a 0 or 1 is exact to the m/s, unlike a moving ship's speed, which
+/// [`SPEED_SIGMA_MPS`] allows to be read a little before or after its distances. As loose as
+/// that, a parked ship could keep 20 m/s under a reading of 0 and slide hundreds of metres.
+const STILL_SIGMA_MPS: f64 = 1.0;
+/// Acceleration noise between two still readings, in place of [`ACCEL_NOISE_MPS2`]: a ship that
+/// reads 0–1 m/s at both ends of a tick hasn't burned in between. Holding the velocity alone isn't
+/// enough, as the full noise still lets position wander ~90 m a tick on its own, which smoothing
+/// spends leaning a parked ship toward where it's about to fly.
+const STILL_ACCEL_MPS2: f64 = 1.0;
 /// A reading this far (any one distance) from the filter's prediction is a teleport: a micro
 /// jump, a warp, a pod. The track restarts there instead of being dragged across.
 const RESET_GATE_M: f64 = 8_000.0;
@@ -300,24 +399,32 @@ struct Step {
     x_pred: Vec6,
     p_pred: Mat6,
     f: Mat6,
+    /// This tick's overview speed said the ship was still ([`is_still`]).
+    still: bool,
+}
+
+/// The overview shows the ship standing still ([`STILL_SPEED_MPS`]).
+fn is_still(speed_mps: Option<f64>) -> bool {
+    speed_mps.is_some_and(|v| v <= STILL_SPEED_MPS)
 }
 
 impl Step {
     /// A track (re)starting at `p0` with velocity `v0`.
-    fn start(t: f64, d: [f64; 3], p0: V3, v0: V3) -> Step {
+    fn start(t: f64, d: [f64; 3], p0: V3, v0: V3, still: bool) -> Step {
         let x = Vec6::new(p0[0], p0[1], p0[2], v0[0], v0[1], v0[2]);
         let mut p = Mat6::zeros();
         for k in 0..3 {
             p[(k, k)] = START_POS_SIGMA_M.powi(2);
             p[(k + 3, k + 3)] = START_VEL_SIGMA_MPS.powi(2);
         }
-        Step { t, d, x, p, x_pred: x, p_pred: p, f: Mat6::identity() }
+        Step { t, d, x, p, x_pred: x, p_pred: p, f: Mat6::identity(), still }
     }
 
     /// Predict from `self` to `r` and fold `r` in, with the squared, noise-normalised mismatch
     /// between prediction and readings. `None` when `r` is a teleport ([`RESET_GATE_M`]).
     fn next(&self, r: &Reading, obs: [V3; 3]) -> Option<(Step, f64)> {
-        let (x_pred, p_pred, f) = predict(self, r.t);
+        let still = is_still(r.speed_mps);
+        let (x_pred, p_pred, f) = predict(self, r.t, self.still && still);
         let at = pos(&x_pred);
         let miss: Vec<f64> = obs.iter().zip(r.d).map(|(o, d)| d - dist(at, *o)).collect();
         if miss.iter().any(|m| m.abs() > RESET_GATE_M) {
@@ -327,7 +434,7 @@ impl Step {
         if let Some(v) = r.speed_mps {
             cost += ((v - norm([x_pred[3], x_pred[4], x_pred[5]])) / SPEED_SIGMA_MPS).powi(2);
         }
-        let mut step = Step { t: r.t, d: r.d, x: x_pred, p: p_pred, x_pred, p_pred, f };
+        let mut step = Step { t: r.t, d: r.d, x: x_pred, p: p_pred, x_pred, p_pred, f, still };
         step.update(obs, r.speed_mps);
         Some((step, cost))
     }
@@ -346,8 +453,20 @@ impl Step {
                 (Vec6::new(r[0] / n, r[1] / n, r[2] / n, 0.0, 0.0, 0.0), d - n, DISTANCE_SIGMA_M.powi(2))
             })
             .collect();
-        if let Some(measured) = speed_mps.filter(|_| s > SPEED_UPDATE_MIN_MPS) {
-            rows.push((Vec6::new(0.0, 0.0, 0.0, v[0] / s, v[1] / s, v[2] / s), measured - s, SPEED_SIGMA_MPS.powi(2)));
+        match speed_mps {
+            // Standing still: pin each component of `v` to 0, the only way a speed says anything
+            // about a velocity that has no direction yet.
+            _ if is_still(speed_mps) => {
+                for k in 0..3 {
+                    let mut row = Vec6::zeros();
+                    row[k + 3] = 1.0;
+                    rows.push((row, -v[k], STILL_SIGMA_MPS.powi(2)));
+                }
+            }
+            Some(measured) if s > SPEED_UPDATE_MIN_MPS => {
+                rows.push((Vec6::new(0.0, 0.0, 0.0, v[0] / s, v[1] / s, v[2] / s), measured - s, SPEED_SIGMA_MPS.powi(2)));
+            }
+            _ => {}
         }
         let m = rows.len();
         let h = DMatrix::from_fn(m, 6, |i, j| rows[i].0[j]);
@@ -371,12 +490,13 @@ fn pos(x: &Vec6) -> V3 {
     [x[0], x[1], x[2]]
 }
 
-/// Constant-velocity transition over `dt`, and its white-acceleration process noise.
-fn predict(prev: &Step, t: f64) -> (Vec6, Mat6, Mat6) {
+/// Constant-velocity transition over `dt`, and its white-acceleration process noise ([`STILL_ACCEL_MPS2`]
+/// when the ship reads still at both ends).
+fn predict(prev: &Step, t: f64, still: bool) -> (Vec6, Mat6, Mat6) {
     let dt = t - prev.t;
     let mut f = Mat6::identity();
     let mut q = Mat6::zeros();
-    let a2 = ACCEL_NOISE_MPS2.powi(2);
+    let a2 = if still { STILL_ACCEL_MPS2 } else { ACCEL_NOISE_MPS2 }.powi(2);
     for k in 0..3 {
         f[(k, k + 3)] = dt;
         q[(k, k)] = a2 * dt.powi(3) / 3.0;
@@ -457,7 +577,7 @@ const LOOKAHEAD_TICKS: usize = 10;
 
 /// A track started on reading `r` at `p0` with velocity `v0`, `r` folded in.
 fn started(r: &Reading, obs: [V3; 3], p0: V3, v0: V3) -> Step {
-    let mut step = Step::start(r.t, r.d, p0, v0);
+    let mut step = Step::start(r.t, r.d, p0, v0, is_still(r.speed_mps));
     step.update(obs, r.speed_mps);
     step
 }
@@ -552,13 +672,29 @@ mod tests {
         starts.iter().map(|&p| vec![Reading { t: 0.0, d: rounded(obs, p), speed_mps: None }]).collect()
     }
 
+    /// The shape of a fit's diagonals (side lengths of their corners, whatever its `R`).
+    fn fit_shape(fit: &ObserverFit) -> [u64; 3] {
+        shape(observers_at(fit.triple, CORNER_R_M))
+    }
+
     #[test]
-    fn infer_corners_recovers_the_shape_from_rounded_distances() {
+    fn observers_at_the_corner_distance_are_the_corners() {
+        let c = corners();
+        let obs = observers_at([0, 3, 6], CORNER_R_M);
+        for (o, i) in obs.iter().zip([0, 3, 6]) {
+            assert!(dist(*o, c[i]) < 1e-6, "{o:?}");
+        }
+        let far = observers_at([0, 1, 2], 2.0 * CORNER_R_M);
+        assert!(dist(far[0], [-50_000.0; 3]) < 1e-6, "{far:?}");
+    }
+
+    #[test]
+    fn infer_observers_recovers_the_shape_from_rounded_distances() {
         let c = corners();
         for truth in [[c[0], c[1], c[2]], [c[0], c[1], c[6]], [c[0], c[3], c[5]], [c[7], c[2], c[4]]] {
             let readings = standing(truth, &points(20));
-            let fit = infer_corners(&readings);
-            assert_eq!(shape(fit.corners), shape(truth));
+            let fit = infer_observers(&readings, None);
+            assert_eq!(fit_shape(&fit), shape(truth), "{fit:?}");
             assert!(fit.runner_up > fit.score);
             // Same solution up to a cube symmetry: every reading has a root inside the cube.
             for r in readings.iter().flatten() {
@@ -588,7 +724,7 @@ mod tests {
     fn a_central_start_alone_is_reported_ambiguous() {
         let c = corners();
         let truth = [c[5], c[0], c[7]];
-        let fit = infer_corners(&standing(truth, &central_start()));
+        let fit = infer_observers(&standing(truth, &central_start()), None);
         assert!(fit.is_ambiguous(), "{fit:?}");
     }
 
@@ -614,10 +750,48 @@ mod tests {
                         .collect()
                 })
                 .collect();
-            let fit = infer_corners(&pilots);
-            assert_eq!(shape(fit.corners), shape(truth), "{fit:?}");
+            let fit = infer_observers(&pilots, None);
+            assert_eq!(fit_shape(&fit), shape(truth), "{fit:?}");
             assert!(!fit.is_ambiguous(), "{fit:?}");
         }
+    }
+
+    /// Ships starting all over the cube and flying straight at 800 m/s for 40 s, as observers at
+    /// `obs` read them.
+    fn flying(obs: [V3; 3]) -> Vec<Vec<Reading>> {
+        let dirs = points(20).into_iter().map(|p| {
+            let v = sub(p, [CUBE_M / 2.0; 3]);
+            scale(v, 800.0 / norm(v))
+        });
+        points(20)
+            .into_iter()
+            .zip(dirs)
+            .map(|(p0, v)| {
+                (0..40)
+                    .map(|t| Reading { t: t as f64, d: rounded(obs, add(p0, scale(v, t as f64))), speed_mps: Some(800.0) })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn infer_observers_recovers_their_distance_along_the_diagonals() {
+        for r in [CORNER_R_M, 150_000.0, 235_000.0] {
+            for triple in [[0, 1, 2], [0, 1, 6]] {
+                let truth = observers_at(triple, r);
+                let fit = infer_observers(&flying(truth), None);
+                assert_eq!(fit_shape(&fit), shape(observers_at(triple, CORNER_R_M)), "R={r}: {fit:?}");
+                assert!((fit.r_m - r).abs() < 2_000.0, "R={r}: fitted {:.0}", fit.r_m);
+            }
+        }
+    }
+
+    #[test]
+    fn a_known_observer_distance_is_kept() {
+        let truth = observers_at([0, 1, 2], 235_000.0);
+        let fit = infer_observers(&flying(truth), Some(235_000.0));
+        assert_eq!(fit.r_m, 235_000.0);
+        assert_eq!(fit_shape(&fit), shape(observers_at([0, 1, 2], CORNER_R_M)));
     }
 
     /// What the overview shows for a ship flying `path` (one point per second): distances rounded
@@ -684,6 +858,52 @@ mod tests {
             / path.len() as f64)
             .sqrt();
         assert!(rms < 2_000.0, "{rms}");
+    }
+
+    /// A ship parked through a 13 s countdown (the overview reading 0 or 1 m/s), then burning
+    /// off along `dir` at up to 2 km/s.
+    fn countdown_then_burn(obs: [V3; 3], start: V3, dir: V3) -> Vec<Reading> {
+        let path: Vec<V3> = (0..60)
+            .map(|t| {
+                let s = (t as f64 - 13.0).max(0.0);
+                let along = 0.5 * 300.0 * s.min(7.0).powi(2) + 2_100.0 * (s - 7.0).max(0.0);
+                add(start, scale(dir, along))
+            })
+            .collect();
+        let mut readings = observe(obs, &path);
+        for (i, r) in readings[..13].iter_mut().enumerate() {
+            r.speed_mps = Some((i % 2) as f64); // `observe` sees the burn a tick early
+        }
+        readings
+    }
+
+    #[test]
+    fn a_ship_holding_still_through_the_countdown_does_not_move() {
+        // The observers of a real scrim, whose plane (x = z) the starts sit close to: with no
+        // speed to hold them, smoothing slid parked ships up to 22 km toward where they later flew.
+        let obs = [[100_000.0, 0.0, 100_000.0], [0.0; 3], [100_000.0; 3]];
+        let starts = [[71_000.0, 32_000.0, 65_000.0], [73_000.0, 71_000.0, 73_000.0], [66_000.0; 3], [79_000.0, 76_000.0, 78_000.0]];
+        let dirs = [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [-0.6, 0.0, 0.8], [0.0, 1.0, 0.0]];
+        for start in starts {
+            for dir in dirs {
+                let fixes = solve_track(obs, &countdown_then_burn(obs, start, dir));
+                let drift = fixes[..13].iter().map(|f| dist(f.p, fixes[0].p)).fold(0.0, f64::max);
+                assert!(drift < 10.0, "{start:?} {dir:?}: drifted {drift} m before moving");
+            }
+        }
+    }
+
+    #[test]
+    fn a_slow_ship_is_not_held_still() {
+        let c = corners();
+        let obs = [c[0], c[3], c[7]]; // their plane runs through the centre
+        // Crawls at 25 m/s for 100 s, where only the speed shows which way along the plane.
+        let path: Vec<V3> = (0..100).map(|t| [40_000.0 + 25.0 * t as f64, 30_000.0, 60_000.0]).collect();
+        let fixes = solve_track(obs, &observe(obs, &path));
+        let rms = (fixes.iter().zip(&path).map(|(f, p)| dist(f.p, *p).powi(2)).sum::<f64>()
+            / path.len() as f64)
+            .sqrt();
+        assert!(rms < 4_000.0, "{rms}");
     }
 
     #[test]

@@ -20,6 +20,7 @@ func before_each() -> void:
 	Settings._cfg = null
 	Settings.set_value("sde/auto_update", false)
 	Settings.set_value("display/ship_models", false)
+	stub_sde()
 
 
 func after_each() -> void:
@@ -27,6 +28,7 @@ func after_each() -> void:
 	Settings.path = _saved_path
 	Settings._cfg = null
 	MatchLibrary.dir = _saved_library
+	ShipSizes.dir = ""
 
 
 func _main() -> Main:
@@ -231,6 +233,18 @@ func test_audio_keeps_countdown() -> void:
 	assert_eq(m.data.start_time, 0.0, "audio starts with the data")
 	assert_eq(m.data.duration, 6.0)
 	assert_true(m.audio_player.stream is AudioStreamWAV)
+
+
+func test_broadcast_clock_counts_down_to_first_move() -> void:
+	var path := _countdown_match()
+	MatchLibrary.set_audio(path, write_wav(10.0))
+	var m := _main()
+	m.load_match(path)
+	assert_eq(m.data.lead_in, 2.0)
+	for c in [[0.0, "-00:02"], [1.5, "-00:01"], [2.0, "00:00"], [5.0, "00:03"]]:
+		m._seek(c[0])
+		m._process(0.0)
+		assert_eq(m.broadcast_panel.clock.text, c[1], "at %s" % c[0])
 
 
 func test_audio_follows_playback() -> void:
@@ -493,6 +507,29 @@ func test_seek_clamps() -> void:
 	assert_eq(m.timeline.value, 7.5)
 
 
+func test_shift_arrows_skip_ten_seconds() -> void:
+	var m := _main()
+	m.load_match(_match_csv())
+	var key := func(code):
+		var ev := InputEventKey.new()
+		ev.keycode = code
+		ev.shift_pressed = true
+		ev.pressed = true
+		m._input(ev)
+	m._seek(2.5)
+	m._set_playing(true)
+	key.call(KEY_RIGHT)
+	assert_almost(m.time, 12.5)
+	assert_true(m.playing, "skipping keeps playback going")
+	key.call(KEY_RIGHT)
+	assert_eq(m.time, 20.0, "clamped to the end")
+	key.call(KEY_LEFT)
+	assert_almost(m.time, 10.0)
+	key.call(KEY_LEFT)
+	key.call(KEY_LEFT)
+	assert_eq(m.time, 0.0, "clamped to the start")
+
+
 func test_step_tick_pauses_and_snaps_to_whole_ticks() -> void:
 	var m := _main()
 	m.load_match(_match_csv())
@@ -610,7 +647,7 @@ func test_events_on_timeline() -> void:
 	assert_eq(marks[0].t, 3.0)
 	assert_eq(marks[0].color, Main.EVENT_COLORS[MatchData.Event.MJD])
 	assert_eq(marks[0].text, "00:03 hopper — MJD 100 km (Test Hull)")
-	assert_eq(marks[1].text, "00:06 hopper — Podded (Test Hull)")
+	assert_eq(marks[1].text, "00:06 hopper — Died (Test Hull)")
 	m.load_match(_match_csv())
 	assert_eq(m.event_strip.marks.size(), 1, "reload replaces marks (runner leaves the arena)")
 
@@ -673,7 +710,7 @@ func test_info_shows_podding() -> void:
 	m._select("hopper")
 	m._seek(7.0)
 	m._update_info()
-	assert_true("Podded at 00:06 (lost Test Hull)" in m.info_label.text)
+	assert_true("Died at 00:06 (lost Test Hull)" in m.info_label.text)
 
 
 func test_short_name() -> void:
@@ -1081,6 +1118,19 @@ func test_season_teams_off_keeps_match_teams() -> void:
 	assert_true(m.team_sides.is_empty())
 
 
+func test_internal_match_keeps_match_teams() -> void:
+	_season_match(0, 7)
+	var flipped := _season_match(7, 0)
+	MatchLibrary.set_internal(flipped, true)
+	var m := _main()
+	m.load_match(flipped)
+	assert_eq(_roster(m), ["Blue (1)", "red", "Red (1)", "blue", "Unknown (1)", "late"])
+	assert_true(m.team_sides.is_empty())
+	m._swap_team("late")
+	assert_true(MatchLibrary.is_internal(flipped), "saving a swap keeps the flag")
+	assert_false(TeamDb.read("Season 1").manual.has("late"), "a swap doesn't touch the season")
+
+
 func test_ship_overlay_default_name_and_type() -> void:
 	var m := _main()
 	m.load_match(_match_csv())
@@ -1161,6 +1211,34 @@ func test_ship_menu_rename_pilot() -> void:
 	m.rename_dialog.confirmed.emit()
 	assert_eq(m.roster_table.cell_text("blue", "pilot"), "Blue Leader")
 	assert_eq(m.ship_debug_menu.title_label.text, "Blue Leader")
+
+
+func test_ship_menu_flips_plane_exit_and_saves_it() -> void:
+	# "blue" sits in the plane y = z until 2 s, then exit 1 takes it toward y > z (clockwise).
+	var plane := "0.000000 -0.707107 0.707107 0"
+	var path := write_csv([
+		"0,blue,Test Hull,50000,50000,50000,0,1,0,0,0,,,",
+		"2,blue,Test Hull,50000,50000,50000,0,1,0,0,0,,,",
+		"4,blue,Test Hull,50000,60000,40000,0,0,0.7071,-0.7071,0,cw,1," + plane,
+		"6,blue,Test Hull,50000,70000,30000,0,0,0.7071,-0.7071,0,cw,1," + plane,
+	], DEFAULT_HEADER + ",plane_exit,plane_exit_id,plane")
+	var m := _main()
+	m.load_match(path)
+	var at := func(csv_t: float) -> float: return csv_t - m.data.start_time
+	m._seek(at.call(2.0))
+	m._open_ship_debug_menu("blue", Vector2(10, 10))
+	assert_false(m.ship_debug_menu.flip_button.visible, "not in an exit yet")
+	m._seek(at.call(6.0))
+	m._open_ship_debug_menu("blue", Vector2(10, 10))
+	assert_true(m.ship_debug_menu.flip_button.visible)
+	assert_eq(m.ship_debug_menu.flip_button.text, "Flip plane exit (clockwise → counterclockwise)")
+	m.ship_debug_menu.flip_button.pressed.emit()
+	assert_eq(m.time, at.call(6.0), "playback state kept")
+	assert_eq(m.data.sample("blue", at.call(6.0)).pos, Vector3(50000, 30000, 70000))
+	assert_eq(m.data.plane_exit_at("blue", at.call(6.0)).turn, "ccw")
+	assert_true(FileAccess.get_file_as_string(path).contains("50000,30000,70000"), "saved to the CSV")
+	m._select("blue")
+	assert_true(m.info_label.text.contains("Plane exit 1: counterclockwise"), m.info_label.text)
 
 
 func test_ship_menu_damage_breakdown_windows() -> void:
@@ -1280,6 +1358,30 @@ func test_pick_ignores_hidden_and_behind_camera() -> void:
 	assert_true(m.camera.is_position_behind(blue))
 	assert_ne(m._pick_ship(_screen(m, "blue")), "blue", "behind the camera")
 	assert_ne(m._pick_ship(m.get_viewport().get_visible_rect().size / 2.0), "blue")
+
+
+func test_hotkeys_button_toggles_list() -> void:
+	var m := _select_main()
+	assert_false(m.hotkeys_panel.visible)
+	m.hotkeys_button.button_pressed = true
+	assert_true(m.hotkeys_panel.visible)
+	assert_eq(m.hotkeys_panel.grid.get_child_count(), HotkeysPanel.HOTKEYS.size() * 2)
+	_click(m, _screen(m, "blue"))
+	assert_true(m.info_panel.visible, "ship details still shown")
+	assert_eq(m.info_panel.get_parent(), m.hotkeys_panel.get_parent())
+	assert_true(m.info_panel.get_index() > m.hotkeys_panel.get_index(), "details stack below the list")
+	m.hotkeys_button.button_pressed = false
+	assert_false(m.hotkeys_panel.visible)
+
+
+func test_menu_hotkeys_button_toggles_list() -> void:
+	var m := _main()
+	assert_false(m.menu.hotkeys_panel.visible)
+	m.menu.hotkeys_button.button_pressed = true
+	assert_true(m.menu.hotkeys_panel.visible)
+	assert_eq(m.menu.hotkeys_panel.grid.get_child_count(), HotkeysPanel.HOTKEYS.size() * 2)
+	m.menu.hotkeys_button.button_pressed = false
+	assert_false(m.menu.hotkeys_panel.visible)
 
 
 func test_click_selects_and_shows_info() -> void:

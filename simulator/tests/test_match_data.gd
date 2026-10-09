@@ -97,6 +97,7 @@ func test_load_skips_countdown_before_first_move() -> void:
 		row(8, "A", "Rifter", C + X * 3000),
 	])
 	assert_eq(d.start_time, 5.0, "match starts at the sample before the first move")
+	assert_eq(d.lead_in, 0.0, "no countdown left")
 	assert_eq(d.duration, 3.0)
 	assert_eq(d.sample("A", 0.0).pos, C)
 	assert_eq(d.sample("A", 1.0).pos, C + X * 1000)
@@ -110,6 +111,7 @@ func test_load_keep_lead_in_starts_at_first_sample() -> void:
 		row(8, "A", "Rifter", C + X * 3000),
 	]), {}, 0.0, true)
 	assert_eq(d.start_time, 2.0, "countdown kept")
+	assert_eq(d.lead_in, 3.0, "first move 3 s in")
 	assert_eq(d.duration, 6.0)
 	assert_eq(d.sample("A", 4.0).pos, C + X * 1000)
 
@@ -123,6 +125,33 @@ func test_load_ignores_jitter_under_threshold_when_finding_start() -> void:
 	]
 	assert_eq(_load(rows, {}, 500.0).start_time, 2.0)
 	assert_eq(_load(rows).start_time, 0.0, "without a threshold any movement starts the match")
+
+
+## `row` with the overview speed filled in.
+static func moving(t: float, pilot: String, pos: Vector3, speed: float) -> Array:
+	var r := row(t, pilot, "Rifter", pos)
+	r[6] = speed
+	return r
+
+
+func test_load_finds_start_by_overview_speed() -> void:
+	var d := _load([
+		moving(0, "A", C, 0),
+		moving(1, "A", C + X * 3000, 1), # the solved position wanders; the ship sits still
+		moving(2, "A", C + X * 5000, 0),
+		moving(3, "A", C + X * 5000, 150),
+		moving(4, "A", C + X * 6000, 600),
+	], {}, 500.0)
+	assert_eq(d.start_time, 2.0, "the sample before the first speed over MOVE_SPEED_MPS")
+
+
+func test_load_without_moving_speeds_finds_start_by_position() -> void:
+	var d := _load([
+		moving(0, "A", C, 0),
+		moving(1, "A", C, 5),
+		moving(2, "A", C + X * 1000, 5),
+	])
+	assert_eq(d.start_time, 1.0, "speeds never over MOVE_SPEED_MPS say nothing")
 
 
 func test_load_starts_at_earliest_mover() -> void:
@@ -635,3 +664,74 @@ func test_damage_not_compared_across_long_blank() -> void:
 	rows.append(_hp_row(5, Vector3(0.5, 1, 1)))
 	var d := MatchData.load_csv(write_csv(rows, HP_HEADER), {}, 0.0, true)
 	assert_false(d.damage_times.has("A"), "older than the window")
+
+
+# --- plane exits ---------------------------------------------------------------
+
+const EXIT_HEADER := DEFAULT_HEADER + ",plane_exit,plane_exit_id,plane"
+## The plane y = z (unit normal (0, -1, 1)/√2 through the origin), as scrim-positions writes it.
+const EXIT_PLANE := "0.000000 -0.707107 0.707107 0"
+
+
+## Pilot "A" in the plane, then exit 1 (cw, toward y > z), then exit 2 (ccw); pilot "B" with an
+## exit 1 of its own.
+func _exit_csv() -> String:
+	return write_csv([
+		"0,A,Rifter,10000,10000,10000,0,1,0,0,0,,,",
+		"1,A,Rifter,20000,24000,16000,0,0.5000,0.7071,-0.5000,0,cw,1," + EXIT_PLANE,
+		"2,A,Rifter,30000,31000,29000,0,1,0,0,0,cw,1," + EXIT_PLANE,
+		"3,A,Rifter,40000,38000,44000,0,1,0,0,0,ccw,2," + EXIT_PLANE,
+		"0,B,\"Merlin, Navy\",50000,60000,40000,0,1,0,0,0,cw,1," + EXIT_PLANE,
+	], EXIT_HEADER)
+
+
+func test_load_reads_plane_exits() -> void:
+	var d := MatchData.load_csv(_exit_csv(), {}, 0.0, true)
+	assert_false(d.tracks["A"][0].has("plane_exit"), "blank before the first exit")
+	assert_eq(d.tracks["A"][1].plane_exit, "cw")
+	assert_eq(d.tracks["A"][3].plane_exit_id, 2)
+	assert_eq(d.plane_exit_at("A", 0.5), {})
+	assert_eq(d.plane_exit_at("A", 1.5), {"turn": "cw", "id": 1})
+	assert_eq(d.plane_exit_at("A", 3.0), {"turn": "ccw", "id": 2})
+	assert_eq(d.plane_exit_at("B", 0.0), {"turn": "cw", "id": 1})
+
+
+func test_load_without_plane_exit_columns() -> void:
+	var d := _load([row(0, "A", "Rifter", C)])
+	assert_eq(d.plane_exit_at("A", 0.0), {})
+
+
+func test_flip_plane_exit_mirrors_only_that_exit() -> void:
+	var path := _exit_csv()
+	assert_true(MatchData.flip_plane_exit(path, "A", 1))
+	var d := MatchData.load_csv(path, {}, 0.0, true)
+	var a: Array = d.tracks["A"]
+	assert_eq(a[0].pos, Vector3(10000, 10000, 10000), "before the exit")
+	assert_eq(a[1].pos, Vector3(20000, 16000, 24000), "y and z swap through y = z")
+	assert_eq(a[2].pos, Vector3(30000, 29000, 31000))
+	assert_eq(a[1].plane_exit, "ccw")
+	assert_eq(a[2].plane_exit, "ccw")
+	assert_eq(a[3].pos, Vector3(40000, 38000, 44000), "the next exit is its own")
+	assert_eq(a[3].plane_exit, "ccw")
+	assert_eq(d.tracks["B"][0].pos, Vector3(50000, 60000, 40000), "other pilots untouched")
+	assert_eq(d.tracks["B"][0].ship_type, "Merlin, Navy", "quoted fields survive")
+	var text := FileAccess.get_file_as_string(path)
+	assert_true(text.contains("0.5000,-0.5000,0.7071"), "direction mirrored too: " + text)
+
+
+func test_flip_plane_exit_twice_restores_the_track() -> void:
+	var path := _exit_csv()
+	assert_true(MatchData.flip_plane_exit(path, "A", 1))
+	assert_true(MatchData.flip_plane_exit(path, "A", 1))
+	var d := MatchData.load_csv(path, {}, 0.0, true)
+	assert_eq(d.tracks["A"][1].pos, Vector3(20000, 24000, 16000))
+	assert_eq(d.tracks["A"][1].plane_exit, "cw")
+	assert_eq(d.tracks["A"][2].pos, Vector3(30000, 31000, 29000))
+
+
+func test_flip_plane_exit_without_that_exit_fails() -> void:
+	var path := _exit_csv()
+	var before := FileAccess.get_file_as_string(path)
+	assert_false(MatchData.flip_plane_exit(path, "A", 7))
+	assert_false(MatchData.flip_plane_exit(write_csv([row(0, "A", "Rifter", C)]), "A", 1))
+	assert_eq(FileAccess.get_file_as_string(path), before, "file left alone")

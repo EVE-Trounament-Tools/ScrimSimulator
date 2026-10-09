@@ -10,6 +10,8 @@ const CUBE := 100.0
 const SPEEDS := [0.5, 1.0, 2.0, 5.0, 10.0, 30.0]
 ## The server tick: samples are 1 s apart, so ←/→ step one sample.
 const TICK_S := 1.0
+## Shift+←/→ seeks this far without pausing.
+const SKIP_S := 10.0
 ## Ships are drawn at their real hull radius, but never smaller than this angle (radians) as
 ## seen from the camera, so frigates stay visible from across the arena.
 const MIN_VISIBLE_ANGLE := 0.005
@@ -68,7 +70,7 @@ const EVENT_COLORS := {
 	MatchData.Event.MJD: MJD_COLOR,
 }
 const EVENT_NAMES := {
-	MatchData.Event.DEATH: "Podded",
+	MatchData.Event.DEATH: "Died",
 	MatchData.Event.BOUNDARY: "Out of bounds",
 	MatchData.Event.MJD: "MJD",
 }
@@ -118,6 +120,9 @@ var team_names := {}
 ## "" for none); `team_sides` is empty when season teams are off or the match isn't in the library.
 var team_db := {}
 var team_sides := {}
+## Whether the open library match is internal (`MatchLibrary.is_internal`): its sides come only
+## from start positions, never from `team_db`.
+var match_internal := false
 ## Gamelog file name -> pilot it belongs to, where the listener's name doesn't pick the right one
 ## (see `CombatLog.sync`); saved like `team_overrides`.
 var log_pilots := {}
@@ -214,6 +219,9 @@ var damage_setting: CheckBox
 var damage_on := false
 var info_panel: PanelContainer
 var info_label: Label
+## Toggles `hotkeys_panel`, shown top left above `info_panel`.
+var hotkeys_button: Button
+var hotkeys_panel: HotkeysPanel
 var select_texture: Texture2D
 ## Debug menus: one ship's (for `debug_pilot`) and every ship's.
 var ship_debug_menu: DebugMenu
@@ -337,7 +345,8 @@ func load_match(path: String) -> bool:
 		start_button.visible = true
 	team_db = {}
 	team_sides = {}
-	if Settings.get_value("teams/season_db") and MatchLibrary.contains(path):
+	match_internal = MatchLibrary.contains(path) and MatchLibrary.is_internal(path)
+	if Settings.get_value("teams/season_db") and MatchLibrary.contains(path) and not match_internal:
 		team_db = TeamDb.read(TeamDb.season_of(path))
 		team_sides = TeamDb.apply(team_db, data)
 	for pilot in team_overrides:
@@ -399,6 +408,7 @@ func _on_menu_match_renamed(old_path: String, new_path: String) -> void:
 
 
 ## A library match's audio changed: the open one reloads, as its start (time 0) moves with it.
+## Also when a match is marked internal or not: the open one reloads its teams.
 func _on_menu_audio_changed(path: String) -> void:
 	if path != match_path or data == null:
 		return
@@ -449,6 +459,8 @@ func _save_meta() -> void:
 		var meta := {"teams": team_overrides, "team_names": team_names, "ruleset": ruleset_id}
 		if not log_pilots.is_empty():
 			meta.log_pilots = log_pilots
+		if match_internal:
+			meta.internal = true
 		MatchLibrary.save_meta(match_path, meta)
 
 
@@ -488,6 +500,11 @@ func _update_file_label() -> void:
 
 ## New SDE data: reload the match so sizes and boundary deaths use it, keeping playback state.
 func _on_sizes_changed() -> void:
+	_reload_match()
+
+
+## Reloads the open match from its CSV, keeping playback state.
+func _reload_match() -> void:
 	if data == null:
 		return
 	var t := time
@@ -655,9 +672,15 @@ func _input(event: InputEvent) -> void:
 			if not event.echo:
 				_toggle_play()
 		KEY_LEFT:
-			_step_tick(-1)
+			if event.shift_pressed:
+				_seek(time - SKIP_S)
+			else:
+				_step_tick(-1)
 		KEY_RIGHT:
-			_step_tick(1)
+			if event.shift_pressed:
+				_seek(time + SKIP_S)
+			else:
+				_step_tick(1)
 		KEY_BRACKETLEFT:
 			_jump_event(-1)
 		KEY_BRACKETRIGHT:
@@ -830,7 +853,7 @@ func _build_events() -> void:
 			mjd_trails.append({"t": e.t, "node": _mjd_trail(e)})
 
 
-## "03:42 Pilot — Podded (Venture)", with the pilot shown as `pilot_name`.
+## "03:42 Pilot — Died (Venture)", with the pilot shown as `pilot_name`.
 static func _event_text(e: Dictionary, pilot_name: String) -> String:
 	var what: String = EVENT_NAMES[e.kind]
 	if e.kind == MatchData.Event.MJD:
@@ -1217,10 +1240,13 @@ func _update_info() -> void:
 			lines.append("Speed: %s" % _fmt_speed(motion.speed))
 		var d: float = motion.dist_km
 		lines.append("From centre: %.1f km (boundary %.1f km)" % [d, BOUNDARY_KM - d])
+		var exit := data.plane_exit_at(selected, time)
+		if not exit.is_empty():
+			lines.append("Plane exit %d: %s" % [exit.id, DebugMenu.turn_name(exit.turn)])
 	var ship: Dictionary = ships[selected]
 	for e in data.events:
 		if e.pilot == selected and e.kind == MatchData.Event.DEATH and time >= e.t:
-			lines.append("Podded at %s (lost %s)" % [_fmt_time(e.t), e.ship_type])
+			lines.append("Died at %s (lost %s)" % [_fmt_time(e.t), e.ship_type])
 	if time >= ship.death_t:
 		lines.append("DEAD (out of bounds at %s)" % _fmt_time(ship.death_t))
 	lines.append("Following" if tracked == selected else "Double-click to follow")
@@ -1497,7 +1523,8 @@ func _open_ship_debug_menu(pilot: String, at: Vector2) -> void:
 
 func _refresh_ship_debug_menu() -> void:
 	var state := _debug(debug_pilot)
-	ship_debug_menu.show_state(_pilot_name(debug_pilot), state.vector, state.spheres, combat_stats.has("dmg_in"))
+	ship_debug_menu.show_state(_pilot_name(debug_pilot), state.vector, state.spheres,
+			combat_stats.has("dmg_in"), data.plane_exit_at(debug_pilot, time))
 
 
 func _open_all_debug_menu() -> void:
@@ -1525,6 +1552,7 @@ func _build_debug_menus(layer: CanvasLayer) -> void:
 	ship_debug_menu.rename_requested.connect(func(): _ask_rename_pilot(debug_pilot))
 	ship_debug_menu.damage_breakdown_requested.connect(func():
 		_open_damage_breakdown(layer, debug_pilot, ship_debug_menu.position))
+	ship_debug_menu.plane_exit_flip_requested.connect(func(id): _flip_plane_exit(debug_pilot, id))
 
 	all_debug_menu = DebugMenu.new(true)
 	all_debug_menu.seconds_spin.set_value_no_signal(vector_seconds)
@@ -1540,6 +1568,17 @@ func _build_debug_menus(layer: CanvasLayer) -> void:
 	all_debug_menu.beacon_range_toggled.connect(_set_beacon_range)
 	all_debug_menu.link_toggled.connect(_set_link)
 	all_debug_menu.link_color_changed.connect(_set_link_color)
+
+
+## Mirrors `pilot`'s plane exit `id` to the other side of the observers' plane in the open
+## match's CSV (the library copy, or the file opened with `--csv`) and reloads it.
+func _flip_plane_exit(pilot: String, id: int) -> void:
+	if not MatchData.flip_plane_exit(match_path, pilot, id):
+		file_label.text = "Couldn't flip the plane exit in %s" % match_path.get_file()
+		return
+	_reload_match()
+	if OS.has_feature("web"):
+		WebLibrary.local_changed()
 
 
 ## Opens a new damage breakdown window for `pilot` with its top-left corner near `at` (kept on
@@ -1627,6 +1666,12 @@ func _set_speed(s: float) -> void:
 static func _fmt_time(t: float) -> String:
 	var s := int(t)
 	return "%02d:%02d" % [s / 60, s % 60]
+
+
+## Broadcast clock: like `_fmt_time`, but counts down to the match start (`t` < 0) as "-mm:ss",
+## rounding up so it reaches "00:00" as the first ship moves.
+static func _fmt_clock(t: float) -> String:
+	return "-" + _fmt_time(ceilf(-t)) if t < 0.0 else _fmt_time(t)
 
 
 ## Speed (m/s) for display: whole m/s below 1 km/s, else km/s to 1 decimal. Rounds first so
@@ -1857,6 +1902,13 @@ func _build_ui() -> void:
 	debug_button.pressed.connect(_open_all_debug_menu)
 	row.add_child(debug_button)
 
+	hotkeys_button = Button.new()
+	hotkeys_button.text = "Hotkeys…"
+	hotkeys_button.toggle_mode = true
+	hotkeys_button.tooltip_text = "Show every hotkey and mouse control (top left)"
+	hotkeys_button.toggled.connect(func(on): hotkeys_panel.visible = on)
+	row.add_child(hotkeys_button)
+
 	broadcast_button = Button.new()
 	broadcast_button.text = "Broadcast"
 	broadcast_button.toggle_mode = true
@@ -1941,11 +1993,18 @@ func _build_ui() -> void:
 	assets_dialog.confirmed.connect(assets.full_download)
 	layer.add_child(assets_dialog)
 
+	# Hotkeys list and the selected ship's details, stacked top left.
+	var top_left := VBoxContainer.new()
+	top_left.position = Vector2(12, 12)
+	top_left.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	top_left.add_theme_constant_override("separation", 8)
+	layer.add_child(top_left)
+	hotkeys_panel = HotkeysPanel.new()
+	top_left.add_child(hotkeys_panel)
 	info_panel = PanelContainer.new()
-	info_panel.position = Vector2(12, 12)
 	info_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	info_panel.visible = false
-	layer.add_child(info_panel)
+	top_left.add_child(info_panel)
 	info_label = Label.new()
 	info_panel.add_child(info_label)
 
@@ -1968,6 +2027,7 @@ func _build_ui() -> void:
 	menu.resumed.connect(func(): menu.visible = false)
 	menu.match_renamed.connect(_on_menu_match_renamed)
 	menu.audio_changed.connect(_on_menu_audio_changed)
+	menu.internal_changed.connect(_on_menu_audio_changed)
 	menu.logs_changed.connect(_on_menu_logs_changed)
 	menu_layer.add_child(menu)
 
@@ -2063,6 +2123,7 @@ func _build_settings(layer: CanvasLayer) -> void:
 	jitter_setting = CheckBox.new()
 	jitter_setting.text = "Ignore position jitter when finding the match start: movement under"
 	jitter_setting.button_pressed = Settings.get_value("match/ignore_jitter")
+	jitter_setting.tooltip_text = "Only for CSVs without overview speeds; with them, the first ship over %d m/s starts the match." % MatchData.MOVE_SPEED_MPS
 	jitter.add_child(jitter_setting)
 	jitter_spin = SpinBox.new()
 	jitter_spin.min_value = 0.0
@@ -2327,7 +2388,7 @@ func _update_roster_cells() -> void:
 		roster_table.set_row_damaged(pilot, hit)
 		if broadcast_panel.rows.has(pilot):
 			_update_broadcast_row(pilot, dead, hp, hit)
-	broadcast_panel.set_clock(_fmt_time(time))
+	broadcast_panel.set_clock(_fmt_clock(time - data.lead_in))
 	for side in [BroadcastRoster.Side.LEFT, BroadcastRoster.Side.RIGHT]:
 		var team := MatchData.Team.RED if side == BroadcastRoster.Side.LEFT else MatchData.Team.BLUE
 		broadcast_panel.set_points(side, "%d" % score.score(team, time) if score != null else "0")

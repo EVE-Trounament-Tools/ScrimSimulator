@@ -24,8 +24,10 @@
 //! # Ok(()) }
 //! ```
 
+pub mod gamelog;
 pub mod layout;
 pub mod panel;
+pub mod plane_exit;
 pub mod row;
 pub mod ship_types;
 pub mod solve;

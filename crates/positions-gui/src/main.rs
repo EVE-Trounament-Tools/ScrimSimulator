@@ -2,7 +2,8 @@
 //! chat log, the output folder, optionally the gamelogs of the pilots in the match, and whether
 //! to save the audio. Gamelogs with combat during the chat log's session are found in the Gamelogs
 //! folder and added on their own whenever the chat log or folder changes. The choices are
-//! remembered between sessions (eframe's app storage). The tool runs as a child process found
+//! remembered between sessions (eframe's app storage), except that the video starts at the newest
+//! recording in the remembered video's folder. The tool runs as a child process found
 //! next to this executable (or on `PATH`), and its output is shown as it runs. A thumbnail of the
 //! video with the scene's rectangles drawn on it shows whether the scene matches the recording.
 
@@ -171,6 +172,23 @@ fn search(chat: &Path, dir: &Path) -> Found {
     Ok((logs, start, end))
 }
 
+/// Extensions of the recordings the video picker shows.
+const VIDEO_EXTS: [&str; 6] = ["mkv", "mp4", "mov", "webm", "flv", "avi"];
+
+/// The most recently modified video in `dir`, if any.
+fn newest_video(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| {
+            let ext = e.path().extension().map(|x| x.to_string_lossy().to_lowercase());
+            ext.is_some_and(|x| VIDEO_EXTS.contains(&x.as_str())) && e.file_type().is_ok_and(|t| t.is_file())
+        })
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .max()
+        .map(|(_, p)| p)
+}
+
 /// `scene.json` next to this executable (as in the release zip), else the source tree's.
 fn default_scene() -> Option<PathBuf> {
     let beside = std::env::current_exe().ok()?.parent()?.join("scene.json");
@@ -296,10 +314,14 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext) -> Self {
-        let settings = cc
+        let mut settings: Settings = cc
             .storage
             .and_then(|s| eframe::get_value(s, SETTINGS_KEY))
             .unwrap_or_default();
+        // A new recording lands next to the last one, so start at the newest.
+        if let Some(newest) = Path::new(settings.video.trim()).parent().and_then(newest_video) {
+            settings.video = path_string(newest);
+        }
         Self {
             settings,
             run: None,
@@ -568,9 +590,9 @@ fn combat_logs_ui(ui: &mut egui::Ui, app: &mut App) {
             ui.spinner();
             ui.weak("searching the Gamelogs folder…");
         } else if !app.scan_status.is_empty() {
-            ui.weak(&app.scan_status);
+            ui.add(egui::Label::new(egui::RichText::new(&app.scan_status).weak()).truncate());
         } else {
-            ui.weak("optional: each pilot's gamelog; ones with no combat in the match are skipped");
+            ui.add(egui::Label::new(egui::RichText::new("optional: each pilot's gamelog; ones with no combat in the match are skipped").weak()).truncate());
         }
     });
     let mut remove = None;
@@ -581,7 +603,7 @@ fn combat_logs_ui(ui: &mut egui::Ui, app: &mut App) {
                     remove = Some(i);
                 }
                 let label = labels.entry(path.clone()).or_insert_with(|| gamelog_label(path));
-                ui.label(label.as_str()).on_hover_text(path);
+                ui.add(egui::Label::new(label.as_str()).truncate()).on_hover_text(path);
             });
         }
     });
@@ -662,16 +684,26 @@ impl eframe::App for App {
         let running = self.run.is_some();
 
         egui::TopBottomPanel::top("settings").show(ctx, |ui| {
-            egui::SidePanel::right("thumbnail").resizable(true).default_width(320.0).show_inside(ui, |ui| {
-                ui.add_space(6.0);
-                thumbnail_ui(ui, self);
-            });
+            let max_thumb = (ui.available_width() * 0.6).max(160.0);
+            egui::SidePanel::right("thumbnail")
+                .resizable(true)
+                .default_width(320.0)
+                .width_range(160.0..=max_thumb)
+                .show_inside(ui, |ui| {
+                    ui.add_space(6.0);
+                    thumbnail_ui(ui, self);
+                });
+            // The panel only narrows the cursor: clip the settings to what is left of it, so rows
+            // too wide for it don't paint over the thumbnail.
+            let mut clip = ui.clip_rect();
+            clip.max.x = ui.available_rect_before_wrap().max.x;
+            ui.shrink_clip_rect(clip);
             ui.add_space(6.0);
             ui.add_enabled_ui(!running, |ui| {
                 let s = &mut self.settings;
                 egui::Grid::new("paths").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
                     path_row(ui, "Video", &mut s.video, "recorded match (.mkv, .mp4, …)", |d| {
-                        d.add_filter("Video", &["mkv", "mp4", "mov", "webm", "flv", "avi"])
+                        d.add_filter("Video", &VIDEO_EXTS)
                             .add_filter("All files", &["*"])
                             .pick_file()
                     });
@@ -690,7 +722,7 @@ impl eframe::App for App {
                         ui.add_sized([160.0, ui.spacing().interact_size.y], field);
                         if !s.out_dir.trim().is_empty() && !s.run_name.trim().is_empty() {
                             let full = Path::new(s.out_dir.trim()).join(s.run_name.trim());
-                            ui.weak(full.display().to_string());
+                            ui.add(egui::Label::new(egui::RichText::new(full.display().to_string()).weak()).truncate());
                         }
                     });
                     ui.end_row();
@@ -846,6 +878,21 @@ mod tests {
         }
         let found = find_gamelogs(&dir, t("2026.09.26 13:00:00"), t("2026.09.26 14:00:00")).unwrap();
         assert_eq!(found, [path_string(dir.join("20260926_120000_1.txt"))]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn picks_newest_video() {
+        let dir = std::env::temp_dir().join(format!("positions-gui-videos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(newest_video(&dir), None);
+        let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        for (name, secs) in [("a.mkv", 0), ("b.MP4", 10), ("c.mkv", 5), ("notes.txt", 20)] {
+            let f = std::fs::File::create(dir.join(name)).unwrap();
+            f.set_modified(base + std::time::Duration::from_secs(secs)).unwrap();
+        }
+        assert_eq!(newest_video(&dir), Some(dir.join("b.MP4")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
