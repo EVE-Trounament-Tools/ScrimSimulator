@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import sys
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BRIDGE = os.path.join(HERE, "scrim_trimmer_bridge.py")
@@ -21,7 +21,7 @@ RES = os.path.join(HERE, "..", "third_party", "ScrimTrimmer", "src", "tests", "r
 CHAT_REGION = ["0", str(312 / 800), str(192 / 1280), str(738 / 800)]
 
 sys.path.insert(0, HERE)
-from scrim_trimmer_bridge import t0_datetime  # noqa: E402
+from scrim_trimmer_bridge import spans_overlap, t0_datetime  # noqa: E402
 
 HAVE_DEPS = (
     os.path.isdir(RES)
@@ -34,7 +34,9 @@ HAVE_DEPS = (
 def run_bridge(case: int, *extra: str) -> dict:
     out = subprocess.run(
         [sys.executable, BRIDGE, os.path.join(RES, f"case{case}.mkv"),
-         "--chat-log", os.path.join(RES, f"case{case}.txt"), *extra],
+         "--chat-log", os.path.join(RES, f"case{case}.txt"),
+         # The cases' file times are when they were checked out, not recorded.
+         "--no-date-check", *extra],
         check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
     )
     return json.loads(out.stdout)
@@ -55,6 +57,30 @@ class T0Date(unittest.TestCase):
     def test_log_starts_before_midnight_recording_after(self):
         self.assertEqual(t0_datetime(10, self.utc(2026, 4, 4, 23, 59, 30)),
                          self.utc(2026, 4, 5, 0, 0, 10))
+
+
+class SpansOverlap(unittest.TestCase):
+    def span(self, day, h0, h1):
+        return (datetime(2026, 4, day, h0, tzinfo=timezone.utc), datetime(2026, 4, day, h1, tzinfo=timezone.utc))
+
+    def test_overlapping(self):
+        self.assertTrue(spans_overlap(self.span(4, 12, 15), self.span(4, 14, 16)))
+
+    def test_inside(self):
+        self.assertTrue(spans_overlap(self.span(4, 12, 18), self.span(4, 14, 16)))
+
+    def test_within_slack(self):
+        # Recording remuxed half an hour after the log ended.
+        log = self.span(4, 12, 14)
+        video = (log[1] + timedelta(minutes=30), log[1] + timedelta(hours=2))
+        self.assertTrue(spans_overlap(log, video))
+
+    def test_past_slack(self):
+        self.assertFalse(spans_overlap(self.span(4, 12, 14), self.span(4, 16, 18)))
+
+    def test_another_day(self):
+        self.assertFalse(spans_overlap(self.span(4, 12, 15), self.span(8, 12, 15)))
+        self.assertFalse(spans_overlap(self.span(8, 12, 15), self.span(4, 12, 15)))
 
 
 @unittest.skipUnless(HAVE_DEPS, "needs the ScrimTrimmer submodule, tesseract, ffprobe and Python deps")

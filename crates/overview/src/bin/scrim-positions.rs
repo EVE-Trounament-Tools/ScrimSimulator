@@ -104,6 +104,10 @@ struct Cli {
     /// the match window instead of CD and WF/GF.
     #[arg(long)]
     tournament: bool,
+    /// Don't check that the chat log was written while the video was recorded (judged by the
+    /// video file's modification time); for a copy of the recording that lost its file time.
+    #[arg(long)]
+    no_date_check: bool,
     /// Decode the video on the GPU with this ffmpeg `-hwaccel` (e.g. `cuda` for NVDEC, `vaapi`),
     /// leaving the CPU cores to OCR. Same frames either way; ffmpeg falls back to software decode
     /// when the accelerator isn't available.
@@ -183,6 +187,9 @@ fn match_windows(cli: &Cli, scene: &Scene, video: &Path) -> Result<Vec<(Option<u
     }
     if cli.tournament {
         cmd.arg("--tournament");
+    }
+    if cli.no_date_check {
+        cmd.arg("--no-date-check");
     }
     println!("== {}: finding the match with ScrimTrimmer", video.display());
     let output = cmd

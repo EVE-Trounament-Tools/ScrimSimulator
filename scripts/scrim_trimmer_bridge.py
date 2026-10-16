@@ -19,6 +19,11 @@ Prints one JSON object on stdout; everything else goes to stderr:
 
 `t0_utc` is a full UTC date and time: ScrimTrimmer's t0 is seconds since
 midnight, and the date comes from the chat log.
+
+A chat log from another session can still match a few messages by chance and
+give a plausible but wrong t0 (and the log's date), so the log must overlap
+when the video was recorded: ending at its file's mtime, `duration` long.
+`--no-date-check` skips that for a copy whose mtime was lost.
 """
 
 import argparse
@@ -57,6 +62,28 @@ def t0_datetime(t0_sec: int, log_first: datetime) -> datetime:
     midnight = log_first.replace(hour=0, minute=0, second=0, microsecond=0)
     candidates = [midnight + timedelta(days=d, seconds=t0_sec) for d in (-1, 0, 1)]
     return min(candidates, key=lambda c: abs((c - log_first).total_seconds()))
+
+
+# How far apart the chat log and the video's recording time may be and still count as overlapping:
+# a recording remuxed or trimmed later gets a later mtime, while a wrong log is usually days off.
+DATE_SLACK = timedelta(hours=1)
+# How far the detected t0 may be from the video's recording start.
+T0_SLACK = timedelta(hours=12)
+
+
+def video_span(path: str, duration: float) -> tuple:
+    """When `path` was recorded (UTC): ending at its mtime, `duration` seconds long."""
+    end = datetime.fromtimestamp(os.path.getmtime(path), timezone.utc)
+    return end - timedelta(seconds=duration), end
+
+
+def spans_overlap(a: tuple, b: tuple, slack: timedelta = DATE_SLACK) -> bool:
+    """Whether spans `a` and `b` ((start, end) datetimes) overlap, give or take `slack`."""
+    return a[0] - slack <= b[1] and b[0] - slack <= a[1]
+
+
+def _fmt_span(span: tuple) -> str:
+    return f"{span[0]:%Y-%m-%d %H:%M}-{span[1]:%H:%M} UTC"
 
 
 # How many messages `refine_t0` tries, and how many first appearances it needs before it stops.
@@ -161,6 +188,11 @@ def main() -> None:
     )
     p.add_argument("--tournament", action="store_true", help="tournament start/end system messages")
     p.add_argument("--no-detect-countdown", action="store_false", dest="detect_countdown")
+    p.add_argument(
+        "--no-date-check", action="store_false", dest="date_check",
+        help="don't check that the chat log was written while the video was recorded (by the "
+        "video file's mtime), e.g. for a copy that lost its mtime",
+    )
     p.add_argument("--verbose", "-v", action="store_true")
     args = p.parse_args()
 
@@ -169,11 +201,19 @@ def main() -> None:
     entries = [e for path in args.chat_logs for e in chat_log_parser.read_chat_log(path)]
     if not entries:
         sys.exit("no chat lines found in " + ", ".join(args.chat_logs))
-    log_first = min(ts for ts, _, _ in entries)
+    log_span = (min(ts for ts, _, _ in entries), max(ts for ts, _, _ in entries))
+    log_first = log_span[0]
 
     duration = frame_extractor.probe_duration(args.video)
     if duration is None:
         duration = frame_extractor.get_video_duration(args.video)
+    recorded = video_span(args.video, duration)
+    if args.date_check and not spans_overlap(log_span, recorded):
+        sys.exit(
+            f"the chat log covers {_fmt_span(log_span)}, but the video was recorded around "
+            f"{_fmt_span(recorded)} (by its file time): wrong chat log? Pass --no-date-check "
+            "if the video's file time isn't when it was recorded"
+        )
 
     # ScrimTrimmer prints progress on stdout; keep stdout for the JSON.
     with contextlib.redirect_stdout(sys.stderr):
@@ -205,6 +245,12 @@ def main() -> None:
         print(f"  t0 {t0_sec} s ({source}); CDs {cd}; WFs {wf}; pairs {pairs}")
 
     t0 = t0_datetime(t0_sec, log_first).astimezone(timezone.utc)
+    if args.date_check and abs(t0 - recorded[0]) > T0_SLACK:
+        sys.exit(
+            f"t0 {t0:%Y-%m-%d %H:%M:%S} UTC is far from when the video was recorded "
+            f"({_fmt_span(recorded)}, by its file time): wrong chat log? Pass --no-date-check "
+            "if the video's file time isn't when it was recorded"
+        )
     json.dump(
         {
             "t0_utc": t0.strftime("%Y-%m-%dT%H:%M:%SZ"),

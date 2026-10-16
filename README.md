@@ -136,7 +136,9 @@ your layout differs.
 below), the output folder and, optionally, the pilots' gamelogs (**Add logs…**; each is listed
 with its character so you can tell them apart), untick **Extract audio** if you
 don't want the mp3, and press **Run**. Its output is shown as it works, and your choices are
-remembered for next time. It looks for `scrim-positions` and `scene.json` next to itself.
+remembered for next time. Picking a video also picks, as ScrimTrimmer does, the Local chat log
+last written closest to the video's file time (in the chat log's folder, or `Chatlogs` next to the
+Gamelogs folder), and warns when the chosen chat log is from another session. It looks for `scrim-positions` and `scene.json` next to itself.
 
 The CSV has one row per pilot per second:
 `t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m,shield,armor,hull`, then
@@ -194,6 +196,10 @@ The saved `match.mp3` covers the same window, so it starts with the data.
 - `--t0 HH:MM:SS` gives the EVE time at video second 0 yourself, skipping the chat OCR.
 - `--tournament` uses the tournament system messages ("30 seconds until match start",
   "Match completed!") instead.
+- The chat log must have been written while the video was recorded, judged by the video file's
+  modification time (its end) and duration: a log from another session can still match a few
+  chat lines by chance and put every match at the wrong time, so it is refused.
+  `--no-date-check` skips this for a copy of the recording that lost its file time.
 - Without `--chat-log`, `--t0 2026-04-04T17:43:55Z` stamps the whole video with EVE times.
 - `--combat-log FILE` (repeatable; a folder such as `Documents/EVE/logs/Gamelogs` works too) saves
   each gamelog with combat during the match, cut down to the match, in

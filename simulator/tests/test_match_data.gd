@@ -285,6 +285,48 @@ func test_single_corner_is_blue() -> void:
 	assert_eq(d.teams["b"], MatchData.Team.BLUE)
 
 
+
+## `n` pilots `<prefix>0..` strung along corner `corner`'s line.
+func _fleet(prefix: String, corner: int, n: int) -> Array:
+	var rows := []
+	for i in n:
+		rows.append(row(0, "%s%d" % [prefix, i], "x", on_line(corner, 0.3 + 0.05 * i)))
+	return rows
+
+
+func test_overfull_team_sends_worst_fit_to_other_team() -> void:
+	# 5 km off corner 0's line: still on it, but the worst fit of its 11.
+	var off := on_line(0, 0.5) + Vector3(1, -1, 0).normalized() * 5000.0
+	var d := _load(_fleet("b", 0, 10) + [row(0, "off", "x", off)] + _fleet("r", 7, 1))
+	assert_eq(d.teams["off"], MatchData.Team.RED)
+	for i in 10:
+		assert_eq(d.teams["b%d" % i], MatchData.Team.BLUE)
+	assert_eq(d.teams["r0"], MatchData.Team.RED)
+
+
+func test_overfull_single_corner_spills_to_red() -> void:
+	var d := _load(_fleet("b", 0, 12))
+	var blue := d.teams.values().count(MatchData.Team.BLUE)
+	assert_eq(blue, MatchData.MAX_TEAM_SIZE)
+	assert_eq(d.teams.values().count(MatchData.Team.RED), 2)
+
+
+func test_full_team_sends_unknown_pilots_to_other_team() -> void:
+	var d := _load(_fleet("r", 7, 10) + _fleet("b", 0, 3) + [row(0, "mid", "x", C), row(0, "mid2", "x", C)])
+	assert_eq(d.teams["mid"], MatchData.Team.BLUE)
+	assert_eq(d.teams["mid2"], MatchData.Team.BLUE)
+
+
+func test_full_single_corner_sends_unknown_pilot_to_red() -> void:
+	var d := _load(_fleet("b", 0, 10) + [row(0, "mid", "x", C)])
+	assert_eq(d.teams["mid"], MatchData.Team.RED)
+
+
+func test_unknown_pilot_stays_unknown_while_no_team_full() -> void:
+	var d := _load(_fleet("b", 0, 9) + _fleet("r", 7, 9) + [row(0, "mid", "x", C)])
+	assert_eq(d.teams["mid"], MatchData.Team.UNKNOWN)
+
+
 # --- deaths ------------------------------------------------------------------
 
 func test_pilot_inside_boundary_has_no_death() -> void:
