@@ -8,6 +8,8 @@
 //! how far out are inferred from the data (or the distance given with `--observer-distance-km`). The
 //! observers don't move during a video, so with several matches every match is OCR'd first and
 //! the observers' layout is inferred once from all of them.
+//! The overview measures distance from the observer's hull edge, so the observers' hull radius
+//! (`--observer-radius-m`, a Paladin's by default) is added to every distance before solving.
 //! Where a track grazes the observers' plane and the distances can't tell which side it left for,
 //! `overview::plane_exit` turns it clockwise unless the match (boundary, start, incoming motion,
 //! scrams in the combat logs) says otherwise, and the CSV's `plane_exit,plane_exit_id,plane`
@@ -74,7 +76,8 @@ struct Cli {
     #[arg(long)]
     no_audio: bool,
     /// Also write each pilot's raw per-tick distances and speed to `<video>.readings.csv`
-    /// (`t,pilot,d_a,d_b,d_c,speed_mps`), the input to corner inference, for offline analysis.
+    /// (`t,pilot,d_a,d_b,d_c,speed_mps`) as the overview shows them (before the observer radius
+    /// is added), for offline analysis.
     #[arg(long)]
     dump_readings: bool,
     /// EVE gamelog (`Documents/EVE/logs/Gamelogs/*.txt`), or a folder of them (repeatable).
@@ -86,6 +89,11 @@ struct Cli {
     /// km (all three the same; 86.6 is on the corners). Fitted from the match when not given.
     #[arg(long = "observer-distance-km", value_name = "KM")]
     observer_distance_km: Option<f64>,
+    /// The observers' hull radius in metres (all three the same; 0-10000, default a Paladin's).
+    /// The overview measures from the observer's hull edge, so this is added to every distance
+    /// before solving.
+    #[arg(long = "observer-radius-m", value_name = "M", default_value_t = PALADIN_RADIUS_M, value_parser = parse_observer_radius)]
+    observer_radius_m: f64,
     /// EVE Local chat log covering the recording (repeatable). Finds the match's CD -> WF/GF
     /// window and the EVE time base with ScrimTrimmer; only the match is processed, and the CSV
     /// gains an `eve_time` column.
@@ -123,6 +131,21 @@ struct Cli {
     #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/scrim_trimmer_bridge.py"))]
     trimmer_bridge: PathBuf,
     videos: Vec<PathBuf>,
+}
+
+/// A Paladin's hull radius (SDE), the default observer.
+const PALADIN_RADIUS_M: f64 = 250.0;
+/// The largest `--observer-radius-m` accepted.
+const MAX_OBSERVER_RADIUS_M: f64 = 10_000.0;
+
+/// `--observer-radius-m`: metres, 0 to [`MAX_OBSERVER_RADIUS_M`].
+fn parse_observer_radius(s: &str) -> Result<f64, String> {
+    let m: f64 = s.trim().parse().map_err(|e| format!("{e}"))?;
+    if (0.0..=MAX_OBSERVER_RADIUS_M).contains(&m) {
+        Ok(m)
+    } else {
+        Err(format!("must be between 0 and {MAX_OBSERVER_RADIUS_M} m"))
+    }
 }
 
 /// Which of a video's matches `--match` picks.
@@ -348,9 +371,14 @@ fn main() -> Result<()> {
             continue;
         }
         let pilots: Vec<Vec<Reading>> =
-            reads.iter().flat_map(|(_, m)| m.readings.iter().map(PilotReadings::as_readings)).collect();
+            reads.iter().flat_map(|(_, m)| m.readings.iter().map(|r| r.as_readings(cli.observer_radius_m))).collect();
         let fit = infer_observers(&pilots, cli.observer_distance_km.map(|km| km * 1000.0));
-        println!("== {}: observers, from {} match(es)", video.display(), reads.len());
+        println!(
+            "== {}: observers ({} m hull radius), from {} match(es)",
+            video.display(),
+            cli.observer_radius_m,
+            reads.len()
+        );
         let names: Vec<&str> = scene.panels.iter().map(|p| p.name.as_str()).collect();
         print_corners(&names, &fit);
         for (i, m) in &reads {
@@ -392,7 +420,7 @@ fn write_match(cli: &Cli, video: &Path, m: &MatchRead, corners: [solve::V3; 3]) 
             ),
         }
     }
-    solve_match(m, corners, &cli.out, &logs)
+    solve_match(m, corners, cli.observer_radius_m, &cli.out, &logs)
 }
 
 /// Extract the window's audio to `<out>/<out_stem>.mp3`. Audio is an extra, so a failure (or a
@@ -692,14 +720,20 @@ fn match_eve_span(m: &MatchRead) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
 /// Solve every pilot's track with the observers at `corners`, settle its ambiguous plane exits
 /// (`overview::plane_exit`, with the scrams in `logs` as evidence) and write
 /// `<out_stem>.positions.csv`.
-fn solve_match(m: &MatchRead, corners: [solve::V3; 3], out: &Path, logs: &[PathBuf]) -> Result<()> {
+fn solve_match(
+    m: &MatchRead,
+    corners: [solve::V3; 3],
+    observer_radius_m: f64,
+    out: &Path,
+    logs: &[PathBuf],
+) -> Result<()> {
     let MatchRead { out_stem, window, per_observer, roster, readings, hp, times } = m;
     let plane = Plane::from_observers(corners);
     let mut tracks: Vec<PilotTrack> = roster
         .iter()
         .zip(readings)
         .map(|(pilot, r)| {
-            let fixes = solve_track(corners, &r.as_readings());
+            let fixes = solve_track(corners, &r.as_readings(observer_radius_m));
             let capsule = fixes.iter().map(|f| ship_type_at(per_observer, pilot, f.t) == CAPSULE).collect();
             PilotTrack { fixes, capsule }
         })
@@ -879,7 +913,8 @@ struct PilotReadings {
     speed: BTreeMap<u64, f64>,
 }
 
-/// `--dump-readings` output: one row per pilot per tick with all three distances.
+/// `--dump-readings` output: one row per pilot per tick with all three distances as the overview
+/// shows them (hull-edge, without the observer radius).
 fn readings_csv(roster: &[Pilot], readings: &[PilotReadings]) -> String {
     let mut csv = String::from("t,pilot,d_a,d_b,d_c,speed_mps\n");
     for (pilot, r) in roster.iter().zip(readings) {
@@ -892,11 +927,16 @@ fn readings_csv(roster: &[Pilot], readings: &[PilotReadings]) -> String {
 }
 
 impl PilotReadings {
-    /// This pilot's distance ticks with their speeds, as corner inference and the solve take them.
-    fn as_readings(&self) -> Vec<Reading> {
+    /// This pilot's distance ticks with their speeds, as corner inference and the solve take them:
+    /// the overview's hull-edge distances plus the observers' hull radius, so centre to centre.
+    fn as_readings(&self, observer_radius_m: f64) -> Vec<Reading> {
         self.distances
             .iter()
-            .map(|&(t, d)| Reading { t, d, speed_mps: self.speed.get(&t.to_bits()).copied() })
+            .map(|&(t, d)| Reading {
+                t,
+                d: d.map(|x| x + observer_radius_m),
+                speed_mps: self.speed.get(&t.to_bits()).copied(),
+            })
             .collect()
     }
 }
@@ -1336,6 +1376,30 @@ mod tests {
 
     fn utc(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().into()
+    }
+
+    #[test]
+    fn readings_add_the_observer_radius() {
+        let mut r = PilotReadings { distances: vec![(1.5, [10_000.0, 20_000.0, 0.0])], speed: BTreeMap::new() };
+        r.speed.insert(1.5f64.to_bits(), 300.0);
+        let got = r.as_readings(250.0);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].t, 1.5);
+        assert_eq!(got[0].d, [10_250.0, 20_250.0, 250.0]);
+        assert_eq!(got[0].speed_mps, Some(300.0));
+        assert_eq!(r.as_readings(0.0)[0].d, [10_000.0, 20_000.0, 0.0]);
+    }
+
+    #[test]
+    fn observer_radius_is_bounded() {
+        assert_eq!(parse_observer_radius("0"), Ok(0.0));
+        assert_eq!(parse_observer_radius("250"), Ok(250.0));
+        assert_eq!(parse_observer_radius("10000"), Ok(10_000.0));
+        for bad in ["-1", "10000.5", "NaN", "inf", "big"] {
+            assert!(parse_observer_radius(bad).is_err(), "{bad}");
+        }
+        let cli = Cli::try_parse_from(["scrim-positions", "--scene", "s.json", "v.mkv"]).unwrap();
+        assert_eq!(cli.observer_radius_m, PALADIN_RADIUS_M);
     }
 
     #[test]

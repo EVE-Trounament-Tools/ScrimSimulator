@@ -75,6 +75,11 @@ Fight inside the cube as usual, and stop the observers dead. `scrim-positions` w
 corners' lines they're on and how far out they are from the match itself; if you know the
 distance, give it with `--observer-distance-km 235`.
 
+The overview measures distance from the observer's hull edge, not its centre, so the observers'
+hull radius is added to every distance before solving. It defaults to a Paladin's (250 m); if the
+observers fly something else, give its radius with `--observer-radius-m` (0-10000) or the
+"Observer radius" field in `positions-gui`. All three observers are assumed to be the same hull.
+
 | Distance from centre | Past the corner beacon | Observers' plane from centre | Clear of the 125 km arena edge by |
 |---|---|---|---|
 | 86.6 km (on the corners) | 0 | 50 km | — (cuts through the arena) |

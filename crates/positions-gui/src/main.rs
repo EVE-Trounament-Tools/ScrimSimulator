@@ -25,6 +25,11 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 const SETTINGS_KEY: &str = "settings";
 
+/// A Paladin's hull radius, the default observer.
+const PALADIN_RADIUS_M: &str = "250";
+/// The largest observer radius `scrim-positions` accepts.
+const MAX_OBSERVER_RADIUS_M: f64 = 10_000.0;
+
 /// Everything the user picks; persisted between sessions.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -45,6 +50,8 @@ struct Settings {
     found_logs: Vec<String>,
     extract_audio: bool,
     scene: String,
+    /// The observers' hull radius in metres (all three the same), `--observer-radius-m`, as typed.
+    observer_radius: String,
 }
 
 impl Default for Settings {
@@ -59,8 +66,15 @@ impl Default for Settings {
             combat_log_dir: default_gamelogs().map(path_string).unwrap_or_default(),
             extract_audio: true,
             scene: default_scene().map(path_string).unwrap_or_default(),
+            observer_radius: PALADIN_RADIUS_M.to_string(),
         }
     }
+}
+
+/// The observer radius typed as `s`, in metres, pulled into 0..=[`MAX_OBSERVER_RADIUS_M`]; `None`
+/// if it isn't a number.
+fn parse_radius(s: &str) -> Option<f64> {
+    s.trim().parse::<f64>().ok().filter(|m| !m.is_nan()).map(|m| m.clamp(0.0, MAX_OBSERVER_RADIUS_M))
 }
 
 fn path_string(p: PathBuf) -> String {
@@ -576,6 +590,8 @@ impl App {
             Some("Name the run folder.")
         } else if s.scene.trim().is_empty() {
             Some("Pick a scene file.")
+        } else if parse_radius(&s.observer_radius).is_none() {
+            Some("Observer radius must be a number of metres (0 to 10000).")
         } else {
             None
         }
@@ -589,6 +605,9 @@ impl App {
         if !s.chat_log.trim().is_empty() {
             // Every CD -> WF/GF in the video, each into its own `<video>_NN.*` outputs.
             cmd.arg("--chat-log").arg(s.chat_log.trim()).args(["--match", "all"]);
+        }
+        if let Some(m) = parse_radius(&s.observer_radius) {
+            cmd.arg("--observer-radius-m").arg(m.to_string());
         }
         if !s.extract_audio {
             cmd.arg("--no-audio");
@@ -852,6 +871,20 @@ impl eframe::App for App {
                     path_row(ui, "Scene", &mut s.scene, "scene.json: where each overview is in the frame", |d| {
                         d.add_filter("Scene", &["json"]).pick_file()
                     });
+                    ui.label("Observer radius");
+                    ui.horizontal(|ui| {
+                        let field = egui::TextEdit::singleline(&mut s.observer_radius).hint_text(PALADIN_RADIUS_M);
+                        let edit = ui.add_sized([60.0, ui.spacing().interact_size.y], field);
+                        // Out-of-range values snap to the nearer bound once typing is done.
+                        if edit.lost_focus() {
+                            if let Some(m) = parse_radius(&s.observer_radius) {
+                                s.observer_radius = m.to_string();
+                            }
+                        }
+                        ui.label("m");
+                        ui.label(egui::RichText::new("hull radius of all three observers; overview distances start at the hull edge").weak());
+                    });
+                    ui.end_row();
                     ui.label("");
                     ui.checkbox(&mut s.extract_audio, "Extract audio (<video>.mp3 next to the CSV)");
                     ui.end_row();
@@ -956,6 +989,20 @@ mod tests {
         let span = chat_span(&decode_chat_log(&bytes)).unwrap();
         assert_eq!(span, (t("2026.09.26 12:59:55"), t("2026.09.26 15:13:01")));
         assert!(chat_span("not a chat log").is_err());
+    }
+
+    #[test]
+    fn observer_radius_snaps_to_the_nearer_bound() {
+        assert_eq!(parse_radius("0"), Some(0.0));
+        assert_eq!(parse_radius(" 1500.5 "), Some(1500.5));
+        assert_eq!(parse_radius("10000"), Some(10_000.0));
+        assert_eq!(parse_radius("-1"), Some(0.0));
+        assert_eq!(parse_radius("-inf"), Some(0.0));
+        assert_eq!(parse_radius("10001"), Some(10_000.0));
+        assert_eq!(parse_radius("1e9"), Some(10_000.0));
+        for bad in ["", "NaN", "big"] {
+            assert_eq!(parse_radius(bad), None, "{bad}");
+        }
     }
 
     #[test]

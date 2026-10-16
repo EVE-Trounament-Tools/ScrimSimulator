@@ -129,6 +129,9 @@ made wrong is unrecoverable.
   the centre, so `R ≥ (125 + 5) km · √3 ≈ 225 km` puts it outside the 125 km arena boundary
   (with 5 km for the 1 km distance rounding), and no ship in the arena has a mirror ambiguity.
   On the corners themselves (`R` = 86.6 km) the plane is the face, 50 km from the centre.
+  The overview measures from the observer's hull edge, so the observers' hull radius
+  (`--observer-radius-m`, default a Paladin's 250 m, all three the same) is added to every
+  distance before solving.
 - **Fully stopped** (not orbiting, not drifting). §2.2 assumes a stationary observer; a moving one
   silently poisons every radial-velocity reading it produces.
 - **Lock as many grid objects as targeting range and slots allow.** Locked-target brackets render
