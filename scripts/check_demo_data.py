@@ -21,6 +21,8 @@ NAME = re.compile(r"(Amarr|Caldari|Gallente|Minmatar) Citizen \d{7}")
 LOG_SHIP = re.compile(r"<b>([^<>]+)</b></color></font>")
 LOG_PILOT = re.compile(r"<font size=11>\[([^\]]+)\] -")
 LOG_LISTENER = re.compile(r"^\s*Listener: (.+?)\s*$", re.M)
+# Drones / NPCs show their own name in both slots; scripts/anonymize.py keeps those.
+LOG_SHIP_PILOT = re.compile(r"<b>([^<>]+)</b></color></font> <font size=11>\[([^\]]+)\] -")
 
 
 def legal_ships() -> set[str]:
@@ -48,7 +50,9 @@ def main() -> int:
         check(path, (r["pilot"] for r in rows), (r["ship_type"] for r in rows))
     for path in sorted(DEMO.rglob("*.txt")):
         text = path.read_text(errors="replace")
-        check(path, LOG_PILOT.findall(text) + LOG_LISTENER.findall(text), LOG_SHIP.findall(text))
+        npcs = {ship for ship, pilot in LOG_SHIP_PILOT.findall(text) if ship == pilot}
+        pilots = [p for p in LOG_PILOT.findall(text) if p not in npcs]
+        check(path, pilots + LOG_LISTENER.findall(text), LOG_SHIP.findall(text))
 
     for p in problems:
         print(p, file=sys.stderr)
