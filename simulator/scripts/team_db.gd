@@ -271,6 +271,29 @@ static func _key(path: String) -> String:
 	return path.simplify_path().substr(root.length() + 1)
 
 
+## Whether opening match `path` uses its season's db: season teams are on (the
+## `teams/season_db` setting) and it is a library match that isn't internal.
+static func uses_db(path: String) -> bool:
+	return Settings.get_value("teams/season_db") and MatchLibrary.contains(path) and not MatchLibrary.is_internal(path)
+
+
+## The season db opening match `path` uses (`read`), or {} when it uses none (`uses_db`).
+static func db_for(path: String) -> Dictionary:
+	return read(season_of(path)) if uses_db(path) else {}
+
+
+## Puts match `data`'s pilots on their sides as opening it does: known pilots on their team's
+## side (`apply`, unless `db` is {}), then the match's own swaps `overrides` (pilot -> Team), then
+## `MatchData.fill_unknown`. Returns `apply`'s `{ side -> id }` ({} without a db).
+static func settle(data: MatchData, db: Dictionary, overrides: Dictionary) -> Dictionary:
+	var sides := {} if db.is_empty() else apply(db, data)
+	for pilot in overrides:
+		if data.teams.has(pilot):
+			data.teams[pilot] = overrides[pilot]
+	data.fill_unknown()
+	return sides
+
+
 ## Puts the known pilots of match `data` on their db team's side (`sides_of` its teams), and
 ## returns that `{ side -> id }`.
 static func apply(db: Dictionary, data: MatchData) -> Dictionary:

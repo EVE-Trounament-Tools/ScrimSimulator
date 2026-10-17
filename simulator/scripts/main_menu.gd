@@ -4,7 +4,9 @@ extends PanelContainer
 ## folder to it, rename or remove one, attach audio to one, add combat logs (EVE gamelogs) to the
 ## matches of a folder, sort matches into folders (right-click for all of these, or drag to
 ## move), mark matches internal (`MatchLibrary.is_internal`: when added with **Internal** ticked,
-## or by right-click). Covers the viewer until a match is chosen.
+## or by right-click). Matches missing data (`DataCheck`: too few ships, no HP, ships with big
+## gaps) get a warning badge naming what is missing, and matches with pilots on no team once
+## opened (`DataCheck.unassigned`) a badge naming them. Covers the viewer until a match is chosen.
 
 ## The library path of the match to open.
 signal match_chosen(path: String)
@@ -19,6 +21,8 @@ signal logs_changed(path: String)
 ## Library match `path` was marked internal or not (`MatchLibrary.set_internal`).
 signal internal_changed(path: String)
 
+## Ids of a match row's badges (`TreeItem` buttons).
+enum Badge { MISSING_DATA, NO_TEAM }
 enum MenuItem { ADD_AUDIO, REMOVE_AUDIO, ADD_LOGS, REMOVE_LOGS, RENAME, REMOVE, NEW_FOLDER, ADD_FOLDER, ADD_MATCH, INTERNAL }
 
 ## Badge on matches with audio: a speaker.
@@ -26,6 +30,24 @@ const AUDIO_ICON_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" he
 <path d="M2 6h3l4-3.5v11L5 10H2z" fill="#8fc3ff"/>
 <path d="M11 5.5a3.5 3.5 0 0 1 0 5M12.8 3.5a6 6 0 0 1 0 9" stroke="#8fc3ff" stroke-width="1.4" fill="none" stroke-linecap="round"/>
 </svg>"""
+## Badge on matches missing data (`DataCheck`): a warning triangle.
+const WARNING_ICON_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<path d="M8 1.5l7 12.5H1z" fill="#e8a33a"/>
+<path d="M8 5.5v4.5" stroke="#1a1a1a" stroke-width="1.6" stroke-linecap="round"/>
+<circle cx="8" cy="12.2" r="0.9" fill="#1a1a1a"/>
+</svg>"""
+## Badge on matches with pilots on no team (`DataCheck.unassigned`): a grey pilot, in the
+## viewer's colour for unknown team, with a question mark.
+const NO_TEAM_ICON_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<circle cx="6" cy="4.5" r="2.8" fill="#9a9a9a"/>
+<path d="M1 14.5c0-3.6 2.2-5.5 5-5.5s5 1.9 5 5.5z" fill="#9a9a9a"/>
+<path d="M11.2 3.6a1.9 1.9 0 1 1 2.6 1.8c-.6.3-.9.7-.9 1.4v.5" stroke="#e8a33a" stroke-width="1.4" fill="none" stroke-linecap="round"/>
+<circle cx="12.9" cy="9.4" r="0.8" fill="#e8a33a"/>
+</svg>"""
+## Text colour of matches missing data.
+const WARNING_COLOR := Color(1.0, 0.8, 0.5)
+## Most lines (issues or pilots) a badge's tooltip lists.
+const MAX_ISSUES_SHOWN := 8
 ## Icon of folders.
 const FOLDER_ICON_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
 <path d="M1.5 3.5h5l1.5 1.5h6.5v8h-13z" fill="#d9b25f"/>
@@ -66,6 +88,8 @@ var move_menu: PopupMenu
 ## Folders listed in `move_menu` ("" for the library itself).
 var move_targets: Array = []
 var audio_icon: Texture2D
+var warning_icon: Texture2D
+var no_team_icon: Texture2D
 var folder_icon: Texture2D
 ## Same size as `audio_icon`, for matches without audio so names stay aligned.
 var blank_icon: Texture2D
@@ -115,6 +139,7 @@ func _init() -> void:
 			else:
 				collapsed.erase(meta.rel))
 	list.dropped.connect(move_item)
+	list.button_clicked.connect(func(item: TreeItem, _column, _id, _button): item.select(0))
 	box.add_child(list)
 
 	empty_label = Label.new()
@@ -258,6 +283,12 @@ func _init() -> void:
 	img = Image.new()
 	img.load_svg_from_string(AUDIO_ICON_SVG)
 	audio_icon = ImageTexture.create_from_image(img)
+	img = Image.new()
+	img.load_svg_from_string(WARNING_ICON_SVG)
+	warning_icon = ImageTexture.create_from_image(img)
+	img = Image.new()
+	img.load_svg_from_string(NO_TEAM_ICON_SVG)
+	no_team_icon = ImageTexture.create_from_image(img)
 	var blank := Image.create_empty(img.get_width(), img.get_height(), false, Image.FORMAT_RGBA8)
 	blank_icon = ImageTexture.create_from_image(blank)
 
@@ -295,7 +326,18 @@ func refresh() -> void:
 			notes.append("%d combat log%s" % [logs, "" if logs == 1 else "s"])
 		if MatchLibrary.is_internal(e.path):
 			notes.append("Internal match")
-		item.set_tooltip_text(0, "\n".join(notes))
+		var flags := []
+		var missing := flag_text("Missing data:", DataCheck.issues(e.path))
+		if missing != "":
+			item.add_button(0, warning_icon, Badge.MISSING_DATA, false, missing)
+			item.set_custom_color(0, WARNING_COLOR)
+			flags.append(missing)
+		var no_team := flag_text("Not on a team:", DataCheck.unassigned(e.path))
+		if no_team != "":
+			item.add_button(0, no_team_icon, Badge.NO_TEAM, false, no_team)
+			flags.append(no_team)
+		item.set_tooltip_text(0, "\n".join(flags + notes))
+	DataCheck.prune(entries.map(func(e): return e.path))
 	if not _select(was):
 		var matches := list.match_items()
 		if not matches.is_empty():
@@ -304,6 +346,19 @@ func refresh() -> void:
 	_update_buttons()
 	if OS.has_feature("web"):
 		WebLibrary.local_changed()
+
+
+## Tooltip of a badge: the first `MAX_ISSUES_SHOWN` of `items` (issues or pilots) under `title`,
+## or "" when there are none (no badge).
+static func flag_text(title: String, items: Array) -> String:
+	if items.is_empty():
+		return ""
+	var lines := [title]
+	for it in items.slice(0, MAX_ISSUES_SHOWN):
+		lines.append("  " + it)
+	if items.size() > MAX_ISSUES_SHOWN:
+		lines.append("  …and %d more" % (items.size() - MAX_ISSUES_SHOWN))
+	return "\n".join(lines)
 
 
 ## Selects the item whose metadata is `meta` (by its path or folder), revealing it; false if

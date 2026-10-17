@@ -64,6 +64,10 @@ const REF_RING_TOP: f32 = 70.0;
 const SCALE_SWEEP: (f32, f32, f32) = (0.6, 1.5, 0.02);
 /// [`ring_score`] a spot needs to count as a ring.
 const MIN_RING_SCORE: f32 = 0.45;
+/// [`ring_score`] a spot needs in [`detect_rings`]' coarse scan to be refined: the coarse grid can
+/// miss a ring's center by a pixel or two, which a busy background (a bright nebula) takes it
+/// under [`MIN_RING_SCORE`]. Empty space scores under 0.2.
+const MIN_COARSE_RING_SCORE: f32 = 0.3;
 /// Fewer white-or-red samples than this on all three arcs together means there's no ring.
 const MIN_READ_SAMPLES: usize = 150;
 
@@ -319,7 +323,7 @@ pub fn detect_rings(block: &RgbImage, geom: &BlockGeometry) -> Vec<(f32, f32)> {
             y += 2.0;
         }
         // Greedy peak picking: highest first, nothing within a row gap of a kept peak.
-        let mut order: Vec<usize> = (0..scores.len()).filter(|&i| scores[i].1 >= MIN_RING_SCORE).collect();
+        let mut order: Vec<usize> = (0..scores.len()).filter(|&i| scores[i].1 >= MIN_COARSE_RING_SCORE).collect();
         order.sort_by(|&a, &b| scores[b].1.total_cmp(&scores[a].1));
         let mut kept: Vec<f32> = Vec::new();
         for i in order {
@@ -493,7 +497,8 @@ pub const LABEL_REFRESH_S: f64 = 10.0;
 /// Max distance (px) a ring may move between frames and still be the same bracket.
 const SAME_RING_PX: f32 = 8.0;
 
-fn same_rings(a: &[(f32, f32)], b: &[(f32, f32)]) -> bool {
+/// Whether two frames show the same rings (the same targets, as they sit still on screen).
+pub fn same_rings(a: &[(f32, f32)], b: &[(f32, f32)]) -> bool {
     a.len() == b.len()
         && a.iter().zip(b).all(|(p, q)| (p.0 - q.0).abs() <= SAME_RING_PX && (p.1 - q.1).abs() <= SAME_RING_PX)
 }
@@ -579,7 +584,7 @@ pub struct Candidate<'a> {
 /// Edit distance between a label's name and a roster name, either of which may be cut short
 /// (the overview's Name column truncates long names), and the label may carry misread specks
 /// either side of the name: the roster name is matched against the best-fitting stretch of the
-/// label too.
+/// label's start too.
 fn name_distance(label: &str, roster: &str) -> usize {
     let (a, b) = (label.to_lowercase(), roster.to_lowercase());
     let (short, long) = if a.chars().count() <= b.chars().count() { (&a, &b) } else { (&b, &a) };
@@ -587,11 +592,16 @@ fn name_distance(label: &str, roster: &str) -> usize {
     levenshtein(&a, &b).min(levenshtein(short, &prefix)).min(infix_distance(&b, &a))
 }
 
-/// Edit distance between `needle` and the stretch of `hay` it best fits (free to skip any of
-/// `hay` before and after).
+/// Specks Tesseract reads before a name are a character or two (most are trimmed with
+/// [`trim_specks`]); those after it can be any length.
+const MAX_LEADING_SPECKS: usize = 2;
+
+/// Edit distance between `needle` and the stretch of `hay` it best fits: free to skip any of
+/// `hay` after it, but only [`MAX_LEADING_SPECKS`] before it, so a short name can't fit the
+/// middle of a longer one ("Al" in "Mikal Sen").
 fn infix_distance(needle: &str, hay: &str) -> usize {
     let (n, h): (Vec<char>, Vec<char>) = (needle.chars().collect(), hay.chars().collect());
-    let mut prev = vec![0usize; h.len() + 1]; // an empty needle fits anywhere for free
+    let mut prev: Vec<usize> = (0..=h.len()).map(|j| j.saturating_sub(MAX_LEADING_SPECKS)).collect();
     for (i, &nc) in n.iter().enumerate() {
         let mut cur = vec![i + 1; h.len() + 1];
         for (j, &hc) in h.iter().enumerate() {
@@ -617,14 +627,11 @@ fn range_agrees(label_m: f64, ranges_m: &[f64]) -> bool {
 
 /// Which of `candidates` a label belongs to. The name decides when it's within a misread or two of
 /// exactly one pilot (ship type and range break ties); a badly read name still matches when only
-/// one pilot within half its length also has the label's ship type and range. `None` if no pilot
-/// or more than one fits.
+/// one pilot within half its length also has the label's ship type and range. A two-letter name
+/// (a short name read with a letter dropped) matches only the one pilot it starts that also has
+/// the label's ship type and range. `None` if no pilot or more than one fits.
 pub fn match_label(label: &Label, candidates: &[Candidate], ship_types: &ShipTypes) -> Option<usize> {
     let len = label.name.chars().count();
-    if len < 3 {
-        return None;
-    }
-    let tol = (len / 5).max(1);
     let fits = |c: &Candidate| {
         let type_ok = same_type(&label.ship_type, c.ship_type, ship_types);
         let range_ok = match label.range_m {
@@ -633,12 +640,29 @@ pub fn match_label(label: &Label, candidates: &[Candidate], ship_types: &ShipTyp
         };
         (type_ok, range_ok)
     };
+    if len == 2 {
+        let prefix = label.name.to_lowercase();
+        let mut fitting = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.name.to_lowercase().starts_with(&prefix) && fits(c) == (true, Some(true)));
+        return match (fitting.next(), fitting.next()) {
+            (Some((i, _)), None) => Some(i),
+            _ => None,
+        };
+    }
+    if len < 3 {
+        return None;
+    }
+    // A misread or two per five letters, of the shorter name: three edits turn any three-letter
+    // name into any other.
+    let tol = |c: &Candidate| (len.min(c.name.chars().count()) / 5).max(1);
     let mut scored: Vec<(usize, usize)> = candidates
         .iter()
         .enumerate()
         .filter_map(|(i, c)| {
             let d = name_distance(&label.name, c.name);
-            (d <= tol).then(|| {
+            (d <= tol(c)).then(|| {
                 let (type_ok, range_ok) = fits(c);
                 (d + 2 * usize::from(!type_ok) + usize::from(range_ok == Some(false)), i)
             })
@@ -652,7 +676,7 @@ pub fn match_label(label: &Label, candidates: &[Candidate], ship_types: &ShipTyp
         [] => {}
     }
     let mut loose = candidates.iter().enumerate().filter(|(_, c)| {
-        name_distance(&label.name, c.name) <= len / 2 && fits(c) == (true, Some(true))
+        name_distance(&label.name, c.name) <= len.min(c.name.chars().count()) / 2 && fits(c) == (true, Some(true))
     });
     match (loose.next(), loose.next()) {
         (Some((i, _)), None) => Some(i),
@@ -846,6 +870,29 @@ mod tests {
         let roster = [cand("Test Pilot", "Rifter", &[50.0]), cand("Other Person", "Punisher", &[60.0])];
         assert_eq!(match_label(&label("Tst P1lct", "Rifter", 51.0), &roster, &types), Some(0));
         assert_eq!(match_label(&label("Tst P1lct", "Rifter", 90.0), &roster, &types), None);
+    }
+
+    #[test]
+    fn a_short_name_missing_a_letter_matches_on_type_and_range() {
+        let types = ShipTypes::builtin();
+        let roster = [cand("Zox", "Rifter", &[50.0]), cand("Zorbanian", "Punisher", &[60.0])];
+        assert_eq!(match_label(&label("Zo", "Rifter", 50.0), &roster, &types), Some(0));
+        assert_eq!(match_label(&label("Zo", "Punisher", 60.0), &roster, &types), Some(1));
+        assert_eq!(match_label(&label("Zo", "Rifter", 90.0), &roster, &types), None, "range disagrees");
+        assert_eq!(match_label(&label("Zo", "Tristan", 50.0), &roster, &types), None, "type disagrees");
+        let roster = [cand("Zox", "Rifter", &[50.0]), cand("Zorbanian", "Rifter", &[50.0])];
+        assert_eq!(match_label(&label("Zo", "Rifter", 50.0), &roster, &types), None, "both fit");
+        assert_eq!(match_label(&label("Z", "Rifter", 50.0), &roster, &types), None);
+    }
+
+    #[test]
+    fn a_short_name_does_not_fit_inside_a_longer_one() {
+        // The label's range misread and the roster's type is cut short, so the right pilot only
+        // scores on the name, while "Enn" fits the middle of the label exactly and agrees on range.
+        let types = ShipTypes::builtin();
+        let roster = [cand("Mikal Sennomen", "Arageddon N", &[300.0]), cand("Enn", "Rifter", &[380.0])];
+        assert_eq!(match_label(&label("Mikal Sennomen", "Armageddon Nav", 380.0), &roster, &types), Some(0));
+        assert_eq!(match_label(&label("Mikal Senn0men ga [ABC", "Armageddon Nav", 380.0), &roster, &types), Some(0));
     }
 
     #[test]

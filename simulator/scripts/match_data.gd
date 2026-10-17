@@ -46,6 +46,11 @@ const DAMAGE_MIN_DROP := 0.03
 const DAMAGE_STEP := 0.005
 const DAMAGE_WINDOW_S := 3.0
 const DAMAGE_HOLD_S := 2.0
+## A full match has this many ships (two teams of `MAX_TEAM_SIZE`); fewer is missing data.
+const MIN_SHIPS := 2 * MAX_TEAM_SIZE
+## A ship with positions or HP for less than this fraction of its time in the match is missing
+## data (see `data_issues`).
+const MIN_COVERAGE := 0.5
 
 enum Event { DEATH, BOUNDARY, MJD }
 
@@ -267,6 +272,48 @@ static func _flip_row(row: PackedStringArray, col: Dictionary) -> void:
 		for k in 3:
 			row[col[["dir_x", "dir_y", "dir_z"][k]]] = "%.4f" % v[k]
 	row[col["plane_exit"]] = "ccw" if row[col["plane_exit"]] == "cw" else "cw"
+
+
+## What the match is missing, one line each (empty when nothing is): fewer than `MIN_SHIPS`
+## ships, no HP at all, and each ship whose positions cover less than `MIN_COVERAGE` of its time in
+## the match (first sample of the match until it was podded, left the arena or the match ended;
+## gaps longer than `MAX_GAP_S` count as missing) or whose HP is known in less than `MIN_COVERAGE`
+## of its samples in that time.
+func data_issues() -> Array:
+	var out := []
+	if tracks.size() < MIN_SHIPS:
+		out.append("Only %d of %d ships" % [tracks.size(), MIN_SHIPS])
+	if not has_hp:
+		out.append("No HP data")
+	var pilots := tracks.keys()
+	pilots.sort()
+	for pilot in pilots:
+		var track: Array = tracks[pilot]
+		var end := _end_t
+		if podded.has(pilot):
+			end = minf(end, podded[pilot] + start_time)
+		if deaths.has(pilot):
+			end = minf(end, deaths[pilot].t + start_time)
+		if end <= first_t:
+			continue
+		var covered := 0.0
+		var samples := 0
+		var known_hp := 0
+		for i in track.size():
+			var b: Dictionary = track[i]
+			if b.t <= end and not b.get("pod", false):
+				samples += 1
+				if not is_nan(b.hp.x):
+					known_hp += 1
+			if i > 0 and b.t - track[i - 1].t <= MAX_GAP_S:
+				covered += maxf(minf(b.t, end) - maxf(track[i - 1].t, first_t), 0.0)
+		var ship: String = track[0].ship_type
+		var positions := covered / (end - first_t)
+		if positions < MIN_COVERAGE:
+			out.append("%s (%s): positions for %d%% of the match" % [pilot, ship, roundi(positions * 100.0)])
+		if has_hp and samples > 0 and float(known_hp) / samples < MIN_COVERAGE:
+			out.append("%s (%s): HP for %d%% of samples" % [pilot, ship, roundi(100.0 * known_hp / samples)])
+	return out
 
 
 ## Whether samples carry EVE times, so other EVE logs can be lined up with the match.

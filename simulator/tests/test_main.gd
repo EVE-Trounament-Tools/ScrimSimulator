@@ -265,6 +265,74 @@ func test_audio_follows_playback() -> void:
 	m._set_speed(1.0)
 
 
+## A library match named `name` with `ships` pilots sampled 0-20 s with full HP, half on each
+## start line but the last `stray` of them, who start at the centre (on no team).
+func _hp_match(name: String, ships: int, stray := 0) -> String:
+	var rows := []
+	for i in ships:
+		var at := C if i >= ships - stray else on_line(0 if i % 2 == 0 else 7, 0.5)
+		for t in 21:
+			rows.append(row(t, "P%02d" % i, "Test Hull", at) + [1, 1, 1])
+	var src := write_csv(rows, DEFAULT_HEADER + ",shield,armor,hull")
+	var named := src.get_base_dir().path_join(name + ".positions.csv")
+	DirAccess.rename_absolute(src, named)
+	return MatchLibrary.add(named)
+
+
+func test_menu_flags_matches_missing_data() -> void:
+	var full := _hp_match("full", MatchData.MIN_SHIPS)
+	var short := _hp_match("short", 12)
+	var m := _main()
+	var items := {}
+	for it in m.menu.list.match_items():
+		items[it.get_metadata(0).path] = it
+	assert_eq(items[full].get_button_count(0), 0, "complete match: no badge")
+	assert_eq(items[short].get_button_count(0), 1, "badge")
+	assert_eq(items[short].get_button(0, 0), m.menu.warning_icon)
+	assert_true(items[short].get_button_tooltip_text(0, 0).contains("Only 12 of 20 ships"))
+	assert_true(items[short].get_tooltip_text(0).begins_with("Missing data:"))
+
+
+func test_menu_flags_pilots_on_no_team() -> void:
+	var stray := _hp_match("stray", MatchData.MIN_SHIPS - 2, 2)
+	var m := _main()
+	var item: TreeItem = m.menu.list.match_items()[0]
+	assert_eq(item.get_button_count(0), 2, "missing data and no team")
+	var i := item.get_button_by_id(0, MainMenu.Badge.NO_TEAM)
+	assert_eq(item.get_button(0, i), m.menu.no_team_icon)
+	assert_eq(item.get_button_tooltip_text(0, i), "Not on a team:\n  P16\n  P17")
+	assert_eq(DataCheck.unassigned(stray), ["P16", "P17"])
+	# Putting them on a team (saved in the sidecar) clears the badge.
+	MatchLibrary.save_meta(stray, {"teams": {"P16": MatchData.Team.BLUE, "P17": MatchData.Team.RED}})
+	m.menu.refresh()
+	item = m.menu.list.match_items()[0]
+	assert_eq(item.get_button_by_id(0, MainMenu.Badge.NO_TEAM), -1, "assigned: no badge")
+	assert_eq(DataCheck.unassigned(stray), [])
+
+
+func test_missing_text_caps_lines() -> void:
+	assert_eq(MainMenu.flag_text("Missing data:", []), "")
+	var many := range(MainMenu.MAX_ISSUES_SHOWN + 3).map(func(i): return "issue %d" % i)
+	var text := MainMenu.flag_text("Missing data:", many)
+	assert_eq(text.split("\n").size(), MainMenu.MAX_ISSUES_SHOWN + 2)
+	assert_true(text.ends_with("…and 3 more"))
+
+
+func test_data_check_caches_until_csv_changes() -> void:
+	var path := _hp_match("cached", 12)
+	assert_eq(DataCheck.issues(path), ["Only 12 of 20 ships"])
+	assert_true(FileAccess.file_exists(DataCheck.cache_path()))
+	DataCheck._cache[path].issues = ["stale"]
+	assert_eq(DataCheck.issues(path), ["stale"], "unchanged CSV: cached")
+	var f := FileAccess.open(path, FileAccess.READ_WRITE)
+	f.seek_end()
+	f.store_line(",".join(row(21, "P00", "Test Hull", on_line(0, 0.5)).map(func(v): return str(v))) + ",1,1,1")
+	f.close()
+	assert_eq(DataCheck.issues(path), ["Only 12 of 20 ships"], "changed CSV: rechecked")
+	DataCheck.prune([])
+	assert_false(DataCheck._cache.has(path), "pruned")
+
+
 func test_menu_audio_badge_and_context_menu() -> void:
 	var path := _countdown_match()
 	var m := _main()

@@ -741,6 +741,68 @@ func test_damage_not_compared_across_long_blank() -> void:
 	assert_false(d.damage_times.has("A"), "older than the window")
 
 
+# --- data_issues -----------------------------------------------------------------
+
+## Rows of a full match: `MatchData.MIN_SHIPS` pilots "P00".. (half on each start line), one
+## sample a second over 0-20 s with full HP. `skip` maps a pilot to the times it has no row;
+## `blank_hp` to the times its HP cells are blank.
+func _full_rows(ships := MatchData.MIN_SHIPS, skip := {}, blank_hp := {}) -> Array:
+	var rows := []
+	for i in ships:
+		var pilot := "P%02d" % i
+		for t in 21:
+			if t in skip.get(pilot, []):
+				continue
+			var hp: Array = ["", "", ""] if t in blank_hp.get(pilot, []) else [1, 1, 1]
+			rows.append(row(t, pilot, "Test Hull", on_line(0 if i % 2 == 0 else 7, 0.5)) + hp)
+	return rows
+
+
+func _issues(rows: Array, header := HP_HEADER) -> Array:
+	return MatchData.load_csv(write_csv(rows, header), {}, 0.0, true).data_issues()
+
+
+func test_full_match_has_no_issues() -> void:
+	assert_eq(_issues(_full_rows()), [])
+
+
+func test_too_few_ships() -> void:
+	assert_eq(_issues(_full_rows(18)), ["Only 18 of 20 ships"])
+
+
+func test_no_hp_columns_is_an_issue() -> void:
+	var rows := _full_rows().map(func(r): return r.slice(0, 11))
+	assert_eq(_issues(rows, DEFAULT_HEADER), ["No HP data"])
+
+
+func test_ship_with_position_gap() -> void:
+	# P03 has no rows 2-15 s: 1->16 is a gap, so only 0-1 and 16-20 count, 5 of 20 s.
+	var issues := _issues(_full_rows(MatchData.MIN_SHIPS, {"P03": range(2, 16)}))
+	assert_eq(issues, ["P03 (Test Hull): positions for 25% of the match"])
+
+
+func test_short_gaps_are_not_missing() -> void:
+	# A sample every 4 s still covers the whole match (gaps up to MAX_GAP_S are interpolated).
+	var skip := range(21).filter(func(t): return t % 4 != 0)
+	assert_eq(_issues(_full_rows(MatchData.MIN_SHIPS, {"P03": skip})), [])
+
+
+func test_ship_podded_early_is_not_missing() -> void:
+	var rows := _full_rows(MatchData.MIN_SHIPS, {"P03": range(5, 21)})
+	rows.append(row(5, "P03", MatchData.CAPSULE, on_line(7, 0.5)) + [1, 1, 1])
+	assert_eq(_issues(rows), [])
+
+
+func test_ship_late_to_the_match() -> void:
+	var issues := _issues(_full_rows(MatchData.MIN_SHIPS, {"P04": range(0, 15)}))
+	assert_eq(issues, ["P04 (Test Hull): positions for 25% of the match"])
+
+
+func test_ship_with_mostly_blank_hp() -> void:
+	var issues := _issues(_full_rows(MatchData.MIN_SHIPS, {}, {"P05": range(0, 15)}))
+	assert_eq(issues, ["P05 (Test Hull): HP for 29% of samples"])
+
+
 # --- plane exits ---------------------------------------------------------------
 
 const EXIT_HEADER := DEFAULT_HEADER + ",plane_exit,plane_exit_id,plane"

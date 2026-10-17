@@ -346,18 +346,10 @@ func load_match(path: String) -> bool:
 			w.queue_free()
 		breakdown_windows.clear()
 		start_button.visible = true
-	team_db = {}
-	team_sides = {}
-	side_colors = {}
 	match_internal = MatchLibrary.contains(path) and MatchLibrary.is_internal(path)
-	if Settings.get_value("teams/season_db") and MatchLibrary.contains(path) and not match_internal:
-		team_db = TeamDb.read(TeamDb.season_of(path))
-		team_sides = TeamDb.apply(team_db, data)
-		side_colors = TeamDb.side_colors(team_db, TeamDb.folder_key(path), team_sides)
-	for pilot in team_overrides:
-		if data.teams.has(pilot):
-			data.teams[pilot] = team_overrides[pilot]
-	data.fill_unknown()
+	team_db = TeamDb.db_for(path)
+	team_sides = TeamDb.settle(data, team_db, team_overrides)
+	side_colors = {} if team_db.is_empty() else TeamDb.side_colors(team_db, TeamDb.folder_key(path), team_sides)
 	match_path = path
 	audio_player.stop()
 	audio_player.stream = MatchLibrary.load_audio(path) if has_audio else null
