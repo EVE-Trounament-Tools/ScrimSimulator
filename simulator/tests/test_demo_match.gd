@@ -276,7 +276,11 @@ func test_demo_log_is_anonymized() -> void:
 	var gamelog := CombatLog.load_file(demo_log_path())
 	assert_not_null(gamelog)
 	assert_not_null(RegEx.create_from_string(PILOT_PATTERN).search(gamelog.listener), gamelog.listener)
-	var name_re := RegEx.create_from_string("^(?:(Amarr|Caldari|Gallente|Minmatar) Citizen \\d{7}|.* (Bot I|SW-300))$")
+	# Drones keep their own name where a pilot's goes, made generic like every module.
+	var name_re := RegEx.create_from_string("^(?:(Amarr|Caldari|Gallente|Minmatar) Citizen \\d{7}|Weapon [A-Z]|"
+			+ "(?:(?:Small|Medium|Heavy) )?(?:Remote Repairer|Energy Neutralizer|Energy Nosferatu|ECM|Stasis Webifier|"
+			+ "Target Painter|Sensor Dampener|Tracking Disruptor|Guidance Disruptor|Remote Sensor Booster|"
+			+ "Remote Tracking Computer|Warp Scrambler|Warp Disruptor))$")
 	for e in gamelog.entries:
 		for who in [e.source, e.target]:
 			if who != "" and name_re.search(who) == null:

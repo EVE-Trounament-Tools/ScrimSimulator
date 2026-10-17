@@ -61,8 +61,23 @@ DAMAGE_TARGET = re.compile(r">([^<>\[]+)\[([^\]<]*)\]\(([^)<]*)\)<")
 SHIP_SLOT = re.compile(r"(<color=0xFFFFFFFF><b>)([^<]+)(</b></color>)")
 TICKER_SLOT = re.compile(r"(<font size=11> \[)([^\]<]+)(\]</font>)")
 NAME_SLOT = re.compile(r"(<font size=11>\[)([^\]<]+)(\] -</font>)")
-MISS_OUT = re.compile(r"^(Your (?:group of )?.+? misses )(.+)( completely - .+)$")
-MISS_IN = re.compile(r"^(?:(.+?) belonging to )?(.+?)( misses you completely - .+)$")
+MISS_OUT = re.compile(r"^(Your (?:group of )?)(.+?)( misses )(.+)( completely - )(.+)$")
+MISS_IN = re.compile(r"^(?:(.+?) belonging to )?(.+?)( misses you completely - )(.+)$")
+# The module at the end of a line: damage "- Module - Quality", the rest "- Module</font>".
+DAMAGE_MODULE = re.compile(r"( - )([^<>]+?)( - [A-Z][a-z]+(?: [A-Za-z]+)?)$")
+TAIL_MODULE = re.compile(r"(<font size=10> - )([^<>]+)(</font>)$")
+
+# Module name -> generic name: only the words the simulator reads (combat_stats.gd's module size
+# for neut / nos cycles and its ewar keywords) survive, so a demo log doesn't show anyone's fit.
+MODULE_SIZES = ["Small", "Medium", "Heavy"]
+MODULE_KINDS = [
+    ("neutraliz", "Energy Neutralizer"), ("nosferatu", "Energy Nosferatu"), ("ecm", "ECM"),
+    ("tracking disrupt", "Tracking Disruptor"), ("guidance disrupt", "Guidance Disruptor"),
+    ("dampen", "Sensor Dampener"), ("painter", "Target Painter"), ("sensor boost", "Remote Sensor Booster"),
+    ("tracking comp", "Remote Tracking Computer"), ("webif", "Stasis Webifier"), ("stasis", "Stasis Webifier"),
+    ("scrambl", "Warp Scrambler"), ("disrupt", "Warp Disruptor"),
+    ("repair", "Remote Repairer"), ("maintenance", "Remote Repairer"), ("booster", "Remote Repairer"),
+]
 
 
 def resolve_pilot(name: str, pilots: list[str]) -> str:
@@ -109,7 +124,7 @@ def eve_time(s: str) -> datetime:
 
 def anonymize_gamelog(src: str, dst: str, rows: list[dict], log_name, ship) -> int:
     """Writes the anonymized combat of gamelog `src` during the match in `rows` to `dst`.
-    `log_name(real name)` and `ship(type)` give the replacements."""
+    `log_name(real name)` and `ship(type)` give the replacements; modules and drones get generic names."""
     times = [eve_time(r["eve_time"]) for r in rows if r.get("eve_time")]
     if not times:
         print("the CSV has no eve_time column: can't tell which log lines are the match", file=sys.stderr)
@@ -122,6 +137,20 @@ def anonymize_gamelog(src: str, dst: str, rows: list[dict], log_name, ship) -> i
         if t not in tickers:
             tickers[t] = TICKERS[len(tickers)]
         return tickers[t]
+
+    modules: dict[str, str] = {}
+
+    def module(name: str) -> str:
+        if name not in modules:
+            lower = name.lower()
+            kind = next((k for key, k in MODULE_KINDS if key in lower), None)
+            if kind is None:
+                generic = f"Weapon {chr(ord('A') + sum(m.startswith('Weapon ') for m in modules.values()))}"
+            else:
+                size = next((sz for sz in MODULE_SIZES if sz.lower() in lower), "")
+                generic = f"{size} {kind}".strip()
+            modules[name] = generic
+        return modules[name]
 
     out = []
     header = True
@@ -139,17 +168,21 @@ def anonymize_gamelog(src: str, dst: str, rows: list[dict], log_name, ship) -> i
             if m is None or m.group(2) != "combat" or not first <= eve_time(m.group(1)) <= last:
                 continue
             body = m.group(3)
-            # Drones / NPCs show their own name where a pilot's ship and name go: keep those.
+            # Drones / NPCs show their own name where a pilot's ship and name go: keep that shape.
             npcs = {ship_name for ship_name in (d[2] for d in SHIP_SLOT.finditer(body))
                     if any(n[2] == ship_name for n in NAME_SLOT.finditer(body))}
             body = DAMAGE_TARGET.sub(lambda d: f">{log_name(d[1])}[{ticker(d[2])}]({ship(d[3])})<", body)
-            body = SHIP_SLOT.sub(lambda d: d[1] + (d[2] if d[2] in npcs else ship(d[2])) + d[3], body)
+            body = SHIP_SLOT.sub(lambda d: d[1] + (module(d[2]) if d[2] in npcs else ship(d[2])) + d[3], body)
             body = TICKER_SLOT.sub(lambda d: d[1] + ticker(d[2]) + d[3], body)
-            body = NAME_SLOT.sub(lambda d: d[1] + (d[2] if d[2] in npcs else log_name(d[2])) + d[3], body)
+            body = NAME_SLOT.sub(lambda d: d[1] + (module(d[2]) if d[2] in npcs else log_name(d[2])) + d[3], body)
             if (mo := MISS_OUT.match(body)) is not None:
-                body = mo[1] + log_name(mo[2]) + mo[3]
+                body = mo[1] + module(mo[2]) + mo[3] + log_name(mo[4]) + mo[5] + module(mo[6])
             elif (mi := MISS_IN.match(body)) is not None:
-                body = (f"{mi[1]} belonging to " if mi[1] else "") + log_name(mi[2]) + mi[3]
+                body = (f"{module(mi[1])} belonging to " if mi[1] else "") + log_name(mi[2]) + mi[3] + module(mi[4])
+            elif (dm := DAMAGE_MODULE.search(body)) is not None and "<" not in dm[2]:
+                body = body[:dm.start()] + dm[1] + module(dm[2]) + dm[3]
+            elif (tm := TAIL_MODULE.search(body)) is not None:
+                body = body[:tm.start()] + tm[1] + module(tm[2]) + tm[3]
             out.append(f"[ {m.group(1)} ] (combat) {body}")
     os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
     with open(dst, "w", encoding="utf-8", newline="\n") as fout:
