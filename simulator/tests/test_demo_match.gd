@@ -67,6 +67,14 @@ func test_file_exists() -> void:
 	assert_true(FileAccess.file_exists(demo_path()), demo_path())
 
 
+## Re-voiced comms: they start with the CSV's first sample, so they run as long as it does.
+func test_audio() -> void:
+	var stream := MatchLibrary.load_audio(demo_path())
+	assert_true(stream is AudioStreamOggVorbis, MatchLibrary.audio_path(demo_path()))
+	var d := _load()
+	assert_almost(stream.get_length(), d.start_time + d.duration, 1.5)
+
+
 func test_pilots_are_anonymized() -> void:
 	var d := _load()
 	var re := RegEx.create_from_string(PILOT_PATTERN)

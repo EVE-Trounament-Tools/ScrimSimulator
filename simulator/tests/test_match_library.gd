@@ -292,7 +292,7 @@ func test_remove_deletes_audio() -> void:
 	assert_false(FileAccess.file_exists(audio))
 
 
-## A release-style `demo/` dir: the checked-in demo match and its gamelog as "Demo match".
+## A release-style `demo/` dir: the checked-in demo match, its gamelog and its audio as "Demo match".
 func _demo_dir() -> String:
 	var src: String = preload("res://tests/test_demo_match.gd").demo_path()
 	var d := temp_dir().path_join("demo")
@@ -300,6 +300,8 @@ func _demo_dir() -> String:
 	DirAccess.copy_absolute(src, d.path_join("Demo match.positions.csv"))
 	for gamelog in MatchLibrary.log_paths(src):
 		DirAccess.copy_absolute(gamelog, d.path_join("Demo match.positions.logs").path_join(gamelog.get_file()))
+	var audio := MatchLibrary.audio_path(src)
+	DirAccess.copy_absolute(audio, d.path_join("Demo match.positions." + audio.get_extension()))
 	return d
 
 
@@ -310,6 +312,7 @@ func test_add_demo_adds_match_and_logs() -> void:
 	assert_eq(entries.size(), 1)
 	assert_eq(entries[0].name, "Demo match")
 	assert_eq(MatchLibrary.log_paths(entries[0].path).size(), 1)
+	assert_true(entries[0].audio, "comms audio")
 	assert_true(Settings.get_value("library/demo_added"))
 
 
@@ -329,7 +332,7 @@ func test_add_demo_copies_folders_and_audio() -> void:
 	MatchLibrary.demo_dir = d
 	MatchLibrary.add_demo()
 	assert_eq(MatchLibrary.list().map(func(e): return [e.folder, e.name, e.audio]),
-		[["", "Demo match", false], ["Scrim", "m", true]])
+		[["", "Demo match", true], ["Scrim", "m", true]])
 
 
 func test_missing_demo_is_noop() -> void:

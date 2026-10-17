@@ -147,6 +147,7 @@ package_simulator() { # <platform> <sim exe path> <undraco exe path>
         mkdir -p "$stage/demo/$DEMO_NAME.positions.logs"
         cp "$DEMO_CSV" "$stage/demo/$DEMO_NAME.positions.csv"
         cp "${DEMO_CSV%.csv}.logs/"*.txt "$stage/demo/$DEMO_NAME.positions.logs/"
+        cp "${DEMO_CSV%.csv}.ogg" "$stage/demo/$DEMO_NAME.positions.ogg"
     fi
     if [[ "${BUNDLE_SDE:-}" == 1 ]]; then
         cp -r simulator/sde "$stage/"
