@@ -93,6 +93,20 @@ func test_apply_removes_files_and_empty_logs_dirs_but_keeps_real_identical_conte
 	assert_false(FileAccess.file_exists(csv))
 
 
+func test_remote_folder_removal_applies_after_its_contents() -> void:
+	# Base order is the site's (sorted by path): a folder before what is in it.
+	for p in ["S/", "S/T/"]:
+		WebLibrary._apply(p, "", 0)
+	WebLibrary._apply("S/m.positions.csv", SHA_A, 1)
+	WebLibrary._apply("S/T/n.positions.csv", SHA_B, 1)
+	var changes := {"S/": null, "S/T/": null, "S/T/n.positions.csv": null, "S/m.positions.csv": null}
+	var order := WebLibrary._apply_order(changes)
+	assert_eq(order, ["S/T/n.positions.csv", "S/m.positions.csv", "S/T/", "S/"])
+	for p in order:
+		WebLibrary._apply(p, null, 0)
+	assert_eq(WebLibrary.scan_local(), {})
+
+
 func test_rewrite_points_upstream_downloads_at_the_mirror() -> void:
 	WebBackend._origin = "https://sim.example"
 	assert_eq(WebBackend.rewrite_url(ShipAssets.INDEX_URL),
