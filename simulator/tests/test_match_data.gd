@@ -327,6 +327,39 @@ func test_unknown_pilot_stays_unknown_while_no_team_full() -> void:
 	assert_eq(d.teams["mid"], MatchData.Team.UNKNOWN)
 
 
+## A MatchData whose `teams` has `blue`, `red` and `unknown` pilots ("b0..", "r0..", "u0..").
+func _teams(blue: int, red: int, unknown: int) -> MatchData:
+	var d := MatchData.new()
+	for i in blue:
+		d.teams["b%d" % i] = MatchData.Team.BLUE
+	for i in red:
+		d.teams["r%d" % i] = MatchData.Team.RED
+	for i in unknown:
+		d.teams["u%d" % i] = MatchData.Team.UNKNOWN
+	return d
+
+
+func test_fill_unknown_moves_unknown_pilots_to_other_team() -> void:
+	var d := _teams(10, 3, 4)
+	assert_eq(d.fill_unknown(), ["u0", "u1", "u2", "u3"])
+	assert_eq(d.teams.values().count(MatchData.Team.RED), 7)
+	assert_eq(d.teams.values().count(MatchData.Team.UNKNOWN), 0)
+
+
+func test_fill_unknown_stops_when_other_team_full() -> void:
+	var d := _teams(8, 10, 4)
+	assert_eq(d.fill_unknown(), ["u0", "u1"])
+	assert_eq(d.teams.values().count(MatchData.Team.BLUE), 10)
+	assert_eq(d.teams["u2"], MatchData.Team.UNKNOWN)
+	assert_eq(d.teams["u3"], MatchData.Team.UNKNOWN)
+
+
+func test_fill_unknown_leaves_unknown_while_no_team_full() -> void:
+	var d := _teams(9, 9, 2)
+	assert_eq(d.fill_unknown(), [])
+	assert_eq(d.teams.values().count(MatchData.Team.UNKNOWN), 2)
+
+
 # --- deaths ------------------------------------------------------------------
 
 func test_pilot_inside_boundary_has_no_death() -> void:

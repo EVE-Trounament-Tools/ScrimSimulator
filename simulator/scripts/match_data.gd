@@ -381,7 +381,7 @@ func _assign_teams() -> void:
 
 
 ## Moves a team's pilots past `MAX_TEAM_SIZE`, furthest from its line (`line_d`) first, to the
-## other team while that has room; then, once a team is full, UNKNOWN pilots join the other.
+## other team while that has room; then fills the other team from UNKNOWN (`fill_unknown`).
 func _cap_teams(line_d: Dictionary) -> void:
 	var members := {Team.BLUE: [], Team.RED: [], Team.UNKNOWN: []}
 	for pilot in teams:
@@ -395,8 +395,18 @@ func _cap_teams(line_d: Dictionary) -> void:
 			var pilot: String = own.pop_back()
 			teams[pilot] = other_team
 			other.append(pilot)
+	fill_unknown()
+
+
+## Once a team has `MAX_TEAM_SIZE` pilots, UNKNOWN pilots (by name) join the other team until it
+## is full too. Returns the pilots moved.
+func fill_unknown() -> Array:
+	var members := {Team.BLUE: [], Team.RED: [], Team.UNKNOWN: []}
+	for pilot in teams:
+		members[teams[pilot]].append(pilot)
 	var unknown: Array = members[Team.UNKNOWN]
 	unknown.sort()
+	var moved := []
 	for team in [Team.BLUE, Team.RED]:
 		var other_team := Team.RED if team == Team.BLUE else Team.BLUE
 		var other: Array = members[other_team]
@@ -405,6 +415,8 @@ func _cap_teams(line_d: Dictionary) -> void:
 			var pilot: String = unknown.pop_front()
 			teams[pilot] = other_team
 			other.append(pilot)
+			moved.append(pilot)
+	return moved
 
 
 ## Hull radius of `ship_type` in metres, or 0.0 if unknown.

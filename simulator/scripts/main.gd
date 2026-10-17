@@ -357,6 +357,7 @@ func load_match(path: String) -> bool:
 	for pilot in team_overrides:
 		if data.teams.has(pilot):
 			data.teams[pilot] = team_overrides[pilot]
+	data.fill_unknown()
 	match_path = path
 	audio_player.stop()
 	audio_player.stream = MatchLibrary.load_audio(path) if has_audio else null
@@ -2479,7 +2480,8 @@ func _follow(pilot: String) -> void:
 		camera.set_target(ships[tracked].node.position)
 
 
-## Moves `pilot` to the other team (unknown pilots go to blue) and recolours it.
+## Moves `pilot` to the other team (unknown pilots go to blue) and recolours it; a team it fills
+## takes in the unknown pilots (`MatchData.fill_unknown`).
 func _swap_team(pilot: String) -> void:
 	var team: int = MatchData.Team.RED if data.teams.get(pilot) == MatchData.Team.BLUE else MatchData.Team.BLUE
 	data.teams[pilot] = team
@@ -2489,17 +2491,24 @@ func _swap_team(pilot: String) -> void:
 			if team_sides[team] == "":
 				team_sides[team] = TeamDb.new_team(db)
 			TeamDb.assign(db, pilot, team_sides[team]))
+	_recolor_ship(pilot)
+	for p in data.fill_unknown():
+		_recolor_ship(p)
+	_save_meta()
+	_update_file_label()
+	_refresh_roster()
+
+
+## Gives `pilot`'s ship (and death marker) its team's colour.
+func _recolor_ship(pilot: String) -> void:
 	var ship: Dictionary = ships[pilot]
-	ship.color = _team_color(team)
+	ship.color = _team_color(data.teams[pilot])
 	ship.ship_type = ""  # Forces `_update_ships` to re-tint the visual, icon and label.
 	if ship.death_marker:
 		var was_visible: bool = ship.death_marker.visible
 		ship.death_marker.queue_free()
 		ship.death_marker = _death_marker(pilot, data.deaths[pilot], ship.color)
 		ship.death_marker.visible = was_visible
-	_save_meta()
-	_update_file_label()
-	_refresh_roster()
 
 
 func _ask_rename_pilot(pilot: String) -> void:
