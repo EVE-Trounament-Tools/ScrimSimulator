@@ -15,6 +15,10 @@ migrations_dir = "migrations"
 binding = "BUCKET"
 bucket_name = "scrim-simulator"
 
+# Daily: prune usage counts older than 90 days (activity.ts).
+[triggers]
+crons = ["17 4 * * *"]
+
 [vars]
 # Largest single upload (audio files are the big ones). Free-plan Workers accept up to 100 MB.
 MAX_UPLOAD_BYTES = "100000000"

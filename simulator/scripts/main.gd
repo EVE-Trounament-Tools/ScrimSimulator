@@ -403,6 +403,8 @@ func _on_menu_match_chosen(path: String) -> void:
 		return
 	if not load_match(path):
 		menu.show_error("Failed to load %s — is it a scrim-positions CSV?" % path.get_file())
+	elif OS.has_feature("web"):
+		WebLibrary.report_watched(path)
 
 
 ## The open match was renamed in the library: follow its file.

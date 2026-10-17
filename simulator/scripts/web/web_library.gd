@@ -104,6 +104,15 @@ static func fetch_match(path: String, whole := true) -> bool:
 	return true
 
 
+## Tells the site that library match `path` was opened (its usage counts, web/worker activity.ts).
+## Fire and forget: a failed report is not worth bothering the user with.
+static func report_watched(path: String) -> void:
+	if menu == null or not MatchLibrary.contains(path):
+		return
+	await WebBackend.request(menu, HTTPClient.METHOD_POST, "/api/watched",
+		JSON.stringify({"path": _rel(path)}), ["Content-Type: application/json"])
+
+
 ## Downloads library file `abs` if it is still a placeholder. False if it couldn't.
 static func fetch_file(abs: String) -> bool:
 	if not _is_marker(abs):

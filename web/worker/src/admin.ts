@@ -1,6 +1,7 @@
 // /admin: who may log in. Admins (ADMIN_CHAR_IDS) add or remove whitelisted characters and
 // alliances by name or ID; names are resolved through ESI.
 
+import { summary } from "./activity";
 import { deps } from "./auth";
 import { Env, User, audit, escapeHtml, html, now, redirect } from "./util";
 
@@ -23,6 +24,13 @@ export async function adminPage(env: Env, user: User, message = ""): Promise<Res
 <input type="hidden" name="id" value="${r.id}"><button>Remove</button></form></td></tr>`,
     )
     .join("");
+  const act = await summary(env);
+  const pilots = act.pilots
+    .map((p) => `<tr><td>${escapeHtml(p.char_name)}</td><td>${p.days}</td><td>${p.visits}</td><td>${p.opens}</td><td>${p.last_day}</td></tr>`)
+    .join("");
+  const matches = act.matches
+    .map((m) => `<tr><td>${escapeHtml(m.match)}</td><td>${m.viewers}</td><td>${m.opens}</td></tr>`)
+    .join("");
   return html(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Scrim Simulator admin</title><style>
 body{font:15px system-ui,sans-serif;background:#0f1117;color:#dde;margin:0;padding:24px}
@@ -38,6 +46,12 @@ ${message ? `<p class="msg">${escapeHtml(message)}</p>` : ""}
 <input name="who" placeholder="Exact name or ID" required size="32"> <button>Add</button></form>
 <table><tr><th>Kind</th><th>Name</th><th>ID</th><th>Added</th><th></th></tr>${rows ||
     '<tr><td colspan="5">Nobody yet: only admins can log in.</td></tr>'}</table>
+<h1>Activity (last ${act.days} days)</h1>
+<table><tr><th>Pilot</th><th>Days</th><th>Visits</th><th>Matches opened</th><th>Last seen</th></tr>${pilots ||
+    '<tr><td colspan="5">No visits yet.</td></tr>'}</table>
+<h2>Most watched</h2>
+<table><tr><th>Match</th><th>Pilots</th><th>Opens</th></tr>${matches ||
+    '<tr><td colspan="3">No matches opened yet.</td></tr>'}</table>
 </main></body></html>`);
 }
 

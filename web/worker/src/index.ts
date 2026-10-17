@@ -2,10 +2,12 @@
 // character (see auth.ts). Layout:
 //   /auth/*               EVE SSO login, logout (and /auth/dev for local development)
 //   /admin                whitelist management (admins only)
-//   /api/*                shared match library, blobs, per-character settings (library.ts)
+//   /api/*                shared match library, blobs, per-character settings (library.ts),
+//                         match-open reports (activity.ts)
 //   /assets/*             server-side SDE / ship model / icon mirror (R2 assets/*)
 //   / and /<file>         the Godot web build named by kv current_build (R2 builds/<tag>/*)
 
+import { prune, record, watched } from "./activity";
 import { adminPage, adminPost } from "./admin";
 import { SESSION_COOKIE, callback, currentUser, devLoginAllowed, login, logout, startSession } from "./auth";
 import {
@@ -24,6 +26,9 @@ import { Env, User, cookie, escapeHtml, json, redirect, sameOrigin, scriptJson, 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     return withSecurity(await route(req, env));
+  },
+  async scheduled(_event: ScheduledController, env: Env): Promise<void> {
+    await prune(env);
   },
 } satisfies ExportedHandler<Env>;
 
@@ -100,6 +105,7 @@ async function api(req: Request, env: Env, user: User, sub: string): Promise<Res
     return body === null ? json({ error: "no settings yet" }, 404) : new Response(body, { headers: { "Cache-Control": "no-store" } });
   }
   if (sub === "settings" && m === "PUT") return putSettings(req, env, user);
+  if (sub === "watched" && m === "POST") return watched(req, env, user);
   return json({ error: "not found" }, 404);
 }
 
@@ -153,6 +159,7 @@ async function build(req: Request, env: Env, user: User, file: string): Promise<
 
   const obj = await env.BUCKET.get(key);
   if (obj === null) return noBuildPage();
+  await record(env, user);
   // Boot data the web build reads synchronously at startup (web_backend.gd): who is logged in,
   // their saved settings and the library manifest, so the first frame already shows the library.
   const boot = {

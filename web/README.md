@@ -8,6 +8,9 @@ and an R2 bucket.
 - **Shared match library.** Everything anyone uploads (match CSVs, audio, gamelogs, team edits)
   is kept on the site and visible to every allowed user. Only a match's uploader or an admin can
   rename, move, replace or remove it.
+- **Basic usage tracking.** Each day's page loads and match opens are counted per character
+  (one small row per character, day and match) and shown to admins at `/admin`. Counts older
+  than 90 days are pruned daily.
 - **Settings follow the character.** They are saved on the site, not in the browser.
 - **Assets are prepared server-side.** The SDE and the ship models are downloaded and decoded
   once by a scheduled workflow. Browsers fetch only the hulls of the match they open, and cache
@@ -126,3 +129,6 @@ All of this fits Cloudflare's free tier:
 
 Free Workers accept request bodies up to 100 MB, so a single upload (usually an audio file) is
 capped there (`MAX_UPLOAD_BYTES`). Watch R2 storage if a lot of audio piles up.
+
+Usage tracking costs one D1 write per page load or match open, well inside the free tier's
+100k writes a day.
