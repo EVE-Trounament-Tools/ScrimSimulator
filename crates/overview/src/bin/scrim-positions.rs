@@ -711,7 +711,7 @@ fn process_video(
 
     let readings: Vec<PilotReadings> =
         roster.iter().map(|p| pilot_readings(&per_observer, p, &times)).collect();
-    if readings.iter().all(|r| r.distances.is_empty()) {
+    if readings.iter().all(|r| r.distances.iter().all(|(_, d)| d.contains(&None))) {
         bail!("no pilot was seen by all three observers in the same tick");
     }
     if cli.dump_readings {
@@ -920,21 +920,26 @@ fn safe_observer_distance_m() -> f64 {
     (plane_exit::BOUNDARY_RADIUS_M + SAFE_PLANE_MARGIN_M) * 3f64.sqrt()
 }
 
-/// One pilot's per-tick inputs to the solve: the ticks where all three observers have an
-/// unflagged distance, and the ticks with a usable speed.
+/// One pilot's per-tick inputs to the solve: the ticks where at least [`MIN_OBSERVERS`] observers
+/// have an unflagged distance (`None` for the others), and the ticks with a usable speed.
 struct PilotReadings {
-    distances: Vec<(f64, [f64; 3])>,
+    distances: Vec<(f64, [Option<f64>; 3])>,
     speed: BTreeMap<u64, f64>,
 }
 
-/// `--dump-readings` output: one row per pilot per tick with all three distances as the overview
-/// shows them (hull-edge, without the observer radius).
+/// A tick needs this many observers' distances to be used: two carry a track on through one
+/// observer losing the pilot (e.g. pushed off the bottom of its overview by a faded row).
+const MIN_OBSERVERS: usize = 2;
+
+/// `--dump-readings` output: one row per pilot per tick with its distances as the overview shows
+/// them (hull-edge, without the observer radius), blank where an observer had none.
 fn readings_csv(roster: &[Pilot], readings: &[PilotReadings]) -> String {
     let mut csv = String::from("t,pilot,d_a,d_b,d_c,speed_mps\n");
     for (pilot, r) in roster.iter().zip(readings) {
-        for &(t, [a, b, c]) in &r.distances {
+        for &(t, d) in &r.distances {
+            let [a, b, c] = d.map(|x| x.map_or(String::new(), |x| format!("{x:.0}")));
             let speed = r.speed.get(&t.to_bits()).map_or(String::new(), |v| format!("{v:.0}"));
-            let _ = writeln!(csv, "{t:.3},{},{a:.0},{b:.0},{c:.0},{speed}", pilot.name);
+            let _ = writeln!(csv, "{t:.3},{},{a},{b},{c},{speed}", pilot.name);
         }
     }
     csv
@@ -942,13 +947,14 @@ fn readings_csv(roster: &[Pilot], readings: &[PilotReadings]) -> String {
 
 impl PilotReadings {
     /// This pilot's distance ticks with their speeds, as corner inference and the solve take them:
-    /// the overview's hull-edge distances plus the observers' hull radius, so centre to centre.
+    /// the overview's hull-edge distances plus the observers' hull radius, so centre to centre
+    /// (NaN where an observer had none).
     fn as_readings(&self, observer_radius_m: f64) -> Vec<Reading> {
         self.distances
             .iter()
             .map(|&(t, d)| Reading {
                 t,
-                d: d.map(|x| x + observer_radius_m),
+                d: d.map(|x| x.map_or(f64::NAN, |x| x + observer_radius_m)),
                 speed_mps: self.speed.get(&t.to_bits()).copied(),
             })
             .collect()
@@ -967,8 +973,9 @@ fn pilot_readings(per_observer: &[Vec<Track>], pilot: &Pilot, times: &[f64]) -> 
     };
     let mut out = PilotReadings { distances: Vec::new(), speed: BTreeMap::new() };
     for &t in times {
-        if let [Some(a), Some(b), Some(c)] = [0, 1, 2].map(|o| unflagged(&dist[o], t)) {
-            out.distances.push((t, [a, b, c]));
+        let d = [0, 1, 2].map(|o| unflagged(&dist[o], t));
+        if d.iter().flatten().count() >= MIN_OBSERVERS {
+            out.distances.push((t, d));
         }
         let mut v: Vec<f64> = vel.iter().filter_map(|s| unflagged(s, t)).collect();
         if !v.is_empty() {
@@ -1550,7 +1557,7 @@ mod tests {
 
     #[test]
     fn readings_add_the_observer_radius() {
-        let mut r = PilotReadings { distances: vec![(1.5, [10_000.0, 20_000.0, 0.0])], speed: BTreeMap::new() };
+        let mut r = PilotReadings { distances: vec![(1.5, [Some(10_000.0), Some(20_000.0), Some(0.0)])], speed: BTreeMap::new() };
         r.speed.insert(1.5f64.to_bits(), 300.0);
         let got = r.as_readings(250.0);
         assert_eq!(got.len(), 1);
