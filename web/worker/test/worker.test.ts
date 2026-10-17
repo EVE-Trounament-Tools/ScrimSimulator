@@ -2,6 +2,7 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { prune } from "../src/activity";
+import { folders } from "../src/admin";
 import { deps, resetJwksCache, startSession, verifyJwt } from "../src/auth";
 import { matchKey, validPath } from "../src/library";
 import { route } from "../src/index";
@@ -383,6 +384,37 @@ describe("admin", () => {
     expect(await r.text()).toContain("Added alliance Some Alliance");
     const row = await E.DB.prepare("SELECT name FROM whitelist WHERE kind = 'alliance' AND id = 99000001").first();
     expect(row).toEqual({ name: "Some Alliance" });
+  });
+
+  it("lists library folders to download", async () => {
+    const row = (path: string, size = 0) => ({ path, sha: "", size, owner_id: 1, owner_name: "A", mtime: 0 });
+    expect(
+      folders([
+        row("Empty/"),
+        row("S1/a.positions.csv", 10),
+        row("S1/a.positions.logs/x.txt", 5),
+        row("S1/Sub/b.positions.csv", 20),
+        row("S1/Sub/b.positions.ogg", 100),
+        row("top.positions.csv", 1),
+      ]).map((f) => [f.path, f.matches, f.files, f.bytes]),
+    ).toEqual([
+      ["", 3, 5, 136],
+      ["Empty/", 0, 0, 0],
+      ["S1/", 2, 4, 135],
+      ["S1/Sub/", 1, 2, 120],
+    ]);
+
+    alliances[ADMIN] = null;
+    const admin = await session(ADMIN, "Boss");
+    const csv = await upload(admin, "t,pilot\n0,x\n");
+    await call("/api/library/commit", {
+      method: "POST",
+      cookie: admin,
+      json: { ops: [{ op: "put", path: "S1/m.positions.csv", ...csv, prev: null }] },
+    });
+    const page = await (await call("/admin", { cookie: admin })).text();
+    expect(page).toContain('data-folder="S1/"');
+    expect(page).toContain('data-folder=""');
   });
 });
 

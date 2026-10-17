@@ -7,7 +7,8 @@ and an R2 bucket.
   whitelisted alliances and admins get in. Affiliation is re-checked daily.
 - **Shared match library.** Everything anyone uploads (match CSVs, audio, gamelogs, team edits)
   is kept on the site and visible to every allowed user. Only a match's uploader or an admin can
-  rename, move, replace or remove it.
+  rename, move, replace or remove it. Admins can download any folder, or the whole library, as a
+  zip at `/admin`.
 - **Basic usage tracking.** Each day's page loads and match opens are counted per character
   (one small row per character, day and match) and shown to admins at `/admin`. Counts older
   than 90 days are pruned daily.
@@ -26,7 +27,7 @@ lives in `simulator/scripts/web/`. Each existing script reaches it only through 
 ```
 browser ──> Worker (web/worker, one origin)
              /auth/*    EVE SSO login, logout
-             /admin     whitelist (admins: ADMIN_CHAR_IDS)
+             /admin     whitelist, usage, folder downloads (admins: ADMIN_CHAR_IDS)
              /api/*     library manifest + commits, blobs, settings      D1 + R2 blobs/<sha>
              /assets/*  ship_sizes.json, icons.zip, gallery/…, types/…   R2 assets/
              /, /<f>    Godot web export of kv current_build             R2 builds/<tag>/
@@ -41,6 +42,9 @@ blobs, so renames and moves cost nothing.
 - Files not needed yet are small placeholders. A match's CSV and audio download when it's
   opened.
 - Commits carry each path's expected sha, so concurrent edits are detected, not lost.
+- Folder downloads are zipped in the admin's browser from the manifest and blobs, since a
+  free-tier Worker has too little CPU time to checksum large audio files. The zips are
+  uncompressed and have no ZIP64, so each is capped at 4 GB.
 - Blobs are never deleted, so a removed match can be restored by an admin re-committing its sha
   (see the `audit` table).
 
