@@ -25,8 +25,8 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 const SETTINGS_KEY: &str = "settings";
 
-/// A Paladin's hull radius, the default observer.
-const PALADIN_RADIUS_M: &str = "250";
+/// An Archon's hull radius, the default observer.
+const ARCHON_RADIUS_M: &str = "1643";
 /// The largest observer radius `scrim-positions` accepts.
 const MAX_OBSERVER_RADIUS_M: f64 = 10_000.0;
 
@@ -49,6 +49,9 @@ struct Settings {
     /// next search; the rest were picked by hand.
     found_logs: Vec<String>,
     extract_audio: bool,
+    /// `--recover-hidden`: name rows whose pilot name was hidden, from their slot in the
+    /// name-sorted overview.
+    recover_hidden: bool,
     scene: String,
     /// The observers' hull radius in metres (all three the same), `--observer-radius-m`, as typed.
     observer_radius: String,
@@ -65,8 +68,9 @@ impl Default for Settings {
             found_logs: Vec::new(),
             combat_log_dir: default_gamelogs().map(path_string).unwrap_or_default(),
             extract_audio: true,
+            recover_hidden: false,
             scene: default_scene().map(path_string).unwrap_or_default(),
-            observer_radius: PALADIN_RADIUS_M.to_string(),
+            observer_radius: ARCHON_RADIUS_M.to_string(),
         }
     }
 }
@@ -612,6 +616,9 @@ impl App {
         if !s.extract_audio {
             cmd.arg("--no-audio");
         }
+        if s.recover_hidden {
+            cmd.arg("--recover-hidden");
+        }
         for log in &s.combat_log_files {
             cmd.arg("--combat-log").arg(log);
         }
@@ -873,7 +880,7 @@ impl eframe::App for App {
                     });
                     ui.label("Observer radius");
                     ui.horizontal(|ui| {
-                        let field = egui::TextEdit::singleline(&mut s.observer_radius).hint_text(PALADIN_RADIUS_M);
+                        let field = egui::TextEdit::singleline(&mut s.observer_radius).hint_text(ARCHON_RADIUS_M);
                         let edit = ui.add_sized([60.0, ui.spacing().interact_size.y], field);
                         // Out-of-range values snap to the nearer bound once typing is done.
                         if edit.lost_focus() {
@@ -887,6 +894,10 @@ impl eframe::App for App {
                     ui.end_row();
                     ui.label("");
                     ui.checkbox(&mut s.extract_audio, "Extract audio (<video>.mp3 next to the CSV)");
+                    ui.end_row();
+                    ui.label("");
+                    ui.checkbox(&mut s.recover_hidden, "Recover hidden pilots (overviews must be sorted by Name)")
+                        .on_hover_text("Names rows whose pilot name couldn't be read (e.g. under a hover tooltip) from where they sit in the alphabetical list");
                     ui.end_row();
                 });
             });

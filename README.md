@@ -56,6 +56,10 @@ Each release has two zips per platform. You only need the first to watch matches
 clients side by side, and explains how to set it up: which windows to capture, how to crop to the
 overview, and which video settings to use. Record near-lossless. The OCR needs crisp text.
 
+Every observer's overview must be **sorted by Name** (as the layout below is), and keep the mouse
+off the observer clients while recording: a hover tooltip over the overview hides names. See
+[Overview sort](docs/eve/README.md#overview-sort) for why.
+
 [`docs/eve/`](docs/eve/README.md) has an EVE client window layout for the observers (2486×1374
 windowed, UI scale 1.75) and explains how to copy it onto each observer character. The OBS
 template's crops are made for this layout, so if every observer uses it there is nothing to crop.
@@ -76,7 +80,7 @@ corners' lines they're on and how far out they are from the match itself; if you
 distance, give it with `--observer-distance-km 235`.
 
 The overview measures distance from the observer's hull edge, not its centre, so the observers'
-hull radius is added to every distance before solving. It defaults to a Paladin's (250 m); if the
+hull radius is added to every distance before solving. It defaults to an Archon's (1643 m); if the
 observers fly something else, give its radius with `--observer-radius-m` (0-10000) or the
 "Observer radius" field in `positions-gui`. All three observers are assumed to be the same hull.
 
@@ -135,12 +139,17 @@ This writes `out/match.positions.csv` and the recording's audio as `out/match.mp
 the video frame. The one in `docs/obs/` matches the OBS template; adjust its panel rectangles if
 your layout differs.
 
+If something covered some pilots' names in an observer's overview (a hover tooltip, say), add
+`--recover-hidden`: rows whose name can't be read are named from their place in the name-sorted
+list, and the run prints which pilots it recovered and for how many seconds. It needs the
+overviews sorted by Name ([Overview sort](docs/eve/README.md#overview-sort)).
+
 ### Without the command line
 
 `scrim-positions-gui` runs `scrim-positions` from a window: pick the video, the chat log (see
 below), the output folder and, optionally, the pilots' gamelogs (**Add logs…**; each is listed
 with its character so you can tell them apart), untick **Extract audio** if you
-don't want the mp3, and press **Run**. Its output is shown as it works, and your choices are
+don't want the mp3, tick **Recover hidden pilots** for `--recover-hidden`, and press **Run**. Its output is shown as it works, and your choices are
 remembered for next time. Picking a video also picks, as ScrimTrimmer does, the Local chat log
 last written closest to the video's file time (in the chat log's folder, or `Chatlogs` next to the
 Gamelogs folder), and warns when the chosen chat log is from another session. It looks for `scrim-positions` and `scene.json` next to itself.

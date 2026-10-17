@@ -1,9 +1,9 @@
 # OBS scene template
 
 `scrim-recording.json` is an OBS scene collection for recording a match from three observer
-clients on Linux. Its one scene, `Scrim`, on a 3712×1600 canvas, holds seven Window Capture
+clients on Linux. Its one scene, `Scrim`, on a 3712×1856 canvas, holds seven Window Capture
 (Xcomposite) sources: the three observers' overviews, one observer's Local chat, and three blocks
-of locked targets for tracking ship HP (two 3×3 grids and one column of two, 20 targets in all).
+of locked targets for tracking ship HP (three 3×3 grids, 27 targets in all).
 
 ```
 +----------------+----------------+-----------+-----------+
@@ -14,9 +14,11 @@ of locked targets for tracking ship HP (two 3×3 grids and one column of two, 20
 |                |   Observer C   |           |           |
 |                |  (1280×800)    +-----------+-----------+
 +----------------+                | Targets 3 |
-| Chat (1280×400)|                | 1×2       |
-|                |                | (576×672) |
-+----------------+----------------+-----------+
+| Chat (1280×400)|                | 3×3       |
+|                |                | (576×928) |
++----------------+----------------+           |
+                                  |           |
+                                  +-----------+
 ```
 
 The overview and chat sources are fitted into their slots with "scale to inner bounds", so whatever
@@ -41,14 +43,14 @@ by accident.
    default font size so Tesseract can read it.
 5. Point each **Targets** source at an observer window whose locked targets it should record. A
    source can use any observer, and several can share one. In that client, arrange the locked
-   targets in the block's shape: three rows of three for Targets 1 and 2, a column of two for
-   Targets 3. Then crop the source to exactly that block: the brackets with their
-   shield/armor/hull rings and the pilot names underneath. At UI scale 1.75 one bracket, with its
-   name and distance, is about 190×300, so a 3×3 grid comes to about 574×928 and the column of two
-   to about 194×588. Don't let a crop go past its slot (576×928, or 576×672 for Targets 3), or the
-   block gets scaled down. The template's crops were measured on clients with the target bar at
+   targets in the block's shape, three rows of three. Then crop the source to exactly that block:
+   the brackets with their shield/armor/hull rings and the pilot names underneath. At UI scale 1.75
+   one bracket, with its name and distance, is about 190×300, so a 3×3 grid comes to about 574×928.
+   Don't let a crop go past its 576×928 slot, or the block gets scaled down. A block doesn't have
+   to be full, and the same ship can be locked in several blocks: its HP is the median of every
+   reading of it. The template's crops were measured on clients with the target bar at
    the top left of the screen. If yours is somewhere else, adjust them.
-6. **Settings → Video**: base (canvas) and output resolution both **3712×1600**, so the output is
+6. **Settings → Video**: base (canvas) and output resolution both **3712×1856**, so the output is
    never rescaled. **Settings → Output → Recording**: near-lossless encode (x264 CQP ≈ 12, or
    lossless), 30 or 60 fps. See [DESIGN.md §3.3](../DESIGN.md#33-obs) for why.
 

@@ -37,8 +37,8 @@ pub struct Scene {
     #[serde(default)]
     pub chat: Option<Rect>,
     /// Locked-target blocks: each rect holds one contiguous grid of locked-target brackets
-    /// (shield/armor/hull rings) recorded at 1:1, for tracking ship HP — the OBS template uses two
-    /// 3x3 grids and one column of two. Read by `crate::targets`.
+    /// (shield/armor/hull rings) recorded at 1:1, for tracking ship HP — the OBS template uses three
+    /// 3x3 grids. Read by `crate::targets`.
     #[serde(default)]
     pub targets: Vec<Rect>,
 }

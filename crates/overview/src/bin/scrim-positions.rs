@@ -9,7 +9,7 @@
 //! observers don't move during a video, so with several matches every match is OCR'd first and
 //! the observers' layout is inferred once from all of them.
 //! The overview measures distance from the observer's hull edge, so the observers' hull radius
-//! (`--observer-radius-m`, a Paladin's by default) is added to every distance before solving.
+//! (`--observer-radius-m`, an Archon's by default) is added to every distance before solving.
 //! Where a track grazes the observers' plane and the distances can't tell which side it left for,
 //! `overview::plane_exit` turns it clockwise unless the match (boundary, start, incoming motion,
 //! scrams in the combat logs) says otherwise, and the CSV's `plane_exit,plane_exit_id,plane`
@@ -43,8 +43,9 @@ use clap::Parser;
 use glyph::Font;
 use overview::layout::{Layout, Rect};
 use overview::panel::{calibrate, crop_scaled, PanelSpec, Scene};
-use overview::row::{read_rows, RowReading};
-use overview::ship_types::ShipTypes;
+use overview::recover::{self, SlotRow};
+use overview::row::{read_rows_opts, RowReading};
+use overview::ship_types::{Resolution, ShipTypes};
 use overview::gamelog;
 use overview::plane_exit::{self, Exit, PilotTrack, Plane, Scram, Turn};
 use overview::solve::{self, direction, infer_observers, solve_track, Fix, Reading};
@@ -89,10 +90,10 @@ struct Cli {
     /// km (all three the same; 86.6 is on the corners). Fitted from the match when not given.
     #[arg(long = "observer-distance-km", value_name = "KM")]
     observer_distance_km: Option<f64>,
-    /// The observers' hull radius in metres (all three the same; 0-10000, default a Paladin's).
+    /// The observers' hull radius in metres (all three the same; 0-10000, default an Archon's).
     /// The overview measures from the observer's hull edge, so this is added to every distance
     /// before solving.
-    #[arg(long = "observer-radius-m", value_name = "M", default_value_t = PALADIN_RADIUS_M, value_parser = parse_observer_radius)]
+    #[arg(long = "observer-radius-m", value_name = "M", default_value_t = ARCHON_RADIUS_M, value_parser = parse_observer_radius)]
     observer_radius_m: f64,
     /// EVE Local chat log covering the recording (repeatable). Finds the match's CD -> WF/GF
     /// window and the EVE time base with ScrimTrimmer; only the match is processed, and the CSV
@@ -130,11 +131,16 @@ struct Cli {
     /// The ScrimTrimmer bridge script.
     #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/scrim_trimmer_bridge.py"))]
     trimmer_bridge: PathBuf,
+    /// Name rows whose pilot name was hidden (e.g. by a hover tooltip parked on an observer's
+    /// overview) from their slot in the list. Needs every observer's overview sorted by Name
+    /// (`docs/eve/README.md`); frames that aren't in name order are left alone.
+    #[arg(long)]
+    recover_hidden: bool,
     videos: Vec<PathBuf>,
 }
 
-/// A Paladin's hull radius (SDE), the default observer.
-const PALADIN_RADIUS_M: f64 = 250.0;
+/// An Archon's hull radius (SDE), the default observer.
+const ARCHON_RADIUS_M: f64 = 1643.0;
 /// The largest `--observer-radius-m` accepted.
 const MAX_OBSERVER_RADIUS_M: f64 = 10_000.0;
 
@@ -659,6 +665,8 @@ fn process_video(
     }
 
     let mut trackers: Vec<Tracker> = panels.iter().map(|_| Tracker::new()).collect();
+    // Each panel's rows per frame, with the track each joined, for `--recover-hidden`.
+    let mut slots: Vec<Vec<Vec<RawRow>>> = vec![Vec::new(); panels.len()];
     let mut targets = TargetReader::new(&scene.targets, &cli.tesseract);
     let mut times = Vec::new();
     loop {
@@ -679,11 +687,14 @@ fn process_video(
             .map(|&(f, p)| {
                 let panel = &panels[p];
                 let crop = crop_scaled(&pending[f].image, panel.spec.rect, panel.scale);
-                read_rows(&crop, &panel.layout, font)
+                read_rows_opts(&crop, &panel.layout, font, cli.recover_hidden)
             })
             .collect();
         for (&(f, p), r) in jobs.iter().zip(&rows) {
-            trackers[p].observe(pending[f].t, r);
+            let ids = trackers[p].observe(pending[f].t, r);
+            if cli.recover_hidden {
+                slots[p].push(r.iter().zip(ids).map(|(row, id)| RawRow::new(pending[f].t, row, id)).collect());
+            }
         }
         targets.observe(&pending);
         times.extend(pending.iter().map(|f| f.t));
@@ -692,8 +703,11 @@ fn process_video(
     }
     eprintln!();
 
-    let per_observer: Vec<Vec<Track>> = trackers.into_iter().map(Tracker::finish).collect();
-    let roster = build_roster(&per_observer, times.len());
+    let mut per_observer: Vec<Vec<Track>> = trackers.into_iter().map(Tracker::finish).collect();
+    let mut roster = build_roster(&per_observer, times.len());
+    if cli.recover_hidden {
+        roster = recover_hidden(&mut per_observer, roster, &slots);
+    }
 
     let readings: Vec<PilotReadings> =
         roster.iter().map(|p| pilot_readings(&per_observer, p, &times)).collect();
@@ -1006,6 +1020,134 @@ fn build_roster(per_observer: &[Vec<Track>], n_frames: usize) -> Vec<Pilot> {
     roster
 }
 
+/// One overview row as read, kept for `--recover-hidden`: the track it joined (`None` for a blank
+/// Name cell), its ship type as read, and its sample.
+#[derive(Clone)]
+struct RawRow {
+    track: Option<usize>,
+    ship_type: String,
+    sample: Sample,
+}
+
+impl RawRow {
+    fn new(t: f64, row: &RowReading, track: Option<usize>) -> RawRow {
+        RawRow {
+            track,
+            ship_type: row.ship_type.text.trim().to_string(),
+            sample: Sample { t, distance_m: row.distance.ok(), speed_mps: row.velocity.ok() },
+        }
+    }
+}
+
+/// `--recover-hidden`: name each observer's unreadable rows from their slot in its name-sorted
+/// overview (`overview::recover`), giving every recovered pilot an extra track in that observer.
+/// Pilots seen by two or more observers are the anchors and candidates; a pilot only one
+/// observer founded is the junk a hidden name reads as, and is dropped once its rows are
+/// recovered as someone else's.
+fn recover_hidden(per_observer: &mut [Vec<Track>], roster: Vec<Pilot>, slots: &[Vec<Vec<RawRow>>]) -> Vec<Pilot> {
+    let observers = |p: &Pilot| {
+        let mut o: Vec<usize> = p.members.iter().map(|m| m.0).collect();
+        o.sort_unstable();
+        o.dedup();
+        o.len()
+    };
+    let confirmed: Vec<usize> = (0..roster.len()).filter(|&i| observers(&roster[i]) >= 2).collect();
+    let candidates: Vec<recover::Candidate> = confirmed
+        .iter()
+        .map(|&i| {
+            let mut ship_types: Vec<String> = Vec::new();
+            for &(o, t) in &roster[i].members {
+                let tr = &per_observer[o][t];
+                for ty in [&tr.ship_type, &tr.lost_ship].into_iter().flatten() {
+                    if ty != CAPSULE && !ship_types.contains(ty) {
+                        ship_types.push(ty.clone());
+                    }
+                }
+            }
+            recover::Candidate { name: roster[i].name.clone(), ship_types }
+        })
+        .collect();
+    // (observer, track id) -> candidate.
+    let mut by_track: HashMap<(usize, usize), usize> = HashMap::new();
+    for (c, &i) in confirmed.iter().enumerate() {
+        for &(o, t) in &roster[i].members {
+            by_track.insert((o, per_observer[o][t].id), c);
+        }
+    }
+
+    let ship_types = ShipTypes::builtin();
+    let known = |text: &str| match ship_types.resolve(text) {
+        Resolution::Exact(name) | Resolution::Corrected { name, .. } => Some(name.to_string()),
+        _ => None,
+    };
+    let mut roster = roster;
+    let mut reassigned: Vec<(usize, usize)> = Vec::new();
+    let mut report: Vec<String> = Vec::new();
+    for (o, frames) in slots.iter().enumerate() {
+        let rows: Vec<Vec<SlotRow>> = frames
+            .iter()
+            .map(|frame| {
+                frame
+                    .iter()
+                    .map(|r| SlotRow {
+                        pilot: r.track.and_then(|id| by_track.get(&(o, id)).copied()),
+                        ship_type: known(&r.ship_type),
+                        sample: r.sample,
+                    })
+                    .collect()
+            })
+            .collect();
+        let rec = recover::recover(&rows, &candidates);
+        for &(f, r, _) in &rec.assigned {
+            if let Some(id) = frames[f][r].track {
+                reassigned.push((o, id));
+            }
+        }
+        for (c, samples) in rec.samples.into_iter().enumerate() {
+            if samples.is_empty() {
+                continue;
+            }
+            report.push(format!("{} ({}, {})", candidates[c].name, observer_name(o), samples.len()));
+            let id = per_observer[o].iter().map(|t| t.id + 1).max().unwrap_or(0);
+            let mut track = Track::new(id, &candidates[c].name);
+            track.ship_type = candidates[c].ship_types.first().cloned();
+            track.samples = samples;
+            per_observer[o].push(track);
+            roster[confirmed[c]].members.push((o, per_observer[o].len() - 1));
+        }
+        if rec.frames_out_of_order * 2 > frames.len() {
+            eprintln!(
+                "  ! observer {}: {} of {} frames out of name order — is its overview sorted by Name?",
+                observer_name(o),
+                rec.frames_out_of_order,
+                frames.len()
+            );
+        }
+        if rec.runs_skipped > 0 || rec.frames_out_of_order > 0 {
+            println!(
+                "  recovery, observer {}: {} frame(s) out of name order, {} run(s) of hidden rows left unnamed",
+                observer_name(o),
+                rec.frames_out_of_order,
+                rec.runs_skipped
+            );
+        }
+    }
+    if report.is_empty() {
+        println!("  recovered no hidden rows");
+    } else {
+        println!("  recovered hidden rows (pilot (observer, rows)): {}", report.join(", "));
+    }
+    roster.retain(|p| {
+        observers(p) >= 2 || !p.members.iter().all(|&(o, t)| reassigned.contains(&(o, per_observer[o][t].id)))
+    });
+    roster
+}
+
+/// Observer `o`'s letter, as the scene names panels A, B, C.
+fn observer_name(o: usize) -> char {
+    (b'A' + o as u8) as char
+}
+
 /// Whether an unmatched track is real enough to be its own pilot: long enough, with enough
 /// readable distances, and a name EVE could actually issue (3+ characters). Junk rows — e.g. a
 /// lone `"j"` read off stray ink below the list — fail at least one of these.
@@ -1066,9 +1208,10 @@ fn observer_series(
     by_t.into_iter().zip(flags).map(|((t, d), f)| (t, (d, f))).collect()
 }
 
-/// One ring read in one frame, with its label when it was read.
+/// One ring read in one frame, with its block and its label when it was read.
 struct TargetSample {
     t: f64,
+    block: usize,
     hp: Hp,
     label: Option<Label>,
 }
@@ -1174,26 +1317,27 @@ impl<'a> TargetReader<'a> {
             }
             let labels = self.cache.labels(b, &centers[j]);
             for (i, ring) in rings[j].iter().enumerate() {
-                self.samples.push(TargetSample { t, hp: ring.hp, label: labels.map(|l| l[i].clone()) });
+                self.samples.push(TargetSample { t, block: b, hp: ring.hp, label: labels.map(|l| l[i].clone()) });
             }
         }
     }
 
     /// Each roster pilot's HP per tick (keyed by `t.to_bits()`): every ring whose label matches
-    /// the pilot (`overview::targets::match_label`), the median per arc when several observers
-    /// had them locked, then a 3-tick running median to drop one-tick misreads (combat text
-    /// drawn across a ring).
+    /// the pilot (`overview::targets::match_label`), pooled across blocks by [`pool_hp`], then a
+    /// 3-tick running median to drop one-tick misreads (combat text drawn across a ring).
     fn pilot_hp(&self, per_observer: &[Vec<Track>], roster: &[Pilot]) -> Vec<BTreeMap<u64, Hp>> {
-        let mut per_pilot: Vec<BTreeMap<u64, Vec<Hp>>> = vec![BTreeMap::new(); roster.len()];
         if self.samples.is_empty() {
             return vec![BTreeMap::new(); roster.len()];
         }
         let ship_types = ShipTypes::builtin();
         let distances: Vec<BTreeMap<u64, Vec<f64>>> = roster.iter().map(|p| pilot_distances(per_observer, p)).collect();
         let mut candidates: HashMap<u64, Vec<(String, Vec<f64>)>> = HashMap::new();
-        let (mut matched, mut unmatched) = (0usize, 0usize);
+        let mut matches = Vec::with_capacity(self.samples.len());
         for s in &self.samples {
-            let Some(label) = &s.label else { continue };
+            let Some(label) = &s.label else {
+                matches.push(None);
+                continue;
+            };
             let key = s.t.to_bits();
             let at_t = candidates.entry(key).or_insert_with(|| {
                 roster
@@ -1207,21 +1351,47 @@ impl<'a> TargetReader<'a> {
                 .zip(at_t.iter())
                 .map(|(p, (ty, d))| Candidate { name: &p.name, ship_type: ty, ranges_m: d.clone() })
                 .collect();
-            match match_label(label, &cands, &ship_types) {
-                Some(i) => {
-                    per_pilot[i].entry(key).or_default().push(s.hp);
-                    matched += 1;
-                }
-                None => unmatched += 1,
-            }
+            matches.push(match_label(label, &cands, &ship_types));
         }
+        let (per_pilot, clashes) = pool_hp(&self.samples, &matches, roster.len());
         let pilots = per_pilot.iter().filter(|m| !m.is_empty()).count();
+        let matched = per_pilot.iter().flat_map(|m| m.values()).map(Vec::len).sum::<usize>();
+        let labelled = self.samples.iter().filter(|s| s.label.is_some()).count();
         println!(
-            "  locked targets: HP for {pilots} pilot(s) from {matched} ring readings; {unmatched} readings matched no pilot, {} had no label",
-            self.samples.iter().filter(|s| s.label.is_none()).count()
+            "  locked targets: HP for {pilots} pilot(s) from {matched} ring readings; {} readings matched no pilot, {clashes} were dropped as one block's rings matching the same pilot, {} had no label",
+            matches.iter().filter(|m| m.is_none()).count() - (self.samples.len() - labelled),
+            self.samples.len() - labelled
         );
         per_pilot.into_iter().map(|m| smooth_hp(&m)).collect()
     }
+}
+
+/// Each pilot's ring readings per tick (keyed by `t.to_bits()`), from `samples` and the pilot
+/// each one matched (`matches`, parallel to it), with how many readings were dropped as clashes.
+/// Any block may be missing a pilot, and a pilot may show in several blocks (observers lock the
+/// same ship, or two OBS sources share a client): all their readings are kept, for the median
+/// across them. But one block is one client's targets, and a client can't lock a ship twice, so
+/// when two rings in a block match the same pilot in one frame, a label was misread and neither
+/// reading counts.
+fn pool_hp(samples: &[TargetSample], matches: &[Option<usize>], pilots: usize) -> (Vec<BTreeMap<u64, Vec<Hp>>>, usize) {
+    let mut claims: HashMap<(u64, usize, usize), usize> = HashMap::new();
+    for (s, m) in samples.iter().zip(matches) {
+        if let Some(i) = *m {
+            *claims.entry((s.t.to_bits(), s.block, i)).or_default() += 1;
+        }
+    }
+    let mut per_pilot: Vec<BTreeMap<u64, Vec<Hp>>> = vec![BTreeMap::new(); pilots];
+    let mut clashes = 0;
+    for (s, m) in samples.iter().zip(matches) {
+        let Some(i) = *m else { continue };
+        let key = s.t.to_bits();
+        if claims[&(key, s.block, i)] > 1 {
+            clashes += 1;
+        } else {
+            per_pilot[i].entry(key).or_default().push(s.hp);
+        }
+    }
+    (per_pilot, clashes)
 }
 
 /// A pilot's distance from each observer that read one, per tick (keyed by `t.to_bits()`).
@@ -1399,7 +1569,7 @@ mod tests {
             assert!(parse_observer_radius(bad).is_err(), "{bad}");
         }
         let cli = Cli::try_parse_from(["scrim-positions", "--scene", "s.json", "v.mkv"]).unwrap();
-        assert_eq!(cli.observer_radius_m, PALADIN_RADIUS_M);
+        assert_eq!(cli.observer_radius_m, ARCHON_RADIUS_M);
     }
 
     #[test]
@@ -1499,12 +1669,44 @@ mod tests {
         assert_eq!([at(0.0), at(1.0), at(2.0), at(3.0)], [0.9, 0.8, 0.8, 0.8]);
     }
 
+    fn sample(t: f64, block: usize, shield: f32) -> TargetSample {
+        TargetSample { t, block, hp: Hp { shield, armor: 1.0, hull: 1.0 }, label: None }
+    }
+
+    #[test]
+    fn hp_pools_blocks_that_miss_or_share_a_pilot() {
+        // Pilot 0 is in blocks 0 and 2 at t=0 and only block 2 at t=1; pilot 1 only in block 1;
+        // pilot 2 in none. Block 1 has a ring that matched nobody.
+        let samples = [sample(0.0, 0, 0.6), sample(0.0, 2, 0.4), sample(0.0, 1, 0.9), sample(0.0, 1, 0.3), sample(1.0, 2, 0.5)];
+        let matches = [Some(0), Some(0), Some(1), None, Some(0)];
+        let (per_pilot, clashes) = pool_hp(&samples, &matches, 3);
+        assert_eq!(clashes, 0);
+        let shields = |p: usize, t: f64| per_pilot[p][&t.to_bits()].iter().map(|h| h.shield).collect::<Vec<_>>();
+        assert_eq!(shields(0, 0.0), [0.6, 0.4]);
+        assert_eq!(shields(0, 1.0), [0.5]);
+        assert_eq!(shields(1, 0.0), [0.9]);
+        assert!(!per_pilot[1].contains_key(&1.0f64.to_bits()));
+        assert!(per_pilot[2].is_empty());
+    }
+
+    #[test]
+    fn hp_drops_two_rings_in_one_block_matching_one_pilot() {
+        // Block 0 has two rings read as pilot 0 (one misread); block 1 has pilot 0 too. Only
+        // block 1's reading counts at t=0; at t=1 block 0 is unambiguous again.
+        let samples = [sample(0.0, 0, 0.9), sample(0.0, 0, 0.1), sample(0.0, 1, 0.7), sample(1.0, 0, 0.8)];
+        let matches = [Some(0), Some(0), Some(0), Some(0)];
+        let (per_pilot, clashes) = pool_hp(&samples, &matches, 1);
+        assert_eq!(clashes, 2);
+        assert_eq!(per_pilot[0][&0.0f64.to_bits()].iter().map(|h| h.shield).collect::<Vec<_>>(), [0.7]);
+        assert_eq!(per_pilot[0][&1.0f64.to_bits()].len(), 1);
+    }
+
     #[test]
     fn scene_target_blocks_are_optional() {
         let without: Scene = serde_json::from_str(r#"{"panels": []}"#).unwrap();
         assert!(without.targets.is_empty());
         let with: Scene = serde_json::from_str(
-            r#"{"panels": [], "targets": [{"x": 2560, "y": 928, "w": 576, "h": 672}]}"#,
+            r#"{"panels": [], "targets": [{"x": 2560, "y": 928, "w": 576, "h": 928}]}"#,
         )
         .unwrap();
         assert_eq!(with.targets.len(), 1);

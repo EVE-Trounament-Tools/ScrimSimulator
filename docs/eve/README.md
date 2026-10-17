@@ -14,9 +14,9 @@ It was made for a client with these settings:
 A different window size or UI scale moves the windows, and you'll have to redo the OBS crops.
 
 In this layout the locked targets sit at the top left of the screen, which is where the OBS
-Targets crops look for them. Each Targets source expects one block of brackets: three rows of three
-for Targets 1 and 2, and a column of two for Targets 3 (see [`docs/obs`](../obs/README.md)). Check
-in each client that its locked targets wrap into the shape its Targets source expects.
+Targets crops look for them. Each Targets source expects one block of brackets, three rows of three
+(see [`docs/obs`](../obs/README.md)). Check in each client that its locked targets wrap into that
+shape.
 
 ## Setup
 
@@ -28,6 +28,25 @@ in each client that its locked targets wrap into the shape its Targets source ex
 3. With every client closed, copy `core_char_observer.dat` over each observer's
    `core_char_<characterID>.dat`. Back up the old files first. The client writes its settings back
    when it exits, so a running client would overwrite the copy.
+
+## Overview sort
+
+The layout's overview is sorted by **Name, ascending** (the sort arrow is on the Name column's
+header). Keep it that way on every observer: don't click another column's header to re-sort.
+
+- Each pilot then stays in the same row from frame to frame. A Distance sort reshuffles the list
+  every second as ships move.
+- A row's place in the alphabetical list says whose it is. When something covers a few names
+  (most often a hover tooltip from a mouse left resting on the overview), their distances are
+  still readable, and `scrim-positions --recover-hidden` (**Recover hidden pilots** in
+  `scrim-positions-gui`) names those rows from the readable names above and below them. Without
+  that, the observer loses those pilots, and a pilot missing from any one observer gets no
+  position at all.
+
+Recovery only names a row when it's certain: exactly as many pilots missing between the two
+readable neighbours as there are unreadable rows, with no ship type contradicting them. A frame
+not in name order is skipped, and the run warns when most of an observer's frames aren't.
+Better still, park the mouse away from the observer clients while recording.
 
 To find a character's ID, open one of its chat logs (`Documents/EVE/logs/Chatlogs/*_<characterID>.txt`)
 and check the `Listener:` line in the header for the character name.
