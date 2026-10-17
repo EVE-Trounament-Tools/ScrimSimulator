@@ -371,6 +371,13 @@ const DISTANCE_SIGMA_M: f64 = 288.675;
 const SPEED_SIGMA_MPS: f64 = 50.0;
 /// Below this filtered speed the direction of `v` is meaningless, so speed readings are skipped.
 const SPEED_UPDATE_MIN_MPS: f64 = 1.0;
+/// A speed reading further than this many standard deviations from the filtered speed is skipped.
+/// A speed only sizes `v` along its filtered heading, and a ship that turns and burns jumps its
+/// speed before the distances show which way: folded in, the jump pushes the track along the old
+/// heading, kilometres a tick, until it fails [`RESET_GATE_M`] and is taken for a teleport (whose
+/// restart once picked the mirror root, hundreds of km away). The distances steer it until the
+/// filter has caught up with the new heading and speed.
+const SPEED_GATE_SIGMAS: f64 = 2.0;
 /// An overview speed of at most this (parked ships read 0 or 1 m/s) holds the whole velocity at 0.
 /// Without it, a ship sitting through the countdown has no velocity reading at all, and smoothing
 /// slides it km along whatever direction its rounded distances can't see, toward where it later
@@ -475,7 +482,11 @@ impl Step {
                 }
             }
             Some(measured) if s > SPEED_UPDATE_MIN_MPS => {
-                rows.push((Vec6::new(0.0, 0.0, 0.0, v[0] / s, v[1] / s, v[2] / s), measured - s, SPEED_SIGMA_MPS.powi(2)));
+                let h = Vec6::new(0.0, 0.0, 0.0, v[0] / s, v[1] / s, v[2] / s);
+                let sd = ((h.transpose() * self.p * h)[(0, 0)] + SPEED_SIGMA_MPS.powi(2)).sqrt();
+                if (measured - s).abs() <= SPEED_GATE_SIGMAS * sd {
+                    rows.push((h, measured - s, SPEED_SIGMA_MPS.powi(2)));
+                }
             }
             _ => {}
         }
@@ -971,6 +982,26 @@ mod tests {
         assert!((hop - 100_000.0).abs() < 5_000.0, "{hop}");
         let others = fixes.windows(2).enumerate().filter(|(i, _)| *i != 29).map(|(_, w)| dist(w[1].p, w[0].p));
         assert!(others.fold(0.0, f64::max) < 2_500.0);
+        assert!(max_error(&fixes, &path) < 3_000.0, "{}", max_error(&fixes, &path));
+    }
+
+    #[test]
+    fn a_turn_and_hard_burn_is_followed() {
+        let obs = observers_at([0, 3, 1], 301_000.0); // plane far below the cube
+        // Coasts down at 300 m/s, then turns and burns along y at 900 m/s² to 3.9 km/s. The speed
+        // jumps a tick before the distances show the turn; folded in along the old heading, it
+        // threw the track kilometres down.
+        let path: Vec<V3> = (0..45)
+            .map(|t| {
+                let t = t as f64;
+                let coast = 300.0 * t.min(15.0) + 900.0 * (1.0 - (-(t - 15.0).max(0.0) / 3.0).exp());
+                let s = (t - 15.0).max(0.0);
+                let ta = 3_900.0 / 900.0;
+                let along = if s <= ta { 450.0 * s * s } else { 450.0 * ta * ta + 3_900.0 * (s - ta) };
+                [0.0, 2_000.0 + along, 90_000.0 - 0.3 * coast]
+            })
+            .collect();
+        let fixes = solve_track(obs, &observe(obs, &path));
         assert!(max_error(&fixes, &path) < 3_000.0, "{}", max_error(&fixes, &path));
     }
 
