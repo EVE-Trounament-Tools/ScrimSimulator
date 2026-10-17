@@ -30,6 +30,7 @@ const LINK_TITLES := {
 	"tackle": "Tackle (scram / point / web)",
 	"neut": "Neuts / nos",
 	"ewar": "EWAR",
+	"rep": "Remote reps",
 }
 
 var all_ships: bool

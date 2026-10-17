@@ -36,9 +36,11 @@ const EWAR_KEYWORDS := [
 	["webif", "web"], ["stasis", "web"],
 ]
 ## Kinds of source -> target line drawn in space, in display order.
-const LINK_KINDS := ["shooting", "tackle", "neut", "ewar"]
+const LINK_KINDS := ["shooting", "tackle", "neut", "ewar", "rep"]
 ## A hit (or miss) keeps its shooting line up this long; closer hits make one span.
 const SHOT_HOLD_S := 4.0
+## A remote repair keeps its rep line up this long (about one repairer cycle).
+const REP_HOLD_S := 6.0
 ## Gaps between repeats of the same module on the same target count as its cycle only within this
 ## fraction of the expected one: overheating shortens it, shorter gaps are several modules.
 const CYCLE_MIN_FRACTION := 0.6
@@ -66,6 +68,7 @@ static func from_logs(logs: Array, cutoff := {}) -> CombatStats:
 	var hits := {}  # target -> source -> [[t, amount], …]
 	var casts := {}  # [source, target, type, weapon] key -> { source, target, type, weapon, times }
 	var shots := {}  # "source|target" -> [source, target, times]
+	var reps := {}  # "source|target" -> [source, target, times]
 	var spans := {}  # "kind|source|target" -> [kind, source, target, [[t0, t1], …]]
 	for e in merge(logs):
 		if e.t > cutoff.get(e.source_pilot, INF) or e.t > cutoff.get(e.target_pilot, INF):
@@ -76,6 +79,11 @@ static func from_logs(logs: Array, cutoff := {}) -> CombatStats:
 			if not shots.has(pair):
 				shots[pair] = [e.source_pilot, e.target_pilot, []]
 			shots[pair][2].append(e.t)
+		if e.kind == CombatLog.Kind.REMOTE_REP:
+			var pair := "%s|%s" % [e.source_pilot, e.target_pilot]
+			if not reps.has(pair):
+				reps[pair] = [e.source_pilot, e.target_pilot, []]
+			reps[pair][2].append(e.t)
 		if e.kind == CombatLog.Kind.DAMAGE and not is_nan(e.amount):
 			if not hits.has(e.target_pilot):
 				hits[e.target_pilot] = {}
@@ -110,6 +118,9 @@ static func from_logs(logs: Array, cutoff := {}) -> CombatStats:
 	for s in shots.values():
 		for t in s[2]:
 			_add_span(spans, "shooting", s[0], s[1], t, t + SHOT_HOLD_S)
+	for r in reps.values():
+		for t in r[2]:
+			_add_span(spans, "rep", r[0], r[1], t, t + REP_HOLD_S)
 	for s in spans.values():
 		if not stats._links.has(s[0]):
 			stats._links[s[0]] = []

@@ -176,6 +176,7 @@ func test_links_at() -> void:
 		_e(K.SCRAM, "A", "B", 5.0, NAN, "Warp scramble"),
 		_e(K.NOS, "C", "A", 1.0, 10.0, "Small Energy Nosferatu II"),
 		_e(K.OTHER, "C", "B", 1.0, NAN, "Target Painter II"),
+		_e(K.REMOTE_REP, "D", "A", 1.0, 300.0, "Medium Remote Armor Repairer II"),
 	])])
 	assert_eq(s.links_at(2.5), [
 		{"kind": "shooting", "source": "A", "target": "B"},
@@ -183,11 +184,13 @@ func test_links_at() -> void:
 		{"kind": "tackle", "source": "A", "target": "B"},
 		{"kind": "neut", "source": "C", "target": "A"},
 		{"kind": "ewar", "source": "C", "target": "B"},
+		{"kind": "rep", "source": "D", "target": "A"},
 	])
 	assert_eq(s.links_at(6.5), [
 		{"kind": "shooting", "source": "A", "target": "B"},
 		{"kind": "tackle", "source": "A", "target": "B"},
-	], "hits 2 s apart hold until 3 + 4 s; scram cycles chain into one")
+		{"kind": "rep", "source": "D", "target": "A"},
+	], "hits 2 s apart hold until 3 + 4 s; scram cycles chain into one; rep holds until 1 + 6 s")
 	assert_eq(s.links_at(7.5), [{"kind": "tackle", "source": "A", "target": "B"}])
 	assert_eq(s.links_at(10.5), [], "last scram cycle ended at 10 s")
 	assert_eq(s.links_at(-1.0), [])

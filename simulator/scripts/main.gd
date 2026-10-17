@@ -1461,7 +1461,7 @@ func _update_links() -> void:
 			continue
 		var dir := along / length
 		var side := dir.cross(camera.global_position - mid).normalized()
-		var offset := side * (CombatStats.LINK_KINDS.find(l.kind) - 1.5) * LINK_SPACING_PX * px
+		var offset := side * (CombatStats.LINK_KINDS.find(l.kind) - (CombatStats.LINK_KINDS.size() - 1) / 2.0) * LINK_SPACING_PX * px
 		var from := a.position + offset + dir * _icon_clearance(a) * 0.6
 		var to := b.position + offset - dir * _icon_clearance(b)
 		var span := (to - from).dot(dir)

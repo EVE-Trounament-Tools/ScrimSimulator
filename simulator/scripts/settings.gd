@@ -43,6 +43,8 @@ const DEFAULTS := {
 	"links/neut_color": Color(0.75, 0.4, 1.0),
 	"links/ewar": true,
 	"links/ewar_color": Color(0.3, 0.85, 1.0),
+	"links/rep": true,
+	"links/rep_color": Color(0.35, 1.0, 0.4),
 }
 
 static var _cfg: ConfigFile
