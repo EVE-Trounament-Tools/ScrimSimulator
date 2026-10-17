@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Anonymize a scrim-positions CSV (and optionally a pilot's EVE gamelog) for demos and tests.
 
-Ship types become their closest mining-hull equivalent (capsules stay capsules) and
+Ship types become the mining hull for their ruleset hull class (capsules stay capsules) and
 each pilot becomes "<Faction> Citizen <7 digits>". The seed keeps output reproducible.
 
     scripts/anonymize.py resouces/matches/out/match_01.positions.csv resouces/demo/demo.positions.csv
@@ -12,12 +12,13 @@ the simulator's CombatLog.resolve_pilot does; anyone else gets a fresh name), sh
 above and corp tickers replaced:
 
     scripts/anonymize.py resouces/matches/out/match_01.positions.csv resouces/demo/demo.positions.csv \
-        --gamelog resouces/matches/gamelogs/20261006_005348_<character id>.txt \
-        resouces/demo/demo.positions.logs/20261006_005348.txt
+        --gamelog resouces/matches/gamelogs/<date>_<time>_<character id>.txt \
+        resouces/demo/demo.positions.logs/<date>_<time>.txt
 """
 import argparse
 import csv
 import difflib
+import json
 import os
 import random
 import re
@@ -26,13 +27,24 @@ from datetime import datetime, timedelta, timezone
 
 FACTIONS = ["Amarr", "Caldari", "Gallente", "Minmatar"]
 
-# Combat hull -> mining hull of roughly the same size class.
-#   frigate -> Venture, T2 frigate -> Prospect, destroyer -> Endurance,
-#   T1/faction cruiser -> mining barge, T2 cruiser -> exhumer,
-#   battlecruiser / command ship -> Porpoise, battleship -> Orca
-SHIP_MAP = {
-    "Capsule": "Capsule",
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RULESETS = os.path.join(ROOT, "simulator", "rulesets")
+
+# Ruleset hull class -> mining hull of roughly the same size. Ship names come from the
+# rulesets, so this script never has to list the hulls actually flown in a match.
+HULL_MAP = {
+    "Corvette": "Venture",
+    "Frigate": "Venture",
+    "Logistics Frigate": "Prospect",
+    "Destroyer": "Endurance",
+    "Cruiser": "Procurer",
+    "Logistics": "Mackinaw",
+    "Industrial": "Noctis",
+    "Battlecruiser": "Porpoise",
+    "Battleship": "Orca",
 }
+# Overview OCR misreads within this similarity of a ruleset ship name count as that ship.
+MIN_SHIP_SIMILARITY = 0.8
 
 TICKERS = ["ALPHA", "BRAVO", "CHARL", "DELTA", "ECHO", "FOXTR"]
 # Gamelog lines kept: combat during the CSV's EVE span, plus this much either side (seconds).
@@ -68,6 +80,27 @@ def resolve_pilot(name: str, pilots: list[str]) -> str:
         if score >= best_score:
             best, best_score = p, score
     return best
+
+
+def ruleset_hulls() -> dict[str, str]:
+    """Every ship with points in any ruleset under simulator/rulesets/, mapped to its hull class."""
+    hulls = {}
+    for name in sorted(os.listdir(RULESETS)):
+        if name.endswith(".json"):
+            with open(os.path.join(RULESETS, name)) as f:
+                hulls.update({ship: v["hull"] for ship, v in json.load(f)["ships"].items()})
+    return hulls
+
+
+def mining_hull(ship_type: str, hulls: dict[str, str]) -> str | None:
+    if ship_type == "Capsule":
+        return ship_type
+    if ship_type not in hulls:
+        close = difflib.get_close_matches(ship_type, list(hulls), n=1, cutoff=MIN_SHIP_SIMILARITY)
+        if not close:
+            return None
+        ship_type = close[0]
+    return HULL_MAP.get(hulls[ship_type])
 
 
 def eve_time(s: str) -> datetime:
@@ -131,6 +164,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=3)
     ap.add_argument("--gamelog", nargs=2, metavar=("IN", "OUT"),
                     help="also anonymize this pilot's gamelog, keeping only combat during the match")
+    ap.add_argument("--ship", action="append", default=[], metavar="NAME=HULL",
+                    help="hull class (as in the rulesets) for a ship type no ruleset knows; repeatable")
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
@@ -152,7 +187,12 @@ def main() -> int:
         rows = list(reader)
         fields = reader.fieldnames
 
-    unknown = sorted({r["ship_type"] for r in rows} - SHIP_MAP.keys())
+    hulls = ruleset_hulls()
+    for override in args.ship:
+        name, _, hull = override.partition("=")
+        hulls[name] = hull
+    ship_map = {t: m for t in {r["ship_type"] for r in rows} if (m := mining_hull(t, hulls))}
+    unknown = sorted({r["ship_type"] for r in rows} - ship_map.keys())
     if unknown:
         print(f"no mining equivalent for: {', '.join(unknown)}", file=sys.stderr)
         return 1
@@ -164,9 +204,12 @@ def main() -> int:
     unknown_ships: set[str] = set()
 
     def ship(t: str) -> str:
-        if t not in SHIP_MAP:
-            unknown_ships.add(t)
-        return SHIP_MAP.get(t, t)
+        if t not in ship_map:
+            if (m := mining_hull(t, hulls)) is None:
+                unknown_ships.add(t)
+                return t
+            ship_map[t] = m
+        return ship_map[t]
 
     if args.gamelog:
         pilots = sorted(names)
@@ -192,7 +235,7 @@ def main() -> int:
             r["pilot"] = names[r["pilot"]]
             if "raw_name" in r:
                 r["raw_name"] = r["pilot"]
-            r["ship_type"] = SHIP_MAP[r["ship_type"]]
+            r["ship_type"] = ship_map[r["ship_type"]]
             writer.writerow(r)
     return 0
 
