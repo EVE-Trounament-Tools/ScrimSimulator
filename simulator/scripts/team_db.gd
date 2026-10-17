@@ -9,18 +9,20 @@ extends RefCounted
 ##
 ##   { version, build, teams: { id -> { name, temp } }, pilots: { pilot -> id },
 ##     manual: { pilot -> id } (put there by hand, see `assign`),
-##     matches: { path relative to the season folder -> sha256 } }
+##     matches: { path relative to the season folder -> sha256 },
+##     colors: { folder relative to the season folder -> { id -> Team } } }
 ##
 ## Matches are added (`ingest`) as they join the library: each side's pilots join the db team
 ## most of its known pilots are on, or a new team with a temporary name ("Team 3"); a known
 ## pilot is never moved by that. Opening a match puts known pilots on their team's side
-## (`apply`). The db is rebuilt from every match of the season the first time a new build runs
+## (`apply`). A team keeps one colour (Blue or Red) in every match of a folder, whichever side
+## it starts on (`side_colors`). The db is rebuilt from every match of the season the first time a new build runs
 ## (`ensure_current`). Internal matches (`MatchLibrary.is_internal`: one team split against
 ## itself) are left out of the db, and opening one doesn't `apply` it.
 
 const FILE := "pilot-teams.db.json"
 ## Bump when what `ingest` makes from a match changes, so every db is rebuilt.
-const VERSION := 1
+const VERSION := 2
 const SIDES := [MatchData.Team.BLUE, MatchData.Team.RED]
 
 
@@ -48,7 +50,8 @@ static func seasons() -> Array:
 
 ## An empty db.
 static func empty(build := "") -> Dictionary:
-	return {"version": VERSION, "build": build, "teams": {}, "pilots": {}, "manual": {}, "matches": {}}
+	return {"version": VERSION, "build": build, "teams": {}, "pilots": {}, "manual": {}, "matches": {},
+			"colors": {}}
 
 
 ## `season`'s db (`empty()` if it has none or it can't be read).
@@ -62,12 +65,17 @@ static func read(season: String) -> Dictionary:
 		return empty()
 	var db := empty(str(parsed.get("build", "")))
 	db.version = int(parsed.get("version", 0))
-	for key in ["teams", "pilots", "manual", "matches"]:
+	for key in ["teams", "pilots", "manual", "matches", "colors"]:
 		if parsed.get(key) is Dictionary:
 			db[key] = parsed[key]
 	for id in db.teams:
 		var t: Dictionary = db.teams[id] if db.teams[id] is Dictionary else {}
 		db.teams[id] = {"name": str(t.get("name", temp_name(id))), "temp": bool(t.get("temp", true))}
+	for folder in db.colors:
+		var c: Dictionary = db.colors[folder] if db.colors[folder] is Dictionary else {}
+		db.colors[folder] = {}
+		for id in c:
+			db.colors[folder][id] = int(c[id])  # JSON numbers come back as floats
 	return db
 
 
@@ -142,6 +150,49 @@ static func sides_of(db: Dictionary, teams: Dictionary) -> Dictionary:
 	return out
 
 
+static func _other(side: int) -> int:
+	return MatchData.Team.RED if side == MatchData.Team.BLUE else MatchData.Team.BLUE
+
+
+## Gives the teams of a match in `folder` (`sides`, as from `sides_of`) their colour there, if they
+## have none yet: the colour of the side they're on, or the opposite of their opponent's.
+static func add_colors(db: Dictionary, folder: String, sides: Dictionary) -> void:
+	var colors: Dictionary = db.colors.get(folder, {})
+	for side in SIDES:
+		var id: String = sides.get(side, "")
+		if id == "" or colors.has(id):
+			continue
+		var other: String = sides.get(_other(side), "")
+		colors[id] = _other(colors[other]) if colors.has(other) else side
+	if not colors.is_empty():
+		db.colors[folder] = colors
+
+
+## The colour (`TEAM_COLORS` key) each side of a match in `folder` whose sides are `sides` (as
+## from `apply`) is drawn in: its team's colour in the folder (`add_colors`), else the opposite of
+## its opponent's, else its own side's.
+static func side_colors(db: Dictionary, folder: String, sides: Dictionary) -> Dictionary:
+	var colors: Dictionary = db.get("colors", {}).get(folder, {})
+	var out := {}
+	for side in SIDES:
+		var id: String = sides.get(side, "")
+		var other: String = sides.get(_other(side), "")
+		if colors.has(id):
+			out[side] = colors[id]
+		elif colors.has(other):
+			out[side] = _other(colors[other])
+		else:
+			out[side] = side
+	if out[MatchData.Team.BLUE] == out[MatchData.Team.RED]:
+		return {MatchData.Team.BLUE: MatchData.Team.BLUE, MatchData.Team.RED: MatchData.Team.RED}
+	return out
+
+
+## The folder library match `path` is in, relative to its season's folder.
+static func folder_key(path: String) -> String:
+	return _key(path).get_base_dir()
+
+
 static func _id_less(a: String, b: String) -> bool:
 	return int(a.trim_prefix("t")) < int(b.trim_prefix("t"))
 
@@ -175,7 +226,9 @@ static func ingest(db: Dictionary, path: String, data: MatchData = null) -> bool
 		data = MatchData.load_csv(path, {}, 0.0, true)
 	if data == null:
 		return false
-	add_teams(db, _match_teams(path, data))
+	var teams := _match_teams(path, data)
+	add_teams(db, teams)
+	add_colors(db, folder_key(path), sides_of(db, teams))
 	db.matches[key] = sha
 	return true
 
@@ -249,6 +302,7 @@ static func rebuild(season: String, build: String) -> Dictionary:
 	dated.sort_custom(func(a, b): return a[0] < b[0] or (a[0] == b[0] and a[1].naturalnocasecmp_to(b[1]) < 0))
 	for d in dated:
 		add_teams(db, d[3])
+		add_colors(db, folder_key(d[1]), sides_of(db, d[3]))
 		db.matches[_key(d[1])] = d[2]
 
 	# Old team -> new team, biggest overlaps first, each new team matched at most once.

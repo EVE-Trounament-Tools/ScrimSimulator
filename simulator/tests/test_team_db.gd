@@ -180,3 +180,46 @@ func test_match_never_takes_the_db_name() -> void:
 	DirAccess.copy_absolute(write_csv([row(0, "a", "Test Hull", on_line(0, 0.5))]), src)
 	var path := MatchLibrary.add(src)
 	assert_eq(path.get_file(), "pilot-teams.db (2).csv")
+
+
+func test_team_keeps_its_colour_in_a_folder() -> void:
+	_add({"a1": 0, "a2": 0, "b1": 7, "b2": 7}, "S1/vs X")
+	var path := _add({"a1": 7, "a2": 7, "b1": 0, "b2": 0}, "S1/vs X")
+	var db := TeamDb.read("S1")
+	assert_eq(db.colors, {"vs X": {"t1": MatchData.Team.BLUE, "t2": MatchData.Team.RED}})
+	var data := MatchData.load_csv(path)
+	var sides := TeamDb.apply(db, data)
+	assert_eq(TeamDb.side_colors(db, TeamDb.folder_key(path), sides),
+			{MatchData.Team.BLUE: MatchData.Team.RED, MatchData.Team.RED: MatchData.Team.BLUE},
+			"t1 starts on red but stays blue")
+
+
+func test_folders_colour_teams_separately() -> void:
+	_add({"a1": 0, "a2": 0, "b1": 7, "b2": 7}, "S1/vs X")
+	var path := _add({"a1": 7, "a2": 7, "b1": 0, "b2": 0}, "S1/vs Y")
+	var db := TeamDb.read("S1")
+	assert_eq(db.colors["vs Y"], {"t2": MatchData.Team.BLUE, "t1": MatchData.Team.RED})
+	var sides := TeamDb.apply(db, MatchData.load_csv(path))
+	assert_eq(TeamDb.side_colors(db, TeamDb.folder_key(path), sides),
+			{MatchData.Team.BLUE: MatchData.Team.BLUE, MatchData.Team.RED: MatchData.Team.RED})
+
+
+func test_new_team_takes_opposite_of_its_opponent() -> void:
+	_add({"a1": 0, "a2": 0, "b1": 7, "b2": 7}, "S1/vs X")
+	_add({"c1": 0, "c2": 0, "a1": 7, "a2": 7}, "S1/vs X")
+	var db := TeamDb.read("S1")
+	assert_eq(db.colors["vs X"]["t3"], MatchData.Team.RED, "c faces t1 (blue)")
+
+
+func test_side_colors_without_colours_are_the_sides() -> void:
+	var sides := {MatchData.Team.BLUE: "t1", MatchData.Team.RED: ""}
+	assert_eq(TeamDb.side_colors(TeamDb.empty(), "", sides),
+			{MatchData.Team.BLUE: MatchData.Team.BLUE, MatchData.Team.RED: MatchData.Team.RED})
+
+
+func test_rebuild_colours_by_oldest_match() -> void:
+	_add({"a1": 0, "a2": 0, "b1": 7, "b2": 7}, "S1/vs X")
+	_add({"a1": 7, "a2": 7, "b1": 0, "b2": 0}, "S1/vs X")
+	var db := TeamDb.rebuild("S1", "x")
+	assert_eq(db.colors["vs X"].size(), 2)
+	assert_ne(db.colors["vs X"].values()[0], db.colors["vs X"].values()[1])

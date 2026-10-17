@@ -316,7 +316,9 @@ pilots are known yet, they form a new team with a temporary name ("Team 3"). Onc
 a team, they stay on it: opening any match of the season puts them on their team's side, even if
 they started at the wrong corner. A team swap (⇄ in the roster) moves the pilot to that team for
 the whole season. Renaming a team (double-click its heading) renames it in every match of the
-season; an empty name gives back the temporary name. The team lists are rebuilt from all matches
+season; an empty name gives back the temporary name. A team keeps the same colour in every match
+of a folder: it takes the colour of the side it started on in the folder's oldest match, even when
+it starts at the other corner later. The team lists are rebuilt from all matches
 the first time a new version runs, and swaps and names are kept. To get the old behaviour, turn
 off **Keep pilots on their season's team** in Settings. Team swaps and team names are then saved
 for that match only.
