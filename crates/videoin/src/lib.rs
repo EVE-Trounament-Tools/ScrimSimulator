@@ -96,6 +96,23 @@ pub fn probe(path: &std::path::Path) -> Result<(u32, u32, f64)> {
     Ok((width, height, fps))
 }
 
+/// The video's duration in seconds (the container's), via `ffprobe`.
+pub fn duration(path: &std::path::Path) -> Result<f64> {
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .context("running ffprobe (is it installed and on PATH?)")?;
+    ensure!(
+        output.status.success(),
+        "ffprobe failed on {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim().parse().with_context(|| format!("parsing ffprobe duration {:?}", text.trim()))
+}
+
 /// Whether the video has an audio stream, via `ffprobe`.
 pub fn has_audio(path: &std::path::Path) -> Result<bool> {
     let output = Command::new("ffprobe")

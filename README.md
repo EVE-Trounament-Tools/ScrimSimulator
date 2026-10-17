@@ -56,6 +56,10 @@ Each release has two zips per platform. You only need the first to watch matches
 clients side by side, and explains how to set it up: which windows to capture, how to crop to the
 overview, and which video settings to use. Record near-lossless. The OCR needs crisp text.
 
+Every observer's overview must be **sorted by Name** (as the layout below is), and keep the mouse
+off the observer clients while recording: a hover tooltip over the overview hides names. See
+[Overview sort](docs/eve/README.md#overview-sort) for why.
+
 [`docs/eve/`](docs/eve/README.md) has an EVE client window layout for the observers (2486×1374
 windowed, UI scale 1.75) and explains how to copy it onto each observer character. The OBS
 template's crops are made for this layout, so if every observer uses it there is nothing to crop.
@@ -74,6 +78,11 @@ distance** from the centre:
 Fight inside the cube as usual, and stop the observers dead. `scrim-positions` works out which
 corners' lines they're on and how far out they are from the match itself; if you know the
 distance, give it with `--observer-distance-km 235`.
+
+The overview measures distance from the observer's hull edge, not its centre, so the observers'
+hull radius is added to every distance before solving. It defaults to an Archon's (1643 m); if the
+observers fly something else, give its radius with `--observer-radius-m` (0-10000) or the
+"Observer radius" field in `positions-gui`. All three observers are assumed to be the same hull.
 
 | Distance from centre | Past the corner beacon | Observers' plane from centre | Clear of the 125 km arena edge by |
 |---|---|---|---|
@@ -130,13 +139,20 @@ This writes `out/match.positions.csv` and the recording's audio as `out/match.mp
 the video frame. The one in `docs/obs/` matches the OBS template; adjust its panel rectangles if
 your layout differs.
 
+If something covered some pilots' names in an observer's overview (a hover tooltip, say), add
+`--recover-hidden`: rows whose name can't be read are named from their place in the name-sorted
+list, and the run prints which pilots it recovered and for how many seconds. It needs the
+overviews sorted by Name ([Overview sort](docs/eve/README.md#overview-sort)).
+
 ### Without the command line
 
 `scrim-positions-gui` runs `scrim-positions` from a window: pick the video, the chat log (see
 below), the output folder and, optionally, the pilots' gamelogs (**Add logs…**; each is listed
 with its character so you can tell them apart), untick **Extract audio** if you
-don't want the mp3, and press **Run**. Its output is shown as it works, and your choices are
-remembered for next time. It looks for `scrim-positions` and `scene.json` next to itself.
+don't want the mp3, tick **Recover hidden pilots** for `--recover-hidden`, and press **Run**. Its output is shown as it works, and your choices are
+remembered for next time. Picking a video also picks, as ScrimTrimmer does, the Local chat log
+last written closest to the video's file time (in the chat log's folder, or `Chatlogs` next to the
+Gamelogs folder), and warns when the chosen chat log is from another session. It looks for `scrim-positions` and `scene.json` next to itself.
 
 The CSV has one row per pilot per second:
 `t,pilot,ship_type,x_m,y_m,z_m,speed_mps,dir_x,dir_y,dir_z,residual_m,shield,armor,hull`, then
@@ -194,6 +210,10 @@ The saved `match.mp3` covers the same window, so it starts with the data.
 - `--t0 HH:MM:SS` gives the EVE time at video second 0 yourself, skipping the chat OCR.
 - `--tournament` uses the tournament system messages ("30 seconds until match start",
   "Match completed!") instead.
+- The chat log must have been written while the video was recorded, judged by the video file's
+  modification time (its end) and duration: a log from another session can still match a few
+  chat lines by chance and put every match at the wrong time, so it is refused.
+  `--no-date-check` skips this for a copy of the recording that lost its file time.
 - Without `--chat-log`, `--t0 2026-04-04T17:43:55Z` stamps the whole video with EVE times.
 - `--combat-log FILE` (repeatable; a folder such as `Documents/EVE/logs/Gamelogs` works too) saves
   each gamelog with combat during the match, cut down to the match, in
@@ -296,7 +316,9 @@ pilots are known yet, they form a new team with a temporary name ("Team 3"). Onc
 a team, they stay on it: opening any match of the season puts them on their team's side, even if
 they started at the wrong corner. A team swap (⇄ in the roster) moves the pilot to that team for
 the whole season. Renaming a team (double-click its heading) renames it in every match of the
-season; an empty name gives back the temporary name. The team lists are rebuilt from all matches
+season; an empty name gives back the temporary name. A team keeps the same colour in every match
+of a folder: it takes the colour of the side it started on in the folder's oldest match, even when
+it starts at the other corner later. The team lists are rebuilt from all matches
 the first time a new version runs, and swaps and names are kept. To get the old behaviour, turn
 off **Keep pilots on their season's team** in Settings. Team swaps and team names are then saved
 for that match only.

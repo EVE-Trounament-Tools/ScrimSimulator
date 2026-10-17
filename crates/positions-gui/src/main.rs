@@ -3,7 +3,11 @@
 //! to save the audio. Gamelogs with combat during the chat log's session are found in the Gamelogs
 //! folder and added on their own whenever the chat log or folder changes. The choices are
 //! remembered between sessions (eframe's app storage), except that the video starts at the newest
-//! recording in the remembered video's folder. The tool runs as a child process found
+//! recording in the remembered video's folder. Picking a video also picks, as ScrimTrimmer does,
+//! the Local chat log last written closest to the video's file time (from the chat log's folder, or
+//! the Chatlogs folder next to the Gamelogs one), and a chat log that doesn't cover the video is
+//! flagged: a stale one from an
+//! earlier session would put every match at the wrong time. The tool runs as a child process found
 //! next to this executable (or on `PATH`), and its output is shown as it runs. A thumbnail of the
 //! video with the scene's rectangles drawn on it shows whether the scene matches the recording.
 
@@ -20,6 +24,11 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 const SETTINGS_KEY: &str = "settings";
+
+/// An Archon's hull radius, the default observer.
+const ARCHON_RADIUS_M: &str = "1643";
+/// The largest observer radius `scrim-positions` accepts.
+const MAX_OBSERVER_RADIUS_M: f64 = 10_000.0;
 
 /// Everything the user picks; persisted between sessions.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -40,7 +49,12 @@ struct Settings {
     /// next search; the rest were picked by hand.
     found_logs: Vec<String>,
     extract_audio: bool,
+    /// `--recover-hidden`: name rows whose pilot name was hidden, from their slot in the
+    /// name-sorted overview.
+    recover_hidden: bool,
     scene: String,
+    /// The observers' hull radius in metres (all three the same), `--observer-radius-m`, as typed.
+    observer_radius: String,
 }
 
 impl Default for Settings {
@@ -54,9 +68,17 @@ impl Default for Settings {
             found_logs: Vec::new(),
             combat_log_dir: default_gamelogs().map(path_string).unwrap_or_default(),
             extract_audio: true,
+            recover_hidden: false,
             scene: default_scene().map(path_string).unwrap_or_default(),
+            observer_radius: ARCHON_RADIUS_M.to_string(),
         }
     }
+}
+
+/// The observer radius typed as `s`, in metres, pulled into 0..=[`MAX_OBSERVER_RADIUS_M`]; `None`
+/// if it isn't a number.
+fn parse_radius(s: &str) -> Option<f64> {
+    s.trim().parse::<f64>().ok().filter(|m| !m.is_nan()).map(|m| m.clamp(0.0, MAX_OBSERVER_RADIUS_M))
 }
 
 fn path_string(p: PathBuf) -> String {
@@ -170,6 +192,58 @@ fn search(chat: &Path, dir: &Path) -> Found {
     let (start, end) = chat_span(&decode_chat_log(&bytes))?;
     let logs = find_gamelogs(dir, start, end).map_err(|e| format!("reading {}: {e}", dir.display()))?;
     Ok((logs, start, end))
+}
+
+/// A span of EVE (UTC) time.
+type Span = (NaiveDateTime, NaiveDateTime);
+
+/// How far apart a chat log and a video's recording may be and still count as the same session,
+/// as `scrim-positions` allows: a recording remuxed or trimmed later gets a later file time.
+const SESSION_SLACK_MIN: i64 = 60;
+
+/// When `video` was recorded: its duration, ending at its file's modification time.
+fn video_span(video: &Path) -> Result<Span, String> {
+    let modified = std::fs::metadata(video).and_then(|m| m.modified()).map_err(|e| format!("{e}"))?;
+    let secs = videoin::duration(video).map_err(|e| format!("{e:#}"))?;
+    let end = DateTime::<Utc>::from(modified).naive_utc();
+    Ok((end - TimeDelta::milliseconds((secs * 1000.0).round() as i64), end))
+}
+
+/// How many seconds spans `a` and `b` overlap by, give or take `SESSION_SLACK_MIN`; None if they
+/// don't.
+fn overlap(a: Span, b: Span) -> Option<i64> {
+    let d = a.1.min(b.1) - a.0.max(b.0) + TimeDelta::minutes(SESSION_SLACK_MIN);
+    (d >= TimeDelta::zero()).then_some(d.num_seconds())
+}
+
+/// The file modification time of `path`.
+fn modified(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// The Local chat log in `dirs` last written closest to `video`'s file time, as ScrimTrimmer
+/// picks one: any file with "Local" in its name.
+fn closest_chat_log(dirs: &[PathBuf], video: &Path) -> Option<PathBuf> {
+    let at = modified(video)?;
+    let gap = |t: std::time::SystemTime| t.duration_since(at).or_else(|_| at.duration_since(t)).unwrap_or_default();
+    dirs.iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains("Local") && e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| Some((gap(modified(&e.path())?), e.path())))
+        .min()
+        .map(|(_, p)| p)
+}
+
+/// What a newly picked video brought: the video, when it was recorded, and its chat log.
+type VideoFound = (String, Result<Span, String>, Option<PathBuf>);
+
+/// When `video` was recorded, and the chat log in `dirs` closest to it.
+fn chat_log_for(video: String, dirs: Vec<PathBuf>) -> VideoFound {
+    let span = video_span(Path::new(&video));
+    let log = closest_chat_log(&dirs, Path::new(&video));
+    (video, span, log)
 }
 
 /// Extensions of the recordings the video picker shows.
@@ -310,6 +384,12 @@ struct App {
     thumb: Option<Result<(egui::TextureHandle, [u32; 2]), String>>,
     /// The scene file last loaded for the overlay, and what it held.
     scene: Option<(String, Result<Scene, String>)>,
+    /// Working out when the video was recorded, and its chat log.
+    video_probe: Option<Receiver<VideoFound>>,
+    /// The video (path) whose recording time is known, and that time.
+    video_span: Option<(String, Span)>,
+    /// The chat log (path) last searched for gamelogs, and the span it covers.
+    chat_span: Option<(String, Span)>,
 }
 
 impl App {
@@ -335,7 +415,51 @@ impl App {
             thumbed: None,
             thumb: None,
             scene: None,
+            video_probe: None,
+            video_span: None,
+            chat_span: None,
         }
+    }
+
+    /// Where to look for the video's Local chat log: the current chat log's folder, and the
+    /// Chatlogs folder next to the Gamelogs one.
+    fn chatlog_dirs(&self) -> Vec<PathBuf> {
+        let s = &self.settings;
+        let beside_chat = Path::new(s.chat_log.trim()).parent().map(Path::to_path_buf);
+        let beside_gamelogs = Path::new(s.combat_log_dir.trim()).parent().map(|d| d.join("Chatlogs"));
+        let mut dirs: Vec<PathBuf> = beside_chat.into_iter().chain(beside_gamelogs).filter(|d| d.is_dir()).collect();
+        dirs.dedup();
+        dirs
+    }
+
+    /// Take in a finished `chat_log_for`: switch to the chat log found for the video.
+    fn poll_video_probe(&mut self) {
+        let Some((video, span, log)) = self.video_probe.as_ref().and_then(|rx| rx.try_recv().ok()) else { return };
+        self.video_probe = None;
+        if video != self.settings.video.trim() {
+            return;
+        }
+        self.video_span = span.ok().map(|span| (video, span));
+        if let Some(log) = log.map(path_string).filter(|l| *l != self.settings.chat_log.trim()) {
+            self.log.push(format!("Chat log for this video: {log}"));
+            self.settings.chat_log = log;
+        }
+    }
+
+    /// Why the chat log can't be the video's, if it can't: it covers another time.
+    fn chat_log_warning(&self) -> Option<String> {
+        let s = &self.settings;
+        let (_, video) = self.video_span.as_ref().filter(|(v, _)| v == s.video.trim())?;
+        let (_, log) = self.chat_span.as_ref().filter(|(c, _)| c == s.chat_log.trim())?;
+        if overlap(*log, *video).is_some() {
+            return None;
+        }
+        let fmt = |(a, b): Span| format!("{}–{}", a.format("%Y.%m.%d %H:%M"), b.format("%H:%M"));
+        Some(format!(
+            "This chat log ({}) doesn't cover the video (recorded ~{} by its file time): every match would be at the wrong time.",
+            fmt(*log),
+            fmt(*video)
+        ))
     }
 
     /// Start grabbing a thumbnail frame when the video changed since the last grab (and exists);
@@ -347,7 +471,16 @@ impl App {
             self.thumb = None;
             // A newer grab replaces one still running; its result is dropped.
             self.thumb_grab = None;
+            self.video_probe = None;
             if Path::new(&video).is_file() {
+                let (tx, rx) = channel();
+                let dirs = self.chatlog_dirs();
+                let (for_video, probe_ctx) = (video.clone(), ctx.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(chat_log_for(for_video, dirs));
+                    probe_ctx.request_repaint();
+                });
+                self.video_probe = Some(rx);
                 let (tx, rx) = channel();
                 let ctx = ctx.clone();
                 std::thread::spawn(move || {
@@ -395,6 +528,7 @@ impl App {
         self.scan = None;
         match found {
             Ok((logs, start, end)) => {
+                self.chat_span = self.scanned.as_ref().map(|(chat, _)| (chat.clone(), (start, end)));
                 let added = self.add_found(logs);
                 self.scan_status = format!(
                     "found {added} gamelog(s) with combat between {} and {}",
@@ -460,6 +594,8 @@ impl App {
             Some("Name the run folder.")
         } else if s.scene.trim().is_empty() {
             Some("Pick a scene file.")
+        } else if parse_radius(&s.observer_radius).is_none() {
+            Some("Observer radius must be a number of metres (0 to 10000).")
         } else {
             None
         }
@@ -474,8 +610,14 @@ impl App {
             // Every CD -> WF/GF in the video, each into its own `<video>_NN.*` outputs.
             cmd.arg("--chat-log").arg(s.chat_log.trim()).args(["--match", "all"]);
         }
+        if let Some(m) = parse_radius(&s.observer_radius) {
+            cmd.arg("--observer-radius-m").arg(m.to_string());
+        }
         if !s.extract_audio {
             cmd.arg("--no-audio");
+        }
+        if s.recover_hidden {
+            cmd.arg("--recover-hidden");
         }
         for log in &s.combat_log_files {
             cmd.arg("--combat-log").arg(log);
@@ -681,6 +823,8 @@ impl eframe::App for App {
         self.poll();
         self.poll_scan(ctx);
         self.poll_thumbnail(ctx);
+        self.poll_video_probe();
+        let chat_warning = self.chat_log_warning();
         let running = self.run.is_some();
 
         egui::TopBottomPanel::top("settings").show(ctx, |ui| {
@@ -710,6 +854,11 @@ impl eframe::App for App {
                     path_row(ui, "Chat log", &mut s.chat_log, "optional: Local chat log, finds the matches (each processed) and EVE times", |d| {
                         d.add_filter("Chat log", &["txt"]).pick_file()
                     });
+                    if let Some(warning) = &chat_warning {
+                        ui.label("");
+                        ui.colored_label(ui.visuals().warn_fg_color, warning);
+                        ui.end_row();
+                    }
                     path_row(ui, "Gamelogs folder", &mut s.combat_log_dir, "EVE's Gamelogs folder: searched for logs with combat during the chat log", |d| {
                         d.pick_folder()
                     });
@@ -729,8 +878,26 @@ impl eframe::App for App {
                     path_row(ui, "Scene", &mut s.scene, "scene.json: where each overview is in the frame", |d| {
                         d.add_filter("Scene", &["json"]).pick_file()
                     });
+                    ui.label("Observer radius");
+                    ui.horizontal(|ui| {
+                        let field = egui::TextEdit::singleline(&mut s.observer_radius).hint_text(ARCHON_RADIUS_M);
+                        let edit = ui.add_sized([60.0, ui.spacing().interact_size.y], field);
+                        // Out-of-range values snap to the nearer bound once typing is done.
+                        if edit.lost_focus() {
+                            if let Some(m) = parse_radius(&s.observer_radius) {
+                                s.observer_radius = m.to_string();
+                            }
+                        }
+                        ui.label("m");
+                        ui.label(egui::RichText::new("hull radius of all three observers; overview distances start at the hull edge").weak());
+                    });
+                    ui.end_row();
                     ui.label("");
                     ui.checkbox(&mut s.extract_audio, "Extract audio (<video>.mp3 next to the CSV)");
+                    ui.end_row();
+                    ui.label("");
+                    ui.checkbox(&mut s.recover_hidden, "Recover hidden pilots (overviews must be sorted by Name)")
+                        .on_hover_text("Names rows whose pilot name couldn't be read (e.g. under a hover tooltip) from where they sit in the alphabetical list");
                     ui.end_row();
                 });
             });
@@ -836,6 +1003,20 @@ mod tests {
     }
 
     #[test]
+    fn observer_radius_snaps_to_the_nearer_bound() {
+        assert_eq!(parse_radius("0"), Some(0.0));
+        assert_eq!(parse_radius(" 1500.5 "), Some(1500.5));
+        assert_eq!(parse_radius("10000"), Some(10_000.0));
+        assert_eq!(parse_radius("-1"), Some(0.0));
+        assert_eq!(parse_radius("-inf"), Some(0.0));
+        assert_eq!(parse_radius("10001"), Some(10_000.0));
+        assert_eq!(parse_radius("1e9"), Some(10_000.0));
+        for bad in ["", "NaN", "big"] {
+            assert_eq!(parse_radius(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
     fn overlay_scales_scene_rects() {
         let scene: Scene = serde_json::from_str(
             r#"{ "panels": [ { "name": "A", "rect": { "x": 0, "y": 0, "w": 100, "h": 50 } } ],
@@ -879,6 +1060,53 @@ mod tests {
         let found = find_gamelogs(&dir, t("2026.09.26 13:00:00"), t("2026.09.26 14:00:00")).unwrap();
         assert_eq!(found, [path_string(dir.join("20260926_120000_1.txt"))]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn overlap_allows_slack() {
+        let span = |a: &str, b: &str| (t(a), t(b));
+        let video = span("2026.10.09 00:13:00", "2026.10.09 02:10:00");
+        assert!(overlap(span("2026.10.09 00:12:00", "2026.10.09 02:00:00"), video).is_some());
+        // Written half an hour before a remux's file time says the recording started.
+        assert!(overlap(span("2026.10.08 22:00:00", "2026.10.08 23:43:00"), video).is_some());
+        assert_eq!(overlap(span("2026.10.08 20:00:00", "2026.10.08 23:00:00"), video), None);
+        assert_eq!(overlap(span("2026.10.04 12:55:00", "2026.10.04 15:20:00"), video), None);
+    }
+
+    #[test]
+    fn picks_chat_log_closest_to_video() {
+        let dir = std::env::temp_dir().join(format!("positions-gui-chat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (logs, videos) = (dir.join("Chatlogs"), dir.join("Videos"));
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::create_dir_all(&videos).unwrap();
+        let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let touch = |path: PathBuf, secs: u64| {
+            let f = std::fs::File::create(path).unwrap();
+            f.set_modified(base + std::time::Duration::from_secs(secs)).unwrap();
+        };
+        let video = videos.join("match.mkv");
+        touch(video.clone(), 100_000);
+        for (name, secs) in [
+            ("Local_old.txt", 0),
+            ("Local_today.txt", 100_200),
+            ("Local_later.txt", 200_000),
+            ("Corp_today.txt", 100_000),
+        ] {
+            touch(logs.join(name), secs);
+        }
+        assert_eq!(closest_chat_log(&[logs.clone()], &video), Some(logs.join("Local_today.txt")));
+        assert_eq!(closest_chat_log(&[videos.clone()], &video), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn video_span_ends_at_file_time() {
+        let clip = Path::new(env!("CARGO_MANIFEST_DIR")).join("../overview/tests/fixtures/overview-sample.mkv");
+        let (start, end) = video_span(&clip).unwrap();
+        let modified = DateTime::<Utc>::from(std::fs::metadata(&clip).unwrap().modified().unwrap()).naive_utc();
+        assert_eq!(end, modified);
+        assert!(start < end);
     }
 
     #[test]

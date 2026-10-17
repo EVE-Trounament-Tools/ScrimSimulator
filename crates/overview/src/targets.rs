@@ -775,6 +775,23 @@ mod tests {
     }
 
     #[test]
+    fn a_block_calibrated_with_one_target_finds_all_nine() {
+        let slots: Vec<(f32, f32)> =
+            [79.0, 379.0, 679.0].iter().flat_map(|&y| (0..3).map(move |c| (88.0 + REF_PITCH_X * c as f32, y))).collect();
+        // Only the last slot locked when the block first shows a ring.
+        let mut img = space(576, 928);
+        let (lx, ly) = slots[8];
+        draw_ring(&mut img, lx, ly, 1.0, [1.0, 1.0, 1.0]);
+        let geom = BlockGeometry::calibrate(&img).unwrap();
+        assert_eq!(geom.columns.len(), 3, "{geom:?}");
+        let mut full = space(576, 928);
+        for &(x, y) in &slots {
+            draw_ring(&mut full, x, y, 1.0, [1.0, 0.5, 1.0]);
+        }
+        assert_eq!(read_rings(&full, &geom).len(), 9);
+    }
+
+    #[test]
     fn labels_parse_with_wrapped_names_and_specks() {
         let l = parse_label("Test Pilot [ABC]\nRifter\n104 km\n");
         assert_eq!((l.name.as_str(), l.ship_type.as_str(), l.range_m), ("Test Pilot", "Rifter", Some(104_000.0)));

@@ -1,6 +1,8 @@
 // Worker tests against local D1/R2 (miniflare), with EVE SSO and ESI faked. Synthetic data only.
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
+import { prune } from "../src/activity";
+import { folders } from "../src/admin";
 import { deps, resetJwksCache, startSession, verifyJwt } from "../src/auth";
 import { matchKey, validPath } from "../src/library";
 import { route } from "../src/index";
@@ -46,6 +48,7 @@ beforeEach(async () => {
     E.DB.prepare("DELETE FROM files"),
     E.DB.prepare("DELETE FROM settings"),
     E.DB.prepare("DELETE FROM kv"),
+    E.DB.prepare("DELETE FROM activity"),
   ]);
 });
 
@@ -382,6 +385,37 @@ describe("admin", () => {
     const row = await E.DB.prepare("SELECT name FROM whitelist WHERE kind = 'alliance' AND id = 99000001").first();
     expect(row).toEqual({ name: "Some Alliance" });
   });
+
+  it("lists library folders to download", async () => {
+    const row = (path: string, size = 0) => ({ path, sha: "", size, owner_id: 1, owner_name: "A", mtime: 0 });
+    expect(
+      folders([
+        row("Empty/"),
+        row("S1/a.positions.csv", 10),
+        row("S1/a.positions.logs/x.txt", 5),
+        row("S1/Sub/b.positions.csv", 20),
+        row("S1/Sub/b.positions.ogg", 100),
+        row("top.positions.csv", 1),
+      ]).map((f) => [f.path, f.matches, f.files, f.bytes]),
+    ).toEqual([
+      ["", 3, 5, 136],
+      ["Empty/", 0, 0, 0],
+      ["S1/", 2, 4, 135],
+      ["S1/Sub/", 1, 2, 120],
+    ]);
+
+    alliances[ADMIN] = null;
+    const admin = await session(ADMIN, "Boss");
+    const csv = await upload(admin, "t,pilot\n0,x\n");
+    await call("/api/library/commit", {
+      method: "POST",
+      cookie: admin,
+      json: { ops: [{ op: "put", path: "S1/m.positions.csv", ...csv, prev: null }] },
+    });
+    const page = await (await call("/admin", { cookie: admin })).text();
+    expect(page).toContain('data-folder="S1/"');
+    expect(page).toContain('data-folder=""');
+  });
 });
 
 describe("site", () => {
@@ -402,5 +436,51 @@ describe("site", () => {
     const etag = a.headers.get("ETag")!;
     expect((await call("/assets/ship_sizes.json", { cookie, headers: { "If-None-Match": etag } })).status).toBe(304);
     expect((await call("/assets/../builds/v9.9.9/index.html", { cookie })).status).not.toBe(200);
+  });
+});
+
+describe("activity", () => {
+  it("counts visits and match opens per pilot and day, and shows them to admins", async () => {
+    await whitelist("character", 1);
+    const cookie = await session(1, "Alice");
+    await E.DB.prepare("INSERT INTO kv (key, value) VALUES ('current_build', 'v9.9.9')").run();
+    await E.BUCKET.put("builds/v9.9.9/index.html", "<html><head></head><body></body></html>");
+    await E.DB.prepare(
+      "INSERT INTO files (path, sha, size, owner_id, owner_name, mtime) VALUES ('S1/m.positions.csv', ?, 1, 1, 'Alice', 0)",
+    )
+      .bind("a".repeat(64))
+      .run();
+
+    await call("/", { cookie });
+    await call("/", { cookie });
+    const watch = (path: unknown, c: string | null = cookie) =>
+      call("/api/watched", { method: "POST", cookie: c ?? undefined, json: { path } });
+    expect((await watch("S1/m.positions.csv")).status).toBe(200);
+    expect((await watch("S1/m.positions.csv")).status).toBe(200);
+    expect((await watch("S1/nope.positions.csv")).status).toBe(400);
+    expect((await watch(42)).status).toBe(400);
+    expect((await watch("S1/m.positions.csv", null)).status).toBe(401);
+
+    const { results } = await E.DB.prepare("SELECT char_name, match, n FROM activity ORDER BY match").all();
+    expect(results).toEqual([
+      { char_name: "Alice", match: "", n: 2 },
+      { char_name: "Alice", match: "S1/m.positions.csv", n: 2 },
+    ]);
+
+    alliances[ADMIN] = null;
+    const admin = await session(ADMIN, "Boss");
+    const page = await (await call("/admin", { cookie: admin })).text();
+    expect(page).toContain("<td>Alice</td><td>1</td><td>2</td><td>2</td>");
+    expect(page).toContain("<td>S1/m.positions.csv</td><td>1</td><td>2</td>");
+  });
+
+  it("prunes counts older than 90 days", async () => {
+    await E.DB.batch([
+      E.DB.prepare("INSERT INTO activity VALUES (date('now', '-100 days'), 1, 'Alice', '', 3)"),
+      E.DB.prepare("INSERT INTO activity VALUES (date('now'), 1, 'Alice', '', 1)"),
+    ]);
+    await prune(E);
+    const { results } = await E.DB.prepare("SELECT n FROM activity").all();
+    expect(results).toEqual([{ n: 1 }]);
   });
 });

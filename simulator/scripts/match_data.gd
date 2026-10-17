@@ -23,6 +23,8 @@ const BOUNDARY_RADIUS_M := 125000.0
 const CENTRE_RADIUS_M := 10000.0
 ## Max distance of a pilot's first position from a corner->centre line to count as on it.
 const LINE_TOLERANCE_M := 10000.0
+## Most ships a team can field: past this, start positions give way to the other team.
+const MAX_TEAM_SIZE := 10
 ## A micro jump drive teleports its ship this far ahead; a hop between consecutive samples within
 ## `MJD_TOLERANCE_M` of it (and no longer than a gap apart) is taken as an MJD. Capsules can't fit
 ## one, which keeps pod warps out.
@@ -346,15 +348,17 @@ func _freeze_pods() -> void:
 
 ## Puts each pilot on the corner->centre line nearest its first position; the two most
 ## populated corners become BLUE (lower corner index) and RED, everyone else is UNKNOWN.
+## Teams are then capped at `MAX_TEAM_SIZE` (see `_cap_teams`).
 func _assign_teams() -> void:
 	var centre := CENTRE_M
 	var corner_of := {}  # pilot -> corner index, or -1
+	var line_d := {}  # pilot -> distance from its corner's line (INF if none)
 	var counts := {}  # corner index -> pilot count
 	for pilot in tracks:
 		var p: Vector3 = tracks[pilot][0].pos
 		var best := -1
+		var best_d := LINE_TOLERANCE_M
 		if p.distance_to(centre) >= CENTRE_RADIUS_M:
-			var best_d := LINE_TOLERANCE_M
 			for i in 8:
 				var corner := Vector3(i & 1, (i >> 1) & 1, (i >> 2) & 1) * CUBE_M
 				var d := p.distance_to(Geometry3D.get_closest_point_to_segment(p, centre, corner))
@@ -362,6 +366,7 @@ func _assign_teams() -> void:
 					best_d = d
 					best = i
 		corner_of[pilot] = best
+		line_d[pilot] = best_d if best >= 0 else INF
 		if best >= 0:
 			counts[best] = counts.get(best, 0) + 1
 
@@ -372,6 +377,46 @@ func _assign_teams() -> void:
 	for pilot in tracks:
 		var idx := team_corners.find(corner_of[pilot])
 		teams[pilot] = Team.UNKNOWN if idx < 0 else idx  # 0 = BLUE, 1 = RED
+	_cap_teams(line_d)
+
+
+## Moves a team's pilots past `MAX_TEAM_SIZE`, furthest from its line (`line_d`) first, to the
+## other team while that has room; then fills the other team from UNKNOWN (`fill_unknown`).
+func _cap_teams(line_d: Dictionary) -> void:
+	var members := {Team.BLUE: [], Team.RED: [], Team.UNKNOWN: []}
+	for pilot in teams:
+		members[teams[pilot]].append(pilot)
+	for team in [Team.BLUE, Team.RED]:
+		var other_team := Team.RED if team == Team.BLUE else Team.BLUE
+		var other: Array = members[other_team]
+		var own: Array = members[team]
+		own.sort_custom(func(a, b): return line_d[a] < line_d[b])
+		while own.size() > MAX_TEAM_SIZE and other.size() < MAX_TEAM_SIZE:
+			var pilot: String = own.pop_back()
+			teams[pilot] = other_team
+			other.append(pilot)
+	fill_unknown()
+
+
+## Once a team has `MAX_TEAM_SIZE` pilots, UNKNOWN pilots (by name) join the other team until it
+## is full too. Returns the pilots moved.
+func fill_unknown() -> Array:
+	var members := {Team.BLUE: [], Team.RED: [], Team.UNKNOWN: []}
+	for pilot in teams:
+		members[teams[pilot]].append(pilot)
+	var unknown: Array = members[Team.UNKNOWN]
+	unknown.sort()
+	var moved := []
+	for team in [Team.BLUE, Team.RED]:
+		var other_team := Team.RED if team == Team.BLUE else Team.BLUE
+		var other: Array = members[other_team]
+		while members[team].size() >= MAX_TEAM_SIZE and other.size() < MAX_TEAM_SIZE \
+				and not unknown.is_empty():
+			var pilot: String = unknown.pop_front()
+			teams[pilot] = other_team
+			other.append(pilot)
+			moved.append(pilot)
+	return moved
 
 
 ## Hull radius of `ship_type` in metres, or 0.0 if unknown.

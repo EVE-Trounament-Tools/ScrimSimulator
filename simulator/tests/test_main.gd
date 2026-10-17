@@ -1084,6 +1084,26 @@ func test_season_teams_follow_pilots_across_matches() -> void:
 	assert_true(m.file_label.text.contains("Team 2 1 / Team 1 1 / unknown 1"))
 
 
+func test_season_team_keeps_its_colour_in_a_folder() -> void:
+	_season_match(0, 7)
+	var flipped := _season_match(7, 0)
+	var m := _main()
+	m.load_match(flipped)
+	var blue: Color = Main.TEAM_COLORS[MatchData.Team.BLUE]
+	assert_eq(m.ships["blue"].color, blue, "Team 1 is blue in the folder, though on red here")
+	assert_eq(m.ships["red"].color, Main.TEAM_COLORS[MatchData.Team.RED])
+	m._swap_team("late")  # unknown -> blue side, Team 2
+	assert_eq(m.ships["late"].color, Main.TEAM_COLORS[MatchData.Team.RED])
+
+
+func test_season_team_colours_are_per_folder() -> void:
+	_season_match(0, 7, "Season 1/vs A")
+	var other := _season_match(7, 0, "Season 1/vs B")
+	var m := _main()
+	m.load_match(other)
+	assert_eq(m.ships["red"].color, Main.TEAM_COLORS[MatchData.Team.BLUE], "first match of its folder")
+
+
 func test_season_team_rename_shows_in_every_match() -> void:
 	var first := _season_match(0, 7)
 	var flipped := _season_match(7, 0)

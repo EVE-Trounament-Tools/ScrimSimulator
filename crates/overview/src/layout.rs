@@ -9,7 +9,7 @@
 //! subsequent frame's rows at fixed x-ranges and a fixed row pitch.
 
 use crate::util::levenshtein_ci;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use glyph::{segment, Alphabet, Font};
 use image::RgbImage;
 use std::collections::HashMap;
@@ -280,29 +280,9 @@ pub fn detect(img: &RgbImage, panel: Rect, font: &Font) -> Result<Layout> {
             row_bands.len()
         );
     }
-    let tops: Vec<f32> = row_bands.iter().map(|&(y0, _)| y0 as f32).collect();
-    // Fit row index -> band top by least squares rather than taking the median consecutive
-    // difference: band tops are whole pixels, so most gaps measure 43px and some 44px (the true
-    // pitch is fractional, ~43.4 here), and the median of those integer diffs collapses to
-    // whichever one is more common, discarding the fractional part entirely. That looked harmless
-    // per-row but compounds linearly: by row 24 it had drifted enough (~0.4px x 24 rows) to crop
-    // a sliver of the row *above* into the cell — fatal specifically when that neighbour is a
-    // strongly different colour (this crate's red "hostile" row), which projects the wrong-row
-    // sliver to a false mid-range ink value across the whole row width, one solid blob instead of
-    // per-letter runs. A least-squares fit keeps the fractional pitch, so row0_y/row_pitch stay
-    // accurate arbitrarily far down the list instead of just near the header.
-    let n = tops.len() as f32;
-    let mean_i = (n - 1.0) / 2.0;
-    let mean_top = tops.iter().sum::<f32>() / n;
-    let mut num = 0.0f32;
-    let mut den = 0.0f32;
-    for (i, &top) in tops.iter().enumerate() {
-        let di = i as f32 - mean_i;
-        num += di * (top - mean_top);
-        den += di * di;
-    }
-    let row_pitch = num / den;
-    let row0_fit = mean_top - mean_i * row_pitch; // fitted band top at index 0
+    let (row_pitch, row0_fit) = fit_row_grid(&row_bands).with_context(|| {
+        format!("found the header row but couldn't fit a row pitch to {} data row band(s)", row_bands.len())
+    })?;
 
     // A text line's own ink band starts well after its row's background band does — text is
     // vertically centred with room for descenders, not flush with the top — so the two can't be
@@ -336,6 +316,63 @@ pub fn detect(img: &RgbImage, panel: Rect, font: &Font) -> Result<Layout> {
         row_pitch,
         list_bottom: list_bottom.min(panel.y + panel.h),
     })
+}
+
+/// A band taller than this many times the median band height isn't one text line: it's several
+/// rows' ink fused by something drawn over the list (a hover tooltip parked on the Name column).
+const MAX_BAND_HEIGHT_RATIO: f32 = 1.5;
+
+/// Fit the row grid (pitch, band top at row 0) to the Name column's text-line bands.
+///
+/// Each band is given its row index by its offset from the first band in coarse pitches (the
+/// median gap between neighbouring bands), not by its position in the list: a tooltip over a few
+/// rows' names fuses them into one tall band (dropped here) or hides them, and counting bands
+/// would then shift every row below it by the missing count, skewing the whole grid by half a
+/// row or more (2026-10-17 match 3: the first row skipped, every blue row read across a row
+/// boundary).
+///
+/// Then index -> band top is fitted by least squares rather than taking the median consecutive
+/// difference: band tops are whole pixels, so most gaps measure 43px and some 44px (the true
+/// pitch is fractional, ~43.4 here), and the median of those integer diffs collapses to
+/// whichever one is more common, discarding the fractional part entirely. That looked harmless
+/// per-row but compounds linearly: by row 24 it had drifted enough (~0.4px x 24 rows) to crop
+/// a sliver of the row *above* into the cell — fatal specifically when that neighbour is a
+/// strongly different colour (this crate's red "hostile" row), which projects the wrong-row
+/// sliver to a false mid-range ink value across the whole row width, one solid blob instead of
+/// per-letter runs. A least-squares fit keeps the fractional pitch, so row0_y/row_pitch stay
+/// accurate arbitrarily far down the list instead of just near the header.
+fn fit_row_grid(bands: &[(usize, usize)]) -> Option<(f32, f32)> {
+    let median = |mut v: Vec<f32>| {
+        v.sort_by(f32::total_cmp);
+        v.get(v.len() / 2).copied()
+    };
+    let max_height = median(bands.iter().map(|&(y0, y1)| (y1 - y0) as f32).collect())? * MAX_BAND_HEIGHT_RATIO;
+    let tops: Vec<f32> = bands
+        .iter()
+        .filter(|&&(y0, y1)| (y1 - y0) as f32 <= max_height)
+        .map(|&(y0, _)| y0 as f32)
+        .collect();
+    let coarse = median(tops.windows(2).map(|w| w[1] - w[0]).collect())?;
+    if coarse <= 0.0 {
+        return None;
+    }
+    let rows: Vec<(f32, f32)> = tops.iter().map(|&top| (((top - tops[0]) / coarse).round(), top)).collect();
+
+    let n = rows.len() as f32;
+    let mean_i = rows.iter().map(|r| r.0).sum::<f32>() / n;
+    let mean_top = rows.iter().map(|r| r.1).sum::<f32>() / n;
+    let mut num = 0.0f32;
+    let mut den = 0.0f32;
+    for &(i, top) in &rows {
+        let di = i - mean_i;
+        num += di * (top - mean_top);
+        den += di * di;
+    }
+    if den == 0.0 {
+        return None;
+    }
+    let pitch = num / den;
+    Some((pitch, mean_top - mean_i * pitch))
 }
 
 /// Contrast threshold (max-channel deviation from the local median, 0-255) that counts a pixel as
@@ -454,4 +491,41 @@ pub fn is_ignored_header_word(text: &str) -> bool {
     IGNORED_HEADER_KEYWORDS
         .iter()
         .any(|kw| levenshtein_ci(text, kw) <= KEYWORD_MAX_DISTANCE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Band `(top, bottom)` for row `i` of a 43.4px-pitch list starting at y=10, 16px tall.
+    fn band(i: usize) -> (usize, usize) {
+        let top = (10.0 + i as f32 * 43.4).round() as usize;
+        (top, top + 16)
+    }
+
+    #[test]
+    fn row_grid_fits_a_clean_list() {
+        let bands: Vec<_> = (0..20).map(band).collect();
+        let (pitch, row0) = fit_row_grid(&bands).unwrap();
+        assert!((pitch - 43.4).abs() < 0.05, "pitch {pitch}");
+        assert!((row0 - 10.0).abs() < 0.5, "row0 {row0}");
+    }
+
+    #[test]
+    fn row_grid_survives_a_tooltip_fusing_rows() {
+        // A tooltip over rows 1-3's names fuses them into one tall band.
+        let mut bands = vec![band(0), (band(1).0, band(3).1)];
+        bands.extend((4..20).map(band));
+        let (pitch, row0) = fit_row_grid(&bands).unwrap();
+        assert!((pitch - 43.4).abs() < 0.05, "pitch {pitch}");
+        assert!((row0 - 10.0).abs() < 0.5, "row0 {row0}");
+    }
+
+    #[test]
+    fn row_grid_survives_hidden_rows() {
+        let bands: Vec<_> = (0..20).filter(|i| !(2..5).contains(i)).map(band).collect();
+        let (pitch, row0) = fit_row_grid(&bands).unwrap();
+        assert!((pitch - 43.4).abs() < 0.05, "pitch {pitch}");
+        assert!((row0 - 10.0).abs() < 0.5, "row0 {row0}");
+    }
 }

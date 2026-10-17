@@ -107,12 +107,20 @@ pub fn trilaterate(obs: [V3; 3], d: [f64; 3]) -> Trilat {
 }
 
 /// One reading for corner inference: time, distances to observers A/B/C, and the overview's
-/// speed for that tick when it was read.
+/// speed for that tick when it was read. A distance is NaN when that observer didn't read one
+/// (the pilot was off its overview); only [`solve_track`] takes such partial readings.
 #[derive(Clone, Copy, Debug)]
 pub struct Reading {
     pub t: f64,
     pub d: [f64; 3],
     pub speed_mps: Option<f64>,
+}
+
+impl Reading {
+    /// All three observers read a distance.
+    pub fn is_complete(&self) -> bool {
+        self.d.iter().all(|d| !d.is_nan())
+    }
 }
 
 /// The observer layout [`infer_observers`] settled on.
@@ -236,9 +244,11 @@ fn cost_at(triple: [usize; 3], r_m: f64, pilots: &[Vec<Reading>]) -> CornerCost 
 /// The start alone is ambiguous when every pilot starts far from every observer (near the
 /// centre): then every shape fits. So each candidate's whole match is also solved and its speed
 /// compared with the overview's Velocity (see [`speed_error`]): a wrong layout distorts distances,
-/// so its tracks move at the wrong speed.
+/// so its tracks move at the wrong speed. Only complete readings count.
 pub fn infer_observers(pilots: &[Vec<Reading>], fixed_r: Option<f64>) -> ObserverFit {
     use rayon::prelude::*;
+    let pilots: Vec<Vec<Reading>> = pilots.iter().map(|p| p.iter().filter(|r| r.is_complete()).copied().collect()).collect();
+    let pilots = &pilots[..];
     let total = |c: &CornerCost| c.total();
     let mut scored: Vec<([usize; 3], f64, CornerCost)> = shapes()
         .par_iter()
@@ -426,7 +436,7 @@ impl Step {
         let still = is_still(r.speed_mps);
         let (x_pred, p_pred, f) = predict(self, r.t, self.still && still);
         let at = pos(&x_pred);
-        let miss: Vec<f64> = obs.iter().zip(r.d).map(|(o, d)| d - dist(at, *o)).collect();
+        let miss: Vec<f64> = obs.iter().zip(r.d).filter(|(_, d)| !d.is_nan()).map(|(o, d)| d - dist(at, *o)).collect();
         if miss.iter().any(|m| m.abs() > RESET_GATE_M) {
             return None;
         }
@@ -447,6 +457,7 @@ impl Step {
         let mut rows: Vec<(Vec6, f64, f64)> = obs
             .iter()
             .zip(self.d)
+            .filter(|(_, d)| !d.is_nan())
             .map(|(o, d)| {
                 let r = sub(at, *o);
                 let n = norm(r).max(1.0);
@@ -520,8 +531,9 @@ fn smooth_into(fixes: &mut Vec<Fix>, seg: &[Step], obs: [V3; 3]) {
     }
     for (s, x) in seg.iter().zip(xs) {
         let p = pos(&x);
-        let sq: f64 = (0..3).map(|k| (dist(p, obs[k]) - s.d[k]).powi(2)).sum();
-        fixes.push(Fix { t: s.t, p, residual_m: (sq / 3.0).sqrt() });
+        let miss: Vec<f64> = (0..3).filter(|&k| !s.d[k].is_nan()).map(|k| dist(p, obs[k]) - s.d[k]).collect();
+        let sq: f64 = miss.iter().map(|m| m * m).sum();
+        fixes.push(Fix { t: s.t, p, residual_m: (sq / miss.len() as f64).sqrt() });
     }
 }
 
@@ -538,39 +550,73 @@ fn smooth_into(fixes: &mut Vec<Fix>, seg: &[Step], obs: [V3; 3]) {
 /// one nearer the centre). A reading more than [`RESET_GATE_M`] from the prediction is a teleport
 /// (micro jump, warp): the track restarts there, at whichever root the following readings fit
 /// better with the velocity carried over ([`lookahead_cost`]), and each stretch is smoothed
-/// separately so the hop stays a single tick. One fix per reading.
+/// separately so the hop stays a single tick.
+///
+/// A partial reading (an observer missed the pilot, see [`Reading`]) only carries an existing
+/// track on: its distances can't place a start or a restart, so it is dropped when there is no
+/// track yet or it fails the gate, and a run of them is dropped unless the next complete reading
+/// confirms it ([`drop_unconfirmed`]). Every other reading gets one fix.
 pub fn solve_track(obs: [V3; 3], readings: &[Reading]) -> Vec<Fix> {
     let centre = [CUBE_M / 2.0; 3];
     let mut fixes: Vec<Fix> = Vec::with_capacity(readings.len());
     let mut seg: Vec<Step> = Vec::new();
     for (i, r) in readings.iter().enumerate() {
+        let next = seg.last().map(|prev| prev.next(r, obs));
+        if !r.is_complete() {
+            if let Some(Some((step, _))) = next {
+                seg.push(step);
+            }
+            continue;
+        }
         let roots = trilaterate(obs, r.d).roots;
-        let step = match seg.last() {
+        let step = match next {
             None => {
                 let cost = |p: V3| (outside_cube_m(p), dist(p, centre));
                 let (c0, c1) = (cost(roots[0]), cost(roots[1]));
                 let first = c1.0 < c0.0 || (c1.0 == c0.0 && c1.1 < c0.1);
                 started(r, obs, roots[usize::from(first)], [0.0; 3])
             }
-            Some(prev) => match prev.next(r, obs) {
+            Some(next) => match next {
                 Some((step, _)) => step,
                 None => {
                     // Teleport: restart on whichever side of the observers' plane carries on
-                    // best, keeping the velocity (a micro jump does).
+                    // best, keeping the velocity (a micro jump does). A partial stretch this
+                    // reading didn't confirm goes, so restart from before it.
+                    drop_unconfirmed(&mut seg);
+                    let Some(prev) = seg.last() else { unreachable!("a segment starts complete") };
                     let v = [prev.x[3], prev.x[4], prev.x[5]];
+                    let from = pos(&prev.x);
                     smooth_into(&mut fixes, &seg, obs);
                     seg.clear();
                     let fit = |root: V3| lookahead_cost(started(r, obs, root, v), &readings[i + 1..], obs);
-                    let mirror = fit(roots[1]) < fit(roots[0]);
+                    let (d0, d1) = (dist(roots[0], from), dist(roots[1], from));
+                    let mirror = if (d0 - d1).abs() > RESTART_TIE_M { d1 < d0 } else { fit(roots[1]) < fit(roots[0]) };
                     started(r, obs, roots[usize::from(mirror)], v)
                 }
             },
         };
         seg.push(step);
     }
+    drop_unconfirmed(&mut seg);
     smooth_into(&mut fixes, &seg, obs);
     fixes
 }
+
+/// Drops a segment's trailing partial steps. While an observer is missing, the direction only it
+/// measured drifts, and the filter doesn't know it (the speed reading pins that velocity
+/// component's size but not its sign), so a partial stretch is kept only once a complete reading
+/// after it passes the gate.
+fn drop_unconfirmed(seg: &mut Vec<Step>) {
+    while seg.last().is_some_and(|s| s.d.iter().any(|d| d.is_nan())) {
+        seg.pop();
+    }
+}
+
+/// A restart takes the root nearer the track's last position when the two are further apart
+/// than this from it. Mirror roots move identically, so [`lookahead_cost`] can only tell them
+/// apart by the velocity carried over, which is stale after a gap in the readings; far from the
+/// observers' plane the mirror root is hundreds of km away, which no hop explains.
+const RESTART_TIE_M: f64 = 20_000.0;
 
 /// How many readings after a restart [`lookahead_cost`] runs the filter over to pick a side.
 const LOOKAHEAD_TICKS: usize = 10;
@@ -926,6 +972,70 @@ mod tests {
         let others = fixes.windows(2).enumerate().filter(|(i, _)| *i != 29).map(|(_, w)| dist(w[1].p, w[0].p));
         assert!(others.fold(0.0, f64::max) < 2_500.0);
         assert!(max_error(&fixes, &path) < 3_000.0, "{}", max_error(&fixes, &path));
+    }
+
+    #[test]
+    fn a_gap_in_the_readings_does_not_flip_the_track_to_its_mirror() {
+        let obs = observers_at([0, 1, 2], 295_000.0); // plane far below the cube
+        // Climbs 400 m/s in z, then unread for 22 s while it turns and burns 2 km/s down and back
+        // along x, then flies on. The velocity carried over the gap matches the mirror's motion.
+        let path: Vec<V3> = (0..80).map(turning).collect();
+        let mut readings = observe(obs, &path);
+        readings.drain(31..53);
+        let kept: Vec<V3> = path.iter().enumerate().filter(|(t, _)| !(31..53).contains(t)).map(|(_, p)| *p).collect();
+        let fixes = solve_track(obs, &readings);
+        assert!(max_error(&fixes, &kept) < 5_000.0, "{}", max_error(&fixes, &kept));
+    }
+
+    /// The flight of the gap test above: climbing, then a hard turn and burn at t = 30.
+    fn turning(t: usize) -> V3 {
+        let t = t as f64;
+        if t <= 30.0 {
+            [50_000.0, 60_000.0, 50_000.0 + 400.0 * t]
+        } else {
+            [50_000.0 - 1_200.0 * (t - 30.0), 60_000.0, 62_000.0 - 1_500.0 * (t - 30.0)]
+        }
+    }
+
+    /// `path`'s readings with observer A missing from t = 31 to 52.
+    fn a_lost(obs: [V3; 3], path: &[V3]) -> Vec<Reading> {
+        let mut readings = observe(obs, path);
+        for r in &mut readings[31..53] {
+            r.d[0] = f64::NAN;
+        }
+        readings
+    }
+
+    #[test]
+    fn a_track_carries_on_through_one_observer_losing_the_pilot() {
+        let obs = observers_at([0, 1, 2], 295_000.0);
+        // Steady flight: two observers and the speed hold it until A sees it again.
+        let path: Vec<V3> = (0..80).map(|t| [30_000.0 + 600.0 * t as f64, 60_000.0, 40_000.0 + 300.0 * t as f64]).collect();
+        let fixes = solve_track(obs, &a_lost(obs, &path));
+        assert_eq!(fixes.len(), path.len());
+        assert!(max_error(&fixes, &path) < 3_000.0, "{}", max_error(&fixes, &path));
+    }
+
+    #[test]
+    fn a_partial_stretch_the_next_full_reading_rejects_is_dropped() {
+        let obs = observers_at([0, 1, 2], 295_000.0);
+        // Turning while A is gone: the stretch drifts, so it goes and the track restarts.
+        let path: Vec<V3> = (0..80).map(turning).collect();
+        let fixes = solve_track(obs, &a_lost(obs, &path));
+        let kept: Vec<V3> = fixes.iter().map(|f| path[f.t as usize]).collect();
+        assert!(fixes.len() < path.len());
+        assert!(max_error(&fixes, &kept) < 5_000.0, "{}", max_error(&fixes, &kept));
+    }
+
+    #[test]
+    fn partial_readings_alone_start_no_track() {
+        let obs = observers_at([0, 1, 2], 295_000.0);
+        let mut readings = observe(obs, &[[50_000.0; 3]; 5]);
+        for r in &mut readings[..2] {
+            r.d[1] = f64::NAN;
+        }
+        let fixes = solve_track(obs, &readings);
+        assert_eq!(fixes.iter().map(|f| f.t).collect::<Vec<_>>(), [2.0, 3.0, 4.0]);
     }
 
     #[test]

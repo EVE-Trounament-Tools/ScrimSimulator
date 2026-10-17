@@ -40,6 +40,9 @@ const TYPE_BOOTSTRAP_SAMPLES: usize = 3;
 /// One pilot's track: canonical identity plus its distance/speed time series.
 #[derive(Clone, Debug)]
 pub struct Track {
+    /// This track's creation order within its [`Tracker`], unchanged by [`Tracker::finish`]'s
+    /// sort, so the ids [`Tracker::observe`] returns still find the track afterwards.
+    pub id: usize,
     /// The most-voted-for spelling seen for this pilot's name (OCR noise on a look-alike glyph,
     /// e.g. `l`/`I`, produces minority variants that are folded into this track by
     /// [`Tracker::observe`] but never win the vote outright).
@@ -60,8 +63,10 @@ pub struct Track {
 }
 
 impl Track {
-    fn new(name: &str) -> Track {
+    /// A track with no samples yet; `id` must be unique among its tracker's (or observer's) tracks.
+    pub fn new(id: usize, name: &str) -> Track {
         Track {
+            id,
             name: name.to_string(),
             name_votes: HashMap::new(),
             ship_type: None,
@@ -152,11 +157,14 @@ impl Tracker {
         Tracker { tracks: Vec::new(), ship_types }
     }
 
-    /// Feed one frame's row readings in at time `t` (seconds).
-    pub fn observe(&mut self, t: f64, rows: &[RowReading]) {
+    /// Feed one frame's row readings in at time `t` (seconds). Returns the id of the track each
+    /// row went to, aligned with `rows` (`None` for a row with a blank Name cell).
+    pub fn observe(&mut self, t: f64, rows: &[RowReading]) -> Vec<Option<usize>> {
+        let mut ids = Vec::with_capacity(rows.len());
         for row in rows {
             let name = row.name.text.trim();
             if name.is_empty() {
+                ids.push(None);
                 continue;
             }
             // Resolved before indexing into `self.tracks` so the two `self` fields don't need to
@@ -176,7 +184,9 @@ impl Tracker {
                 distance_m: row.distance.ok(),
                 speed_mps: row.velocity.ok(),
             });
+            ids.push(Some(track.id));
         }
+        ids
     }
 
     fn find_or_create(&mut self, name: &str) -> usize {
@@ -193,7 +203,7 @@ impl Tracker {
         if let Some((i, _)) = best {
             return i;
         }
-        self.tracks.push(Track::new(name));
+        self.tracks.push(Track::new(self.tracks.len(), name));
         self.tracks.len() - 1
     }
 
@@ -272,7 +282,7 @@ mod tests {
     }
 
     fn locked_track(ty: &str) -> Track {
-        let mut tr = Track::new("Pilot");
+        let mut tr = Track::new(0, "Pilot");
         for t in 0..TYPE_BOOTSTRAP_SAMPLES {
             tr.observe_type(t as f64, ty);
         }

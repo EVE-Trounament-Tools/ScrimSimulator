@@ -129,6 +129,9 @@ made wrong is unrecoverable.
   the centre, so `R ≥ (125 + 5) km · √3 ≈ 225 km` puts it outside the 125 km arena boundary
   (with 5 km for the 1 km distance rounding), and no ship in the arena has a mirror ambiguity.
   On the corners themselves (`R` = 86.6 km) the plane is the face, 50 km from the centre.
+  The overview measures from the observer's hull edge, so the observers' hull radius
+  (`--observer-radius-m`, default an Archon's 1643 m, all three the same) is added to every
+  distance before solving.
 - **Fully stopped** (not orbiting, not drifting). §2.2 assumes a stationary observer; a moving one
   silently poisons every radial-velocity reading it produces.
 - **Lock as many grid objects as targeting range and slots allow.** Locked-target brackets render
@@ -143,7 +146,14 @@ made wrong is unrecoverable.
 - Columns enabled: Distance, Name, Type, Velocity, Radial Velocity, Transversal Velocity, plus
   Corp/Alliance for identity.
 - Overview window as **tall as possible** — visible row count is a hard cap on how many ships an
-  observer can contribute (§7). Sort by distance.
+  observer can contribute (§7).
+- **Sorted by Name, ascending**, on every observer. A name sort keeps each pilot in the same row
+  frame after frame (a distance sort reshuffles the list every tick as ships move), and it makes
+  a row's slot identify its pilot: the rows above and below bound which names it can hold. That
+  is how `scrim-positions --recover-hidden` (`overview::recover`) names rows whose Name cell was
+  hidden, e.g. by a hover tooltip left parked on the overview, while their Distance, Type and
+  Velocity cells were still readable. Without it that observer drops the pilot, and a pilot
+  needs all three observers' distances to be placed at all.
 - Identical UI scale and layout across all four clients, so one ROI template set covers all.
 - The EVE clock must be visible in at least one client (§4.2).
 

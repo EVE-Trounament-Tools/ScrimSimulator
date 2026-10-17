@@ -54,7 +54,7 @@ static func attach(m: MainMenu) -> void:
 		var local := scan_local()
 		var local_changes := _diff(_base, local)
 		var remote_changes := _diff(_base, remote.shas)
-		for p in remote_changes:
+		for p in _apply_order(remote_changes):
 			if not local_changes.has(p):
 				_apply(p, remote_changes[p], remote.sizes.get(p, 0))
 				_set_base(p, remote_changes[p])
@@ -104,6 +104,15 @@ static func fetch_match(path: String, whole := true) -> bool:
 	return true
 
 
+## Tells the site that library match `path` was opened (its usage counts, web/worker activity.ts).
+## Fire and forget: a failed report is not worth bothering the user with.
+static func report_watched(path: String) -> void:
+	if menu == null or not MatchLibrary.contains(path):
+		return
+	await WebBackend.request(menu, HTTPClient.METHOD_POST, "/api/watched",
+		JSON.stringify({"path": _rel(path)}), ["Content-Type: application/json"])
+
+
 ## Downloads library file `abs` if it is still a placeholder. False if it couldn't.
 static func fetch_file(abs: String) -> bool:
 	if not _is_marker(abs):
@@ -151,7 +160,7 @@ static func _sync_once() -> String:
 	var touched := false
 
 	# Site -> here, where not changed here too.
-	for p in remote_changes:
+	for p in _apply_order(remote_changes):
 		if local_changes.has(p):
 			continue
 		_apply(p, remote_changes[p], remote.sizes.get(p, 0))
@@ -411,6 +420,22 @@ static func _diff(from: Dictionary, to: Dictionary) -> Dictionary:
 	for p in from:
 		if not to.has(p):
 			out[p] = null
+	return out
+
+
+## The paths of `changes` in the order to apply them: folder removals last, deepest first, so
+## each folder is already empty when it is removed (a folder left behind would be sent back).
+static func _apply_order(changes: Dictionary) -> Array:
+	var out := []
+	var removed_folders := []
+	for p: String in changes:
+		if p.ends_with("/") and changes[p] == null:
+			removed_folders.append(p)
+		else:
+			out.append(p)
+	removed_folders.sort()
+	removed_folders.reverse()
+	out.append_array(removed_folders)
 	return out
 
 

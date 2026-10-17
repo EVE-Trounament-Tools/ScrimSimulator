@@ -120,6 +120,9 @@ var team_names := {}
 ## "" for none); `team_sides` is empty when season teams are off or the match isn't in the library.
 var team_db := {}
 var team_sides := {}
+## Team -> the `TEAM_COLORS` key it is drawn in: its season team's colour in the match's folder
+## (`TeamDb.side_colors`), so a team looks the same in every match of a folder; empty = its own.
+var side_colors := {}
 ## Whether the open library match is internal (`MatchLibrary.is_internal`): its sides come only
 ## from start positions, never from `team_db`.
 var match_internal := false
@@ -345,13 +348,16 @@ func load_match(path: String) -> bool:
 		start_button.visible = true
 	team_db = {}
 	team_sides = {}
+	side_colors = {}
 	match_internal = MatchLibrary.contains(path) and MatchLibrary.is_internal(path)
 	if Settings.get_value("teams/season_db") and MatchLibrary.contains(path) and not match_internal:
 		team_db = TeamDb.read(TeamDb.season_of(path))
 		team_sides = TeamDb.apply(team_db, data)
+		side_colors = TeamDb.side_colors(team_db, TeamDb.folder_key(path), team_sides)
 	for pilot in team_overrides:
 		if data.teams.has(pilot):
 			data.teams[pilot] = team_overrides[pilot]
+	data.fill_unknown()
 	match_path = path
 	audio_player.stop()
 	audio_player.stream = MatchLibrary.load_audio(path) if has_audio else null
@@ -398,6 +404,8 @@ func _on_menu_match_chosen(path: String) -> void:
 		return
 	if not load_match(path):
 		menu.show_error("Failed to load %s — is it a scrim-positions CSV?" % path.get_file())
+	elif OS.has_feature("web"):
+		WebLibrary.report_watched(path)
 
 
 ## The open match was renamed in the library: follow its file.
@@ -475,13 +483,18 @@ func _team_name(team: int) -> String:
 	if team_names.has(team):
 		return team_names[team]
 	var id: String = team_sides.get(team, "")
-	return TeamDb.team_name(team_db, id) if id != "" else TEAM_NAMES[team]
+	return TeamDb.team_name(team_db, id) if id != "" else TEAM_NAMES[side_colors.get(team, team)]
+
+
+## `team`'s colour in this match (see `side_colors`).
+func _team_color(team: int) -> Color:
+	return TEAM_COLORS[side_colors.get(team, team)]
 
 
 ## `_team_name`, lowercase while it is the default ("blue").
 func _team_label(team: int) -> String:
 	var name := _team_name(team)
-	return name.to_lower() if name == TEAM_NAMES[team] else name
+	return name.to_lower() if name == TEAM_NAMES[side_colors.get(team, team)] else name
 
 
 func _update_file_label() -> void:
@@ -695,7 +708,7 @@ func _input(event: InputEvent) -> void:
 func _add_ship(pilot: String) -> void:
 	var node := Node3D.new()
 	node.name = pilot.validate_node_name()
-	var color: Color = TEAM_COLORS[data.teams.get(pilot, MatchData.Team.UNKNOWN)]
+	var color: Color = _team_color(data.teams.get(pilot, MatchData.Team.UNKNOWN))
 
 	var visual := _sphere()
 	node.add_child(visual)
@@ -1251,7 +1264,7 @@ func _update_info() -> void:
 		lines.append("DEAD (out of bounds at %s)" % _fmt_time(ship.death_t))
 	lines.append("Following" if tracked == selected else "Double-click to follow")
 	info_label.text = "\n".join(lines)
-	info_label.modulate = TEAM_COLORS[team].lerp(Color.WHITE, 0.5)
+	info_label.modulate = _team_color(team).lerp(Color.WHITE, 0.5)
 
 
 ## `pilot`'s ship type, speed (m/s from the CSV's latest sample; NAN if unknown) and distance
@@ -1449,7 +1462,7 @@ func _update_links() -> void:
 			continue
 		var dir := along / length
 		var side := dir.cross(camera.global_position - mid).normalized()
-		var offset := side * (CombatStats.LINK_KINDS.find(l.kind) - 1.5) * LINK_SPACING_PX * px
+		var offset := side * (CombatStats.LINK_KINDS.find(l.kind) - (CombatStats.LINK_KINDS.size() - 1) / 2.0) * LINK_SPACING_PX * px
 		var from := a.position + offset + dir * _icon_clearance(a) * 0.6
 		var to := b.position + offset - dir * _icon_clearance(b)
 		var span := (to - from).dot(dir)
@@ -1608,7 +1621,7 @@ func _update_damage_breakdowns() -> void:
 			var motion := _motion(r.pilot) if data.tracks.has(r.pilot) else {}
 			var ship: String = motion.get("ship_type", data.tracks[r.pilot][0].ship_type if data.tracks.has(r.pilot) else "")
 			var team: int = data.teams.get(r.pilot, MatchData.Team.UNKNOWN)
-			rows.append({"name": _pilot_name(r.pilot), "ship": ship, "color": TEAM_COLORS[team], "dps": r.dps})
+			rows.append({"name": _pilot_name(r.pilot), "ship": ship, "color": _team_color(team), "dps": r.dps})
 			total += r.dps
 		w.show_rows("Incoming DPS — %s" % _pilot_name(w.pilot), total, rows)
 
@@ -2292,7 +2305,7 @@ func _refresh_roster() -> void:
 		var members := pilots.filter(func(p): return data.teams.get(p, MatchData.Team.UNKNOWN) == team)
 		if team == MatchData.Team.UNKNOWN and members.is_empty():
 			continue
-		var color: Color = TEAM_COLORS[team]
+		var color: Color = _team_color(team)
 		var renamable: bool = team != MatchData.Team.UNKNOWN
 		roster_table.add_group("%s (%d)" % [_team_name(team), members.size()], color,
 				team if renamable else -1, "Double-click to rename" if renamable else "")
@@ -2306,14 +2319,14 @@ func _refresh_roster() -> void:
 			roster_table.set_cell(pilot, "ship", data.tracks[pilot][0].ship_type)
 			roster_table.set_cell(pilot, "pilot", pilot_names.get(pilot, _short_name(pilot)))
 	# Broadcast panel: red down the left, blue down the right; unknown pilots are left out.
-	broadcast_panel.set_teams(_team_name(MatchData.Team.RED), TEAM_COLORS[MatchData.Team.RED],
-			_team_name(MatchData.Team.BLUE), TEAM_COLORS[MatchData.Team.BLUE])
+	broadcast_panel.set_teams(_team_name(MatchData.Team.RED), _team_color(MatchData.Team.RED),
+			_team_name(MatchData.Team.BLUE), _team_color(MatchData.Team.BLUE))
 	for pilot in pilots:
 		var team: int = data.teams.get(pilot, MatchData.Team.UNKNOWN)
 		if team == MatchData.Team.UNKNOWN:
 			continue
 		var side := BroadcastRoster.Side.LEFT if team == MatchData.Team.RED else BroadcastRoster.Side.RIGHT
-		var button := broadcast_panel.add_row(side, pilot, TEAM_COLORS[team])
+		var button := broadcast_panel.add_row(side, pilot, _team_color(team))
 		button.tooltip_text = "Centre the camera on %s" % _pilot_name(pilot)
 		broadcast_panel.set_cell(pilot, "ship", data.tracks[pilot][0].ship_type)
 		broadcast_panel.set_cell(pilot, "name", pilot_names.get(pilot, _short_name(pilot)))
@@ -2467,7 +2480,8 @@ func _follow(pilot: String) -> void:
 		camera.set_target(ships[tracked].node.position)
 
 
-## Moves `pilot` to the other team (unknown pilots go to blue) and recolours it.
+## Moves `pilot` to the other team (unknown pilots go to blue) and recolours it; a team it fills
+## takes in the unknown pilots (`MatchData.fill_unknown`).
 func _swap_team(pilot: String) -> void:
 	var team: int = MatchData.Team.RED if data.teams.get(pilot) == MatchData.Team.BLUE else MatchData.Team.BLUE
 	data.teams[pilot] = team
@@ -2477,17 +2491,24 @@ func _swap_team(pilot: String) -> void:
 			if team_sides[team] == "":
 				team_sides[team] = TeamDb.new_team(db)
 			TeamDb.assign(db, pilot, team_sides[team]))
+	_recolor_ship(pilot)
+	for p in data.fill_unknown():
+		_recolor_ship(p)
+	_save_meta()
+	_update_file_label()
+	_refresh_roster()
+
+
+## Gives `pilot`'s ship (and death marker) its team's colour.
+func _recolor_ship(pilot: String) -> void:
 	var ship: Dictionary = ships[pilot]
-	ship.color = TEAM_COLORS[team]
+	ship.color = _team_color(data.teams[pilot])
 	ship.ship_type = ""  # Forces `_update_ships` to re-tint the visual, icon and label.
 	if ship.death_marker:
 		var was_visible: bool = ship.death_marker.visible
 		ship.death_marker.queue_free()
 		ship.death_marker = _death_marker(pilot, data.deaths[pilot], ship.color)
 		ship.death_marker.visible = was_visible
-	_save_meta()
-	_update_file_label()
-	_refresh_roster()
 
 
 func _ask_rename_pilot(pilot: String) -> void:
@@ -2496,7 +2517,7 @@ func _ask_rename_pilot(pilot: String) -> void:
 
 
 func _ask_rename_team(team: int) -> void:
-	rename_dialog.ask("Rename team", _team_name(team), TEAM_NAMES[team])
+	rename_dialog.ask("Rename team", _team_name(team), TEAM_NAMES[side_colors.get(team, team)])
 	_rename_target = func(text): _rename_team(team, text)
 
 
@@ -2527,7 +2548,7 @@ func _rename_team(team: int, new_name: String) -> void:
 	if team_sides.get(team, "") != "":
 		team_names.erase(team)
 		_edit_team_db(func(db): TeamDb.rename(db, team_sides[team], new_name))
-	elif new_name == "" or new_name == TEAM_NAMES[team]:
+	elif new_name == "" or new_name == TEAM_NAMES[side_colors.get(team, team)]:
 		team_names.erase(team)
 	else:
 		team_names[team] = new_name
