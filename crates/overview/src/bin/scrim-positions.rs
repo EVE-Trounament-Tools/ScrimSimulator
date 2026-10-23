@@ -1017,6 +1017,7 @@ fn build_roster(per_observer: &[Vec<Track>], n_frames: usize) -> Vec<Pilot> {
     order.sort_by_key(|&(o, t)| std::cmp::Reverse(per_observer[o][t].samples.len()));
 
     let min_samples = ((n_frames as f64 * MIN_TRACK_FRACTION) as usize).max(3);
+    let ship_types = ShipTypes::builtin();
     let mut roster: Vec<Pilot> = Vec::new();
     for (o, t) in order {
         let track = &per_observer[o][t];
@@ -1027,7 +1028,7 @@ fn build_roster(per_observer: &[Vec<Track>], n_frames: usize) -> Vec<Pilot> {
             .min_by_key(|(d, _)| *d);
         match nearest {
             Some((_, pilot)) => pilot.members.push((o, t)),
-            None if founds_pilot(track, min_samples) => roster.push(Pilot {
+            None if founds_pilot(track, min_samples, &ship_types) => roster.push(Pilot {
                 name: track.name.clone(),
                 members: vec![(o, t)],
             }),
@@ -1167,11 +1168,24 @@ fn observer_name(o: usize) -> char {
 }
 
 /// Whether an unmatched track is real enough to be its own pilot: long enough, with enough
-/// readable distances, and a name EVE could actually issue (3+ characters). Junk rows — e.g. a
-/// lone `"j"` read off stray ink below the list — fail at least one of these.
-fn founds_pilot(track: &Track, min_samples: usize) -> bool {
+/// readable distances, a name EVE could actually issue (3+ characters), and not a hull with no
+/// pilot. Junk rows — e.g. a lone `"j"` read off stray ink below the list — fail at least one of
+/// these.
+fn founds_pilot(track: &Track, min_samples: usize, ship_types: &ShipTypes) -> bool {
     let distances = track.samples.iter().filter(|s| s.distance_m.is_some()).count();
-    track.name.chars().count() >= MIN_NAME_CHARS && distances >= min_samples
+    track.name.chars().count() >= MIN_NAME_CHARS && distances >= min_samples && !is_pilotless_hull(track, ship_types)
+}
+
+/// Whether a track's name is its own ship type: the row EVE leaves when a pilot dies, the hull
+/// named by its type (`Guardian` / `Guardian`), often lingering as a faded row afterwards.
+fn is_pilotless_hull(track: &Track, ship_types: &ShipTypes) -> bool {
+    let Some(ty) = track.lost_ship.as_deref().or(track.ship_type.as_deref()) else {
+        return false;
+    };
+    match ship_types.resolve(&track.name) {
+        Resolution::Exact(name) | Resolution::Corrected { name, .. } => name == ty,
+        _ => false,
+    }
 }
 
 /// EVE character names are at least 3 characters long.
@@ -1627,6 +1641,34 @@ fn print_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn track(id: usize, name: &str, ship_type: &str, samples: usize) -> Track {
+        let mut t = Track::new(id, name);
+        t.ship_type = Some(ship_type.to_string());
+        t.samples = (0..samples)
+            .map(|i| Sample { t: i as f64, distance_m: Some(50_000.0), speed_mps: Some(100.0) })
+            .collect();
+        t
+    }
+
+    #[test]
+    fn a_hull_named_by_its_type_founds_no_pilot() {
+        // A dead pilot's ship stays on the overview as `Guardian` / `Guardian`.
+        let per_observer = vec![
+            vec![track(0, "Kyle Katarn", "Guardian", 100), track(1, "Guardian", "Guardian", 100)],
+            vec![track(0, "Jan Ors", "Vigil", 100), track(1, "Guardian", "Guardian", 50)],
+        ];
+        let roster = build_roster(&per_observer, 100);
+        let names: Vec<&str> = roster.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Jan Ors", "Kyle Katarn"]);
+    }
+
+    #[test]
+    fn a_pilot_named_like_another_hull_still_founds_one() {
+        let per_observer = vec![vec![track(0, "Vigil", "Guardian", 100)]];
+        let roster = build_roster(&per_observer, 100);
+        assert_eq!(roster.len(), 1);
+    }
 
     fn utc(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().into()
