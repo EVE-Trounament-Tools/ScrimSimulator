@@ -14,6 +14,9 @@ export interface User {
   name: string;
   allianceId: number | null;
   admin: boolean;
+  /** Whitelisted (or an admin): sees private matches and may change the library. Everyone else
+   * only views public ones. */
+  member: boolean;
 }
 
 /** Headers every response carries. Cross-origin isolation (COOP + COEP) is what lets the

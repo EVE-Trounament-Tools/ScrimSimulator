@@ -12,6 +12,8 @@ signal row_pressed(pilot: String)
 signal swap_pressed(pilot: String)
 ## A pilot row was right-clicked.
 signal row_context_pressed(pilot: String)
+## A row's team swap button was right-clicked.
+signal swap_context_pressed(pilot: String)
 ## A team label added with a `key` was double-clicked.
 signal group_activated(key: int)
 ## Column widths, order or visibility changed.
@@ -269,7 +271,7 @@ func add_group(text: String, color: Color, key := -1, tooltip := "") -> Label:
 
 
 ## A pilot row: a toggle button spanning the cells (right-click: `row_context_pressed`), then a
-## team swap button. Returns the row button.
+## team swap button (right-click: `swap_context_pressed`). Returns the row button.
 func add_row(pilot: String, color: Color, swap_tooltip: String) -> Button:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 0)
@@ -313,6 +315,10 @@ func add_row(pilot: String, color: Color, swap_tooltip: String) -> Button:
 	swap.focus_mode = Control.FOCUS_NONE
 	swap.tooltip_text = swap_tooltip
 	swap.pressed.connect(func(): swap_pressed.emit(pilot))
+	swap.gui_input.connect(func(event: InputEvent):
+		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT:
+			swap_context_pressed.emit(pilot)
+			swap.accept_event())
 	row.add_child(swap)
 	rows[pilot] = {"button": button, "cells": cells, "labels": labels, "damage": damage}
 	_layout_row(rows[pilot])

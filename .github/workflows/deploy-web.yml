@@ -1,8 +1,9 @@
 name: deploy-web
 
 # Publishes the website (web/README.md) for every version tag on master: the Godot web build goes
-# to R2 under builds/<tag>/, the Worker and its D1 migrations are deployed, and the site switches
-# to the new build. Needs the CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID secrets and the
+# to R2 under builds/<tag>/, the Worker and its D1 migrations are deployed, the demo match is added
+# to the library if it isn't there (scripts/seed_demo_web.sh), and the site switches to the new
+# build. Needs the CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID secrets and the
 # D1_DATABASE_ID variable; without them (e.g. on a fork) the deploy job is skipped.
 on:
   push:
@@ -118,6 +119,7 @@ jobs:
             npx wrangler r2 object put "scrim-simulator/builds/$BUILD/$(basename "$f")" --remote --file "$f"
           done
           npx wrangler d1 migrations apply DB --remote
+          ../../scripts/seed_demo_web.sh --remote
           npx wrangler deploy
           # Switch over last, once the build and the Worker serving it are both in place.
           npx wrangler d1 execute DB --remote --command \

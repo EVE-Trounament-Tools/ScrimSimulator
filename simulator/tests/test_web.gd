@@ -35,6 +35,31 @@ func test_diff_reports_added_changed_and_removed() -> void:
 	assert_eq(WebLibrary._diff(now, now), {})
 
 
+func test_public_via_names_the_match_or_nearest_public_folder() -> void:
+	var saved := WebLibrary._public
+	WebLibrary._public = {"S1/": true, "S2/Week/m.positions.csv": true}
+	assert_eq(WebLibrary.public_via("S1/"), "S1/")
+	assert_eq(WebLibrary.public_via("S1/Sub/"), "S1/")
+	assert_eq(WebLibrary.public_via("S1/Sub/a.positions.csv"), "S1/")
+	assert_eq(WebLibrary.public_via("S2/Week/m.positions.csv"), "S2/Week/m.positions.csv")
+	assert_eq(WebLibrary.public_via("S2/Week/"), "")
+	assert_eq(WebLibrary.public_via("top.positions.csv"), "")
+	assert_eq(WebLibrary.site_path({"kind": "folder", "rel": "S1/Sub"}), "S1/Sub/")
+	assert_eq(WebLibrary.site_path({"kind": "match", "path": MatchLibrary.dir.path_join("S1/a.positions.csv")}),
+		"S1/a.positions.csv")
+	WebLibrary._public = saved
+
+
+func test_manifest_map_collects_public_paths() -> void:
+	var m := WebLibrary._manifest_map([
+		{"path": "S1/", "sha": "", "size": 0, "public": 1},
+		{"path": "S1/a.positions.csv", "sha": SHA_A, "size": 3, "public": 0},
+		{"path": "b.positions.csv", "sha": SHA_B, "size": 4},
+	])
+	assert_eq(m.public, {"S1/": true})
+	assert_eq(m.sizes["b.positions.csv"], 4)
+
+
 func test_match_key_matches_the_site() -> void:
 	# Same cases as web/worker/test/worker.test.ts.
 	assert_eq(WebLibrary.match_key("a/m.positions.csv"), "a/m.positions")

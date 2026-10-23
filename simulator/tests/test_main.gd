@@ -29,6 +29,9 @@ func after_each() -> void:
 	Settings._cfg = null
 	MatchLibrary.dir = _saved_library
 	ShipSizes.dir = ""
+	var bus := AudioServer.get_bus_index(Main.AUDIO_BUS)
+	if bus >= 0:
+		AudioServer.set_bus_mute(bus, false)
 
 
 func _main() -> Main:
@@ -247,6 +250,30 @@ func test_broadcast_clock_counts_down_to_first_move() -> void:
 		assert_eq(m.broadcast_panel.clock.text, c[1], "at %s" % c[0])
 
 
+func test_mute() -> void:
+	var m := _main()
+	m.load_match(_match_csv())
+	assert_true(m.mute_button.disabled, "no audio, nothing to mute")
+	var path := _countdown_match()
+	MatchLibrary.set_audio(path, write_wav(10.0))
+	m.load_match(path)
+	assert_false(m.mute_button.disabled)
+	var bus := AudioServer.get_bus_index(Main.AUDIO_BUS)
+	assert_false(AudioServer.is_bus_mute(bus))
+	m._toggle_play()
+	m.mute_button.button_pressed = true
+	assert_true(AudioServer.is_bus_mute(bus))
+	assert_true(Settings.get_value("audio/muted"))
+	assert_true(m.audio_player.playing, "keeps playing muted, so unmuting stays in sync")
+	m._set_muted(false)
+	assert_false(AudioServer.is_bus_mute(bus))
+	assert_false(m.mute_button.button_pressed)
+	Settings.set_value("audio/muted", true)
+	var m2 := _main()
+	assert_true(m2.mute_button.button_pressed, "remembered")
+	assert_true(AudioServer.is_bus_mute(bus))
+
+
 func test_audio_follows_playback() -> void:
 	var path := _countdown_match()
 	MatchLibrary.set_audio(path, write_wav(10.0))
@@ -263,6 +290,74 @@ func test_audio_follows_playback() -> void:
 	m._toggle_play()
 	assert_false(m.audio_player.playing)
 	m._set_speed(1.0)
+
+
+## A library match named `name` with `ships` pilots sampled 0-20 s with full HP, half on each
+## start line but the last `stray` of them, who start at the centre (on no team).
+func _hp_match(name: String, ships: int, stray := 0) -> String:
+	var rows := []
+	for i in ships:
+		var at := C if i >= ships - stray else on_line(0 if i % 2 == 0 else 7, 0.5)
+		for t in 21:
+			rows.append(row(t, "P%02d" % i, "Test Hull", at) + [1, 1, 1])
+	var src := write_csv(rows, DEFAULT_HEADER + ",shield,armor,hull")
+	var named := src.get_base_dir().path_join(name + ".positions.csv")
+	DirAccess.rename_absolute(src, named)
+	return MatchLibrary.add(named)
+
+
+func test_menu_flags_matches_missing_data() -> void:
+	var full := _hp_match("full", MatchData.MIN_SHIPS)
+	var short := _hp_match("short", 12)
+	var m := _main()
+	var items := {}
+	for it in m.menu.list.match_items():
+		items[it.get_metadata(0).path] = it
+	assert_eq(items[full].get_button_count(0), 0, "complete match: no badge")
+	assert_eq(items[short].get_button_count(0), 1, "badge")
+	assert_eq(items[short].get_button(0, 0), m.menu.warning_icon)
+	assert_true(items[short].get_button_tooltip_text(0, 0).contains("Only 12 of 20 ships"))
+	assert_true(items[short].get_tooltip_text(0).begins_with("Missing data:"))
+
+
+func test_menu_flags_pilots_on_no_team() -> void:
+	var stray := _hp_match("stray", MatchData.MIN_SHIPS - 2, 2)
+	var m := _main()
+	var item: TreeItem = m.menu.list.match_items()[0]
+	assert_eq(item.get_button_count(0), 2, "missing data and no team")
+	var i := item.get_button_by_id(0, MainMenu.Badge.NO_TEAM)
+	assert_eq(item.get_button(0, i), m.menu.no_team_icon)
+	assert_eq(item.get_button_tooltip_text(0, i), "Not on a team:\n  P16\n  P17")
+	assert_eq(DataCheck.unassigned(stray), ["P16", "P17"])
+	# Putting them on a team (saved in the sidecar) clears the badge.
+	MatchLibrary.save_meta(stray, {"teams": {"P16": MatchData.Team.BLUE, "P17": MatchData.Team.RED}})
+	m.menu.refresh()
+	item = m.menu.list.match_items()[0]
+	assert_eq(item.get_button_by_id(0, MainMenu.Badge.NO_TEAM), -1, "assigned: no badge")
+	assert_eq(DataCheck.unassigned(stray), [])
+
+
+func test_missing_text_caps_lines() -> void:
+	assert_eq(MainMenu.flag_text("Missing data:", []), "")
+	var many := range(MainMenu.MAX_ISSUES_SHOWN + 3).map(func(i): return "issue %d" % i)
+	var text := MainMenu.flag_text("Missing data:", many)
+	assert_eq(text.split("\n").size(), MainMenu.MAX_ISSUES_SHOWN + 2)
+	assert_true(text.ends_with("…and 3 more"))
+
+
+func test_data_check_caches_until_csv_changes() -> void:
+	var path := _hp_match("cached", 12)
+	assert_eq(DataCheck.issues(path), ["Only 12 of 20 ships"])
+	assert_true(FileAccess.file_exists(DataCheck.cache_path()))
+	DataCheck._cache[path].issues = ["stale"]
+	assert_eq(DataCheck.issues(path), ["stale"], "unchanged CSV: cached")
+	var f := FileAccess.open(path, FileAccess.READ_WRITE)
+	f.seek_end()
+	f.store_line(",".join(row(21, "P00", "Test Hull", on_line(0, 0.5)).map(func(v): return str(v))) + ",1,1,1")
+	f.close()
+	assert_eq(DataCheck.issues(path), ["Only 12 of 20 ships"], "changed CSV: rechecked")
+	DataCheck.prune([])
+	assert_false(DataCheck._cache.has(path), "pruned")
 
 
 func test_menu_audio_badge_and_context_menu() -> void:
@@ -909,6 +1004,31 @@ func test_roster_sorts_by_ship_type_and_abbreviates() -> void:
 	assert_eq(m.roster_buttons["Bob Pilot"].tooltip_text, "Centre the camera on Bob Pilot (right-click to rename or debug)")
 
 
+## Blue (corner 0): an Abaddon, a Punisher (5) and an Atron (4); red (corner 7): two Atrons and a
+## Rifter (4 points each).
+func test_roster_sorts_by_points() -> void:
+	var m := _main()
+	var rows := []
+	for t in 2:
+		rows.append(row(t, "atron", "Atron", on_line(0, 0.5)))
+		rows.append(row(t, "punisher", "Punisher", on_line(0, 0.6)))
+		rows.append(row(t, "abaddon", "Abaddon", on_line(0, 0.7)))
+		rows.append(row(t, "rifter", "Rifter", on_line(7, 0.5)))
+		rows.append(row(t, "y atron", "Atron", on_line(7, 0.6)))
+		rows.append(row(t, "x atron", "Atron", on_line(7, 0.7)))
+	m.load_match(write_csv(rows))
+	var order := ["abaddon", "punisher", "atron", "x atron", "y atron", "rifter"]
+	assert_eq(_roster(m), ["Blue (3)"] + order.slice(0, 3) + ["Red (3)"] + order.slice(3),
+			"most points first, ties by ship type then pilot")
+	var buttons := {}  # row button -> pilot
+	for pilot in m.broadcast_panel.rows:
+		buttons[m.broadcast_panel.rows[pilot].button] = pilot
+	var shown := func(side: int) -> Array:
+		return m.broadcast_panel.sides[side].rows.get_children().map(func(b): return buttons[b])
+	assert_eq(shown.call(BroadcastRoster.Side.LEFT), order.slice(3), "red down the left")
+	assert_eq(shown.call(BroadcastRoster.Side.RIGHT), order.slice(0, 3), "blue down the right")
+
+
 func test_roster_hides_empty_unknown_group() -> void:
 	var m := _main()
 	m.load_match(_match_csv())
@@ -1041,6 +1161,42 @@ func test_swap_persists_for_library_match() -> void:
 	assert_eq(_roster(m2), ["Blue (0)", "Red (2)", "blue", "red", "Unknown (2)", "late", "runner"])
 
 
+func test_move_to_unknown() -> void:
+	Settings.set_value("teams/season_db", false)  # teams of this match only
+	var path := MatchLibrary.add(_match_csv())
+	var m := _main()
+	m.load_match(path)
+	m._move_team("blue", MatchData.Team.UNKNOWN)
+	assert_eq(m.data.teams["blue"], MatchData.Team.UNKNOWN)
+	assert_eq(m.ships["blue"].color, Main.TEAM_COLORS[MatchData.Team.UNKNOWN])
+	assert_eq(_roster(m), ["Blue (0)", "Red (1)", "red", "Unknown (3)", "blue", "late", "runner"])
+	var m2 := _main()
+	m2.load_match(path)
+	assert_eq(m2.data.teams["blue"], MatchData.Team.UNKNOWN)
+
+
+func test_team_menu_moves_pilot() -> void:
+	var m := _main()
+	m.load_match(_match_csv())
+	m._open_team_menu("blue")
+	var items := []
+	for i in range(1, m.team_menu.item_count):
+		items.append(m.team_menu.get_item_text(i))
+	assert_eq(items, ["Move to Red", "Move to Unknown"])
+	m.team_menu.index_pressed.emit(2)
+	assert_eq(m.data.teams["blue"], MatchData.Team.UNKNOWN)
+	m.team_menu.hide()
+
+
+func test_move_to_unknown_leaves_season_db() -> void:
+	var path := _season_match(0, 7)
+	var m := _main()
+	m.load_match(path)
+	m._move_team("blue", MatchData.Team.UNKNOWN)
+	assert_eq(m.data.teams["blue"], MatchData.Team.UNKNOWN)
+	assert_false(TeamDb.read("Season 1").manual.has("blue"), "Unknown is this match's only")
+
+
 func test_rename_team_shows_and_persists() -> void:
 	Settings.set_value("teams/season_db", false)  # teams of this match only
 	var path := MatchLibrary.add(_match_csv())
@@ -1049,7 +1205,8 @@ func test_rename_team_shows_and_persists() -> void:
 	m._rename_team(MatchData.Team.RED, " Them ")
 	assert_eq(_roster(m)[2], "Them (1)")
 	assert_true(m.file_label.text.contains("blue 1 / Them 1 / unknown 2"))
-	assert_eq(m.roster_table.rows["blue"].button.get_parent().get_child(1).tooltip_text, "Move to Them")
+	assert_eq(m.roster_table.rows["blue"].button.get_parent().get_child(1).tooltip_text,
+			"Move to Them (right-click for more)")
 	var m2 := _main()
 	m2.load_match(path)
 	assert_eq(_roster(m2)[2], "Them (1)")

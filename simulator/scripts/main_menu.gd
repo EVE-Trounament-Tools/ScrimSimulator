@@ -4,7 +4,11 @@ extends PanelContainer
 ## folder to it, rename or remove one, attach audio to one, add combat logs (EVE gamelogs) to the
 ## matches of a folder, sort matches into folders (right-click for all of these, or drag to
 ## move), mark matches internal (`MatchLibrary.is_internal`: when added with **Internal** ticked,
-## or by right-click). Covers the viewer until a match is chosen.
+## or by right-click). Matches missing data (`DataCheck`: too few ships, no HP, ships with big
+## gaps) get a warning badge naming what is missing, and matches with pilots on no team once
+## opened (`DataCheck.unassigned`) a badge naming them. Covers the viewer until a match is chosen.
+## On the website, public matches and folders (`WebLibrary.public_via`) have a green background,
+## admins make them public by right-click, and viewers (not whitelisted) can't change anything.
 
 ## The library path of the match to open.
 signal match_chosen(path: String)
@@ -19,13 +23,35 @@ signal logs_changed(path: String)
 ## Library match `path` was marked internal or not (`MatchLibrary.set_internal`).
 signal internal_changed(path: String)
 
-enum MenuItem { ADD_AUDIO, REMOVE_AUDIO, ADD_LOGS, REMOVE_LOGS, RENAME, REMOVE, NEW_FOLDER, ADD_FOLDER, ADD_MATCH, INTERNAL }
+## Ids of a match row's badges (`TreeItem` buttons).
+enum Badge { MISSING_DATA, NO_TEAM }
+enum MenuItem { ADD_AUDIO, REMOVE_AUDIO, ADD_LOGS, REMOVE_LOGS, RENAME, REMOVE, NEW_FOLDER, ADD_FOLDER, ADD_MATCH, INTERNAL, PUBLIC }
 
 ## Badge on matches with audio: a speaker.
 const AUDIO_ICON_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
 <path d="M2 6h3l4-3.5v11L5 10H2z" fill="#8fc3ff"/>
 <path d="M11 5.5a3.5 3.5 0 0 1 0 5M12.8 3.5a6 6 0 0 1 0 9" stroke="#8fc3ff" stroke-width="1.4" fill="none" stroke-linecap="round"/>
 </svg>"""
+## Badge on matches missing data (`DataCheck`): a warning triangle.
+const WARNING_ICON_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<path d="M8 1.5l7 12.5H1z" fill="#e8a33a"/>
+<path d="M8 5.5v4.5" stroke="#1a1a1a" stroke-width="1.6" stroke-linecap="round"/>
+<circle cx="8" cy="12.2" r="0.9" fill="#1a1a1a"/>
+</svg>"""
+## Badge on matches with pilots on no team (`DataCheck.unassigned`): a grey pilot, in the
+## viewer's colour for unknown team, with a question mark.
+const NO_TEAM_ICON_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<circle cx="6" cy="4.5" r="2.8" fill="#9a9a9a"/>
+<path d="M1 14.5c0-3.6 2.2-5.5 5-5.5s5 1.9 5 5.5z" fill="#9a9a9a"/>
+<path d="M11.2 3.6a1.9 1.9 0 1 1 2.6 1.8c-.6.3-.9.7-.9 1.4v.5" stroke="#e8a33a" stroke-width="1.4" fill="none" stroke-linecap="round"/>
+<circle cx="12.9" cy="9.4" r="0.8" fill="#e8a33a"/>
+</svg>"""
+## Text colour of matches missing data.
+const WARNING_COLOR := Color(1.0, 0.8, 0.5)
+## Background of public matches and folders (web only).
+const PUBLIC_BG := Color(0.10, 0.24, 0.17)
+## Most lines (issues or pilots) a badge's tooltip lists.
+const MAX_ISSUES_SHOWN := 8
 ## Icon of folders.
 const FOLDER_ICON_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
 <path d="M1.5 3.5h5l1.5 1.5h6.5v8h-13z" fill="#d9b25f"/>
@@ -66,6 +92,8 @@ var move_menu: PopupMenu
 ## Folders listed in `move_menu` ("" for the library itself).
 var move_targets: Array = []
 var audio_icon: Texture2D
+var warning_icon: Texture2D
+var no_team_icon: Texture2D
 var folder_icon: Texture2D
 ## Same size as `audio_icon`, for matches without audio so names stay aligned.
 var blank_icon: Texture2D
@@ -115,12 +143,22 @@ func _init() -> void:
 			else:
 				collapsed.erase(meta.rel))
 	list.dropped.connect(move_item)
+	list.button_clicked.connect(func(item: TreeItem, _column, _id, _button): item.select(0))
 	box.add_child(list)
 
 	empty_label = Label.new()
 	empty_label.text = "No matches yet — Add match… / Add folder…, or drop a *.positions.csv or a scrim folder here"
+	if not WebBackend.member():
+		empty_label.text = "No public matches yet"
 	empty_label.modulate = Color(1, 1, 1, 0.6)
 	box.add_child(empty_label)
+
+	if OS.has_feature("web"):
+		var legend := Label.new()
+		legend.text = "Green rows are public: anyone who logs in can watch them. The rest only whitelisted pilots see."
+		legend.modulate = Color(0.55, 0.85, 0.65, 0.8)
+		legend.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		box.add_child(legend)
 
 	error_label = Label.new()
 	error_label.modulate = Color(1.0, 0.45, 0.4)
@@ -184,6 +222,13 @@ func _init() -> void:
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	buttons.add_child(spacer)
+
+	# Viewers on the website can only watch.
+	if not WebBackend.member():
+		list.read_only = true
+		for c in [add_button, add_folder_button, internal_check, new_folder_button, rename_button,
+				remove_button, audio_button]:
+			c.visible = false
 
 	resume_button = Button.new()
 	resume_button.text = "Back to match"
@@ -258,6 +303,12 @@ func _init() -> void:
 	img = Image.new()
 	img.load_svg_from_string(AUDIO_ICON_SVG)
 	audio_icon = ImageTexture.create_from_image(img)
+	img = Image.new()
+	img.load_svg_from_string(WARNING_ICON_SVG)
+	warning_icon = ImageTexture.create_from_image(img)
+	img = Image.new()
+	img.load_svg_from_string(NO_TEAM_ICON_SVG)
+	no_team_icon = ImageTexture.create_from_image(img)
 	var blank := Image.create_empty(img.get_width(), img.get_height(), false, Image.FORMAT_RGBA8)
 	blank_icon = ImageTexture.create_from_image(blank)
 
@@ -280,6 +331,7 @@ func refresh() -> void:
 		item.set_icon(0, folder_icon)
 		item.set_metadata(0, {"kind": "folder", "rel": rel})
 		item.collapsed = collapsed.has(rel)
+		item.set_tooltip_text(0, _public_note(item))
 		parents[rel] = item
 	entries = MatchLibrary.list()
 	for e in entries:
@@ -295,7 +347,21 @@ func refresh() -> void:
 			notes.append("%d combat log%s" % [logs, "" if logs == 1 else "s"])
 		if MatchLibrary.is_internal(e.path):
 			notes.append("Internal match")
-		item.set_tooltip_text(0, "\n".join(notes))
+		var public := _public_note(item)
+		if public != "":
+			notes.append(public)
+		var flags := []
+		var missing := flag_text("Missing data:", DataCheck.issues(e.path))
+		if missing != "":
+			item.add_button(0, warning_icon, Badge.MISSING_DATA, false, missing)
+			item.set_custom_color(0, WARNING_COLOR)
+			flags.append(missing)
+		var no_team := flag_text("Not on a team:", DataCheck.unassigned(e.path))
+		if no_team != "":
+			item.add_button(0, no_team_icon, Badge.NO_TEAM, false, no_team)
+			flags.append(no_team)
+		item.set_tooltip_text(0, "\n".join(flags + notes))
+	DataCheck.prune(entries.map(func(e): return e.path))
 	if not _select(was):
 		var matches := list.match_items()
 		if not matches.is_empty():
@@ -304,6 +370,34 @@ func refresh() -> void:
 	_update_buttons()
 	if OS.has_feature("web"):
 		WebLibrary.local_changed()
+
+
+## On the website: gives `item` (a match or folder) the public background if it is public, and
+## returns the note saying so ("" if private, or outside the web build).
+func _public_note(item: TreeItem) -> String:
+	if not OS.has_feature("web"):
+		return ""
+	var meta: Dictionary = item.get_metadata(0)
+	var via := WebLibrary.public_via(WebLibrary.site_path(meta))
+	if via == "":
+		return ""
+	item.set_custom_bg_color(0, PUBLIC_BG)
+	if via == WebLibrary.site_path(meta):
+		return "Public: anyone who logs in can watch"
+	return "Public through folder %s: anyone who logs in can watch" % via.trim_suffix("/")
+
+
+## Tooltip of a badge: the first `MAX_ISSUES_SHOWN` of `items` (issues or pilots) under `title`,
+## or "" when there are none (no badge).
+static func flag_text(title: String, items: Array) -> String:
+	if items.is_empty():
+		return ""
+	var lines := [title]
+	for it in items.slice(0, MAX_ISSUES_SHOWN):
+		lines.append("  " + it)
+	if items.size() > MAX_ISSUES_SHOWN:
+		lines.append("  …and %d more" % (items.size() - MAX_ISSUES_SHOWN))
+	return "\n".join(lines)
 
 
 ## Selects the item whose metadata is `meta` (by its path or folder), revealing it; false if
@@ -345,10 +439,11 @@ func add_file(src: String) -> void:
 	match_chosen.emit(path)
 
 
-## Adds scrim folder `src_dir` to the library, in the `target_folder` (`MatchLibrary.add_folder`),
-## and selects its first match; what couldn't be added or paired is named in the error line.
+## Adds scrim folder `src_dir` to the library, always at its top level whatever is selected (it
+## can be moved into a folder afterwards; `MatchLibrary.add_folder`), and selects its first match;
+## what couldn't be added or paired is named in the error line.
 func add_folder(src_dir: String) -> void:
-	var added := MatchLibrary.add_folder(src_dir, target_folder(), internal_check.button_pressed)
+	var added := MatchLibrary.add_folder(src_dir, "", internal_check.button_pressed)
 	if added.matches.is_empty():
 		show_error("No matches added from %s — it needs scrim-positions CSVs" % src_dir.simplify_path().get_file())
 		return
@@ -570,6 +665,8 @@ func _on_empty_clicked(at: Vector2, button: int) -> void:
 ## Shows the right-click menu of the selected match or folder (of the library itself if
 ## nothing is selected) at screen position `at`.
 func open_context_menu(at: Vector2) -> void:
+	if not WebBackend.member():
+		return
 	var meta := _selected_meta()
 	context_menu.clear()
 	match meta.get("kind"):
@@ -587,6 +684,7 @@ func open_context_menu(at: Vector2) -> void:
 				MatchLibrary.is_internal(meta.path))
 			context_menu.set_item_tooltip(context_menu.get_item_index(MenuItem.INTERNAL),
 				"One team against itself: teams come only from start positions, not the season's teams")
+			_add_public_item(meta)
 			context_menu.add_separator()
 			_add_move_submenu(meta)
 			context_menu.add_item("Rename…", MenuItem.RENAME)
@@ -594,10 +692,10 @@ func open_context_menu(at: Vector2) -> void:
 		"folder":
 			context_menu.add_item("New folder…", MenuItem.NEW_FOLDER)
 			context_menu.add_item("Add match…", MenuItem.ADD_MATCH)
-			context_menu.add_item("Add folder…", MenuItem.ADD_FOLDER)
 			context_menu.add_item("Add combat logs…", MenuItem.ADD_LOGS)
 			context_menu.set_item_disabled(context_menu.get_item_index(MenuItem.ADD_LOGS),
 				MatchLibrary.matches_in(meta.rel).is_empty())
+			_add_public_item(meta)
 			context_menu.add_separator()
 			_add_move_submenu(meta)
 			context_menu.add_item("Rename…", MenuItem.RENAME)
@@ -608,6 +706,22 @@ func open_context_menu(at: Vector2) -> void:
 			context_menu.add_item("Add folder…", MenuItem.ADD_FOLDER)
 	context_menu.reset_size()
 	context_menu.popup(Rect2i(Vector2i(at), Vector2i.ZERO))
+
+
+## Admins on the website: adds "Public" to `context_menu` for `meta` (a match or folder), ticked
+## when it is public; when public only through a folder it is in, ticked and disabled.
+func _add_public_item(meta: Dictionary) -> void:
+	if not WebBackend.admin():
+		return
+	var own := WebLibrary.site_path(meta)
+	var via := WebLibrary.public_via(own)
+	context_menu.add_check_item("Public", MenuItem.PUBLIC)
+	var i := context_menu.get_item_index(MenuItem.PUBLIC)
+	context_menu.set_item_checked(i, via != "")
+	context_menu.set_item_disabled(i, via != "" and via != own)
+	context_menu.set_item_tooltip(i, "Public through folder %s" % via.trim_suffix("/") if via != "" and via != own
+		else "Anyone who logs in can watch it%s, not just whitelisted pilots" % (
+			", and everything put in it later" if meta.kind == "folder" else ""))
 
 
 ## Adds "Move to" to `context_menu`: the library and every folder, those `what` (a match or
@@ -637,6 +751,9 @@ func _on_context_item(id: int) -> void:
 			remove_logs_selected()
 		MenuItem.INTERNAL:
 			toggle_internal_selected()
+		MenuItem.PUBLIC:
+			var p := WebLibrary.site_path(_selected_meta())
+			WebLibrary.set_public(p, WebLibrary.public_via(p) != p)
 		MenuItem.RENAME:
 			_ask_rename()
 		MenuItem.REMOVE:

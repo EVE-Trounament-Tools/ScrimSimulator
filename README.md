@@ -29,7 +29,7 @@ Each release has two zips per platform. You only need the first to watch matches
 |---|---|
 | `scrim-simulator` (`.x86_64` / `.exe`) | The replay viewer. |
 | `glb-undraco` | Helper the simulator runs to unpack downloaded ship models. Keep it next to the simulator. |
-| `demo/` | The demo match and a combat log for it, added to the match list on first run. |
+| `demo/` | The demo match with a combat log and voice comms for it, added to the match list on first run. |
 
 **`scrim-positions-…zip`**, for processing your own recordings:
 
@@ -356,6 +356,9 @@ in every match, and an empty name restores the original.
 | B | Toggle the 125 km arena boundary |
 
 **Hotkeys…** (in the bar and on the match menu) shows this list top left.
+
+**Mute** (next to the speed picker) silences a match's comms audio without pausing it; it is
+remembered between sessions.
 
 ![Measuring from one ship to another](docs/media/measure.gif)
 

@@ -11,6 +11,9 @@ extends RefCounted
 
 ## Samples further apart than this are treated as a gap: the ship is hidden in between.
 const MAX_GAP_S := 5.0
+## A hull whose track ends more than this before the CSV's last sample, still in the arena, was
+## destroyed with its pod never seen (it drops off the overview).
+const VANISH_S := MAX_GAP_S
 
 ## Teams start strung along lines from two cube corners to the centre.
 enum Team { UNKNOWN = -1, BLUE = 0, RED = 1 }
@@ -46,6 +49,11 @@ const DAMAGE_MIN_DROP := 0.03
 const DAMAGE_STEP := 0.005
 const DAMAGE_WINDOW_S := 3.0
 const DAMAGE_HOLD_S := 2.0
+## A full match has this many ships (two teams of `MAX_TEAM_SIZE`); fewer is missing data.
+const MIN_SHIPS := 2 * MAX_TEAM_SIZE
+## A ship with positions or HP for less than this fraction of its time in the match is missing
+## data (see `data_issues`).
+const MIN_COVERAGE := 0.5
 
 enum Event { DEATH, BOUNDARY, MJD }
 
@@ -58,7 +66,8 @@ enum Event { DEATH, BOUNDARY, MJD }
 ## A podded pilot's track ends at its first capsule sample (`pod: true`, with unknown speed and HP):
 ## nothing the pod does after is kept, and `sample` holds it there until the match ends.
 var tracks: Dictionary = {}
-## pilot name -> match time it was podded (as its DEATH event). Pilots never podded are absent.
+## pilot name -> match time it was podded, or vanished from the overview mid-match (as its DEATH
+## event; the vanished track's last sample has `vanished: true`). Pilots never podded are absent.
 var podded: Dictionary = {}
 ## pilot name -> Team, from each pilot's first position.
 var teams: Dictionary = {}
@@ -181,6 +190,9 @@ static func load_csv(path: String, ship_radii := {}, move_threshold_m := 0.0, ke
 		var last: Dictionary = data.tracks[pilot][-1]
 		if last.get("pod", false):
 			data.podded[pilot] = maxf(last.t - data.start_time, 0.0)
+		elif last.ship_type != CAPSULE and t_max - last.t > VANISH_S:
+			last.vanished = true
+			data.podded[pilot] = maxf(last.t - data.start_time, 0.0)
 	if not data.eve_start.is_empty():
 		data.eve_unix_start = CombatLog.parse_eve_time(data.eve_start)
 		data.eve_unix_end = CombatLog.parse_eve_time(data.eve_end)
@@ -267,6 +279,48 @@ static func _flip_row(row: PackedStringArray, col: Dictionary) -> void:
 		for k in 3:
 			row[col[["dir_x", "dir_y", "dir_z"][k]]] = "%.4f" % v[k]
 	row[col["plane_exit"]] = "ccw" if row[col["plane_exit"]] == "cw" else "cw"
+
+
+## What the match is missing, one line each (empty when nothing is): fewer than `MIN_SHIPS`
+## ships, no HP at all, and each ship whose positions cover less than `MIN_COVERAGE` of its time in
+## the match (first sample of the match until it was podded, left the arena or the match ended;
+## gaps longer than `MAX_GAP_S` count as missing) or whose HP is known in less than `MIN_COVERAGE`
+## of its samples in that time.
+func data_issues() -> Array:
+	var out := []
+	if tracks.size() < MIN_SHIPS:
+		out.append("Only %d of %d ships" % [tracks.size(), MIN_SHIPS])
+	if not has_hp:
+		out.append("No HP data")
+	var pilots := tracks.keys()
+	pilots.sort()
+	for pilot in pilots:
+		var track: Array = tracks[pilot]
+		var end := _end_t
+		if podded.has(pilot):
+			end = minf(end, podded[pilot] + start_time)
+		if deaths.has(pilot):
+			end = minf(end, deaths[pilot].t + start_time)
+		if end <= first_t:
+			continue
+		var covered := 0.0
+		var samples := 0
+		var known_hp := 0
+		for i in track.size():
+			var b: Dictionary = track[i]
+			if b.t <= end and not b.get("pod", false):
+				samples += 1
+				if not is_nan(b.hp.x):
+					known_hp += 1
+			if i > 0 and b.t - track[i - 1].t <= MAX_GAP_S:
+				covered += maxf(minf(b.t, end) - maxf(track[i - 1].t, first_t), 0.0)
+		var ship: String = track[0].ship_type
+		var positions := covered / (end - first_t)
+		if positions < MIN_COVERAGE:
+			out.append("%s (%s): positions for %d%% of the match" % [pilot, ship, roundi(positions * 100.0)])
+		if has_hp and samples > 0 and float(known_hp) / samples < MIN_COVERAGE:
+			out.append("%s (%s): HP for %d%% of samples" % [pilot, ship, roundi(100.0 * known_hp / samples)])
+	return out
 
 
 ## Whether samples carry EVE times, so other EVE logs can be lined up with the match.
@@ -399,11 +453,12 @@ func _cap_teams(line_d: Dictionary) -> void:
 
 
 ## Once a team has `MAX_TEAM_SIZE` pilots, UNKNOWN pilots (by name) join the other team until it
-## is full too. Returns the pilots moved.
-func fill_unknown() -> Array:
+## is full too; pilots in `pinned` (put on UNKNOWN by hand) stay. Returns the pilots moved.
+func fill_unknown(pinned := {}) -> Array:
 	var members := {Team.BLUE: [], Team.RED: [], Team.UNKNOWN: []}
 	for pilot in teams:
-		members[teams[pilot]].append(pilot)
+		if not (teams[pilot] == Team.UNKNOWN and pinned.has(pilot)):
+			members[teams[pilot]].append(pilot)
 	var unknown: Array = members[Team.UNKNOWN]
 	unknown.sort()
 	var moved := []
@@ -482,6 +537,13 @@ func _find_events() -> void:
 					"t": t, "pilot": pilot, "kind": Event.MJD, "pos": a.pos, "to_pos": b.pos,
 					"ship_type": a.ship_type,
 				})
+		var last: Dictionary = track[-1]
+		var gone: bool = last.get("vanished", false) and last.t >= start_time
+		if gone and (not deaths.has(pilot) or deaths[pilot].t > podded[pilot]):
+			events.append({
+				"t": podded[pilot], "pilot": pilot, "kind": Event.DEATH, "pos": last.pos,
+				"ship_type": last.ship_type,
+			})
 		if deaths.has(pilot):
 			var death: Dictionary = deaths[pilot]
 			var s := sample(pilot, death.t)

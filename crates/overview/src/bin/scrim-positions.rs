@@ -50,7 +50,7 @@ use overview::gamelog;
 use overview::plane_exit::{self, Exit, PilotTrack, Plane, Scram, Turn};
 use overview::solve::{self, direction, infer_observers, solve_track, Fix, Reading};
 use overview::targets::{
-    label_image, match_label, ocr_label, read_rings, BlockGeometry, Candidate, Hp, Label, LabelCache, Ring,
+    label_image, match_label, ocr_label, read_rings, same_rings, BlockGeometry, Candidate, Hp, Label, LabelCache, Ring,
 };
 use overview::track::{hampel_flags, Sample, Track, Tracker, CAPSULE};
 use overview::util::levenshtein;
@@ -378,6 +378,18 @@ fn main() -> Result<()> {
         }
         let pilots: Vec<Vec<Reading>> =
             reads.iter().flat_map(|(_, m)| m.readings.iter().map(|r| r.as_readings(cli.observer_radius_m))).collect();
+        let names: Vec<&str> = scene.panels.iter().map(|p| p.name.as_str()).collect();
+        if let Some((i, j, share)) = solve::duplicate_observers(&pilots) {
+            eprintln!(
+                "  error: panels {} and {} read the same distances on {:.0}% of ticks: the recording shows one \
+                 observer's overview twice (check the OBS sources), so positions can't be solved",
+                names[i],
+                names[j],
+                share * 100.0
+            );
+            failed += reads.len();
+            continue;
+        }
         let fit = infer_observers(&pilots, cli.observer_distance_km.map(|km| km * 1000.0));
         println!(
             "== {}: observers ({} m hull radius), from {} match(es)",
@@ -385,7 +397,6 @@ fn main() -> Result<()> {
             cli.observer_radius_m,
             reads.len()
         );
-        let names: Vec<&str> = scene.panels.iter().map(|p| p.name.as_str()).collect();
         print_corners(&names, &fit);
         for (i, m) in &reads {
             let Some(i) = i else {
@@ -1006,6 +1017,7 @@ fn build_roster(per_observer: &[Vec<Track>], n_frames: usize) -> Vec<Pilot> {
     order.sort_by_key(|&(o, t)| std::cmp::Reverse(per_observer[o][t].samples.len()));
 
     let min_samples = ((n_frames as f64 * MIN_TRACK_FRACTION) as usize).max(3);
+    let ship_types = ShipTypes::builtin();
     let mut roster: Vec<Pilot> = Vec::new();
     for (o, t) in order {
         let track = &per_observer[o][t];
@@ -1016,7 +1028,7 @@ fn build_roster(per_observer: &[Vec<Track>], n_frames: usize) -> Vec<Pilot> {
             .min_by_key(|(d, _)| *d);
         match nearest {
             Some((_, pilot)) => pilot.members.push((o, t)),
-            None if founds_pilot(track, min_samples) => roster.push(Pilot {
+            None if founds_pilot(track, min_samples, &ship_types) => roster.push(Pilot {
                 name: track.name.clone(),
                 members: vec![(o, t)],
             }),
@@ -1156,11 +1168,24 @@ fn observer_name(o: usize) -> char {
 }
 
 /// Whether an unmatched track is real enough to be its own pilot: long enough, with enough
-/// readable distances, and a name EVE could actually issue (3+ characters). Junk rows — e.g. a
-/// lone `"j"` read off stray ink below the list — fail at least one of these.
-fn founds_pilot(track: &Track, min_samples: usize) -> bool {
+/// readable distances, a name EVE could actually issue (3+ characters), and not a hull with no
+/// pilot. Junk rows — e.g. a lone `"j"` read off stray ink below the list — fail at least one of
+/// these.
+fn founds_pilot(track: &Track, min_samples: usize, ship_types: &ShipTypes) -> bool {
     let distances = track.samples.iter().filter(|s| s.distance_m.is_some()).count();
-    track.name.chars().count() >= MIN_NAME_CHARS && distances >= min_samples
+    track.name.chars().count() >= MIN_NAME_CHARS && distances >= min_samples && !is_pilotless_hull(track, ship_types)
+}
+
+/// Whether a track's name is its own ship type: the row EVE leaves when a pilot dies, the hull
+/// named by its type (`Guardian` / `Guardian`), often lingering as a faded row afterwards.
+fn is_pilotless_hull(track: &Track, ship_types: &ShipTypes) -> bool {
+    let Some(ty) = track.lost_ship.as_deref().or(track.ship_type.as_deref()) else {
+        return false;
+    };
+    match ship_types.resolve(&track.name) {
+        Resolution::Exact(name) | Resolution::Corrected { name, .. } => name == ty,
+        _ => false,
+    }
 }
 
 /// EVE character names are at least 3 characters long.
@@ -1214,6 +1239,9 @@ fn observer_series(
     let flags = hampel_flags(&values, 5, 3.0);
     by_t.into_iter().zip(flags).map(|((t, d), f)| (t, (d, f))).collect()
 }
+
+/// How many more frames a label that didn't read is tried on, within a batch.
+const LABEL_RETRIES: usize = 3;
 
 /// One ring read in one frame, with its block and its label when it was read.
 struct TargetSample {
@@ -1294,27 +1322,41 @@ impl<'a> TargetReader<'a> {
             }
         }
         let ocr: Vec<(usize, usize)> = reads.iter().flat_map(|&j| (0..rings[j].len()).map(move |i| (j, i))).collect();
-        let labels: Vec<Result<Label>> = ocr
-            .par_iter()
-            .map(|&(j, i)| {
-                let (f, b) = jobs[j];
-                let scale = self.geoms[b].as_ref().expect("calibrated").scale;
-                match label_image(&self.block(&frames[f], b), &centers[j], i, scale) {
-                    Some(img) => ocr_label(&img, self.tesseract),
-                    None => Ok(Label::default()),
-                }
-            })
-            .collect();
+        let labels = self.read_labels(frames, &jobs, &centers, &ocr);
         let mut by_job: HashMap<usize, Vec<Label>> = HashMap::new();
         for (&(j, _), label) in ocr.iter().zip(labels) {
-            let label = label.unwrap_or_else(|e| {
-                if !self.ocr_failed {
-                    eprintln!("  warning: can't read locked targets' labels, so their HP is left out: {e:#}");
-                    self.ocr_failed = true;
-                }
-                Label::default()
-            });
             by_job.entry(j).or_default().push(label);
+        }
+
+        // Tesseract misses a label now and then. Rather than leave a ring anonymous until its
+        // block's next read, read it again on the next frames of the batch that show the same
+        // rings (so the same targets), and give the label to the frame first read.
+        let mut retry: Vec<(usize, usize, usize)> = by_job
+            .iter()
+            .flat_map(|(&j, labels)| labels.iter().enumerate().filter(|(_, l)| l.name.is_empty()).map(move |(i, _)| (j, i, j)))
+            .collect();
+        for _ in 0..LABEL_RETRIES {
+            // (read job, ring, job to read it on)
+            retry = retry
+                .into_iter()
+                .filter_map(|(j, i, last)| Some((j, i, retry_job(&jobs, &centers, |k| by_job.contains_key(&k), j, last)?)))
+                .collect();
+            if retry.is_empty() || self.ocr_failed {
+                break;
+            }
+            let ocr: Vec<(usize, usize)> = retry.iter().map(|&(_, i, k)| (k, i)).collect();
+            let labels = self.read_labels(frames, &jobs, &centers, &ocr);
+            retry = retry
+                .into_iter()
+                .zip(labels)
+                .filter_map(|((j, i, k), label)| {
+                    if label.name.is_empty() {
+                        return Some((j, i, k));
+                    }
+                    by_job.get_mut(&j).expect("read")[i] = label;
+                    None
+                })
+                .collect();
         }
 
         for (j, &(f, b)) in jobs.iter().enumerate() {
@@ -1327,6 +1369,40 @@ impl<'a> TargetReader<'a> {
                 self.samples.push(TargetSample { t, block: b, hp: ring.hp, label: labels.map(|l| l[i].clone()) });
             }
         }
+    }
+
+    /// OCR the label of each `(job, ring)` in `ocr`. A Tesseract failure (no executable) is
+    /// warned about once and turns off label reading; its labels come back empty.
+    fn read_labels(
+        &mut self,
+        frames: &[videoin::Frame],
+        jobs: &[(usize, usize)],
+        centers: &[Vec<(f32, f32)>],
+        ocr: &[(usize, usize)],
+    ) -> Vec<Label> {
+        let labels: Vec<Result<Label>> = ocr
+            .par_iter()
+            .map(|&(j, i)| {
+                let (f, b) = jobs[j];
+                let scale = self.geoms[b].as_ref().expect("calibrated").scale;
+                match label_image(&self.block(&frames[f], b), &centers[j], i, scale) {
+                    Some(img) => ocr_label(&img, self.tesseract),
+                    None => Ok(Label::default()),
+                }
+            })
+            .collect();
+        labels
+            .into_iter()
+            .map(|label| {
+                label.unwrap_or_else(|e| {
+                    if !self.ocr_failed {
+                        eprintln!("  warning: can't read locked targets' labels, so their HP is left out: {e:#}");
+                        self.ocr_failed = true;
+                    }
+                    Label::default()
+                })
+            })
+            .collect()
     }
 
     /// Each roster pilot's HP per tick (keyed by `t.to_bits()`): every ring whose label matches
@@ -1371,6 +1447,21 @@ impl<'a> TargetReader<'a> {
         );
         per_pilot.into_iter().map(|m| smooth_hp(&m)).collect()
     }
+}
+
+/// The job to read again a label job `read` didn't read, after job `last` (`read` or an earlier
+/// retry): the block's next frame in the batch (`jobs` are `(frame, block)`, frame-major), as long
+/// as it shows the same rings and isn't read anyway (`is_read`).
+fn retry_job(
+    jobs: &[(usize, usize)],
+    centers: &[Vec<(f32, f32)>],
+    is_read: impl Fn(usize) -> bool,
+    read: usize,
+    last: usize,
+) -> Option<usize> {
+    let b = jobs[read].1;
+    let next = (last + 1..jobs.len()).find(|&k| jobs[k].1 == b)?;
+    (same_rings(&centers[read], &centers[next]) && !is_read(next)).then_some(next)
 }
 
 /// Each pilot's ring readings per tick (keyed by `t.to_bits()`), from `samples` and the pilot
@@ -1551,6 +1642,34 @@ fn print_summary(
 mod tests {
     use super::*;
 
+    fn track(id: usize, name: &str, ship_type: &str, samples: usize) -> Track {
+        let mut t = Track::new(id, name);
+        t.ship_type = Some(ship_type.to_string());
+        t.samples = (0..samples)
+            .map(|i| Sample { t: i as f64, distance_m: Some(50_000.0), speed_mps: Some(100.0) })
+            .collect();
+        t
+    }
+
+    #[test]
+    fn a_hull_named_by_its_type_founds_no_pilot() {
+        // A dead pilot's ship stays on the overview as `Guardian` / `Guardian`.
+        let per_observer = vec![
+            vec![track(0, "Kyle Katarn", "Guardian", 100), track(1, "Guardian", "Guardian", 100)],
+            vec![track(0, "Jan Ors", "Vigil", 100), track(1, "Guardian", "Guardian", 50)],
+        ];
+        let roster = build_roster(&per_observer, 100);
+        let names: Vec<&str> = roster.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Jan Ors", "Kyle Katarn"]);
+    }
+
+    #[test]
+    fn a_pilot_named_like_another_hull_still_founds_one() {
+        let per_observer = vec![vec![track(0, "Vigil", "Guardian", 100)]];
+        let roster = build_roster(&per_observer, 100);
+        assert_eq!(roster.len(), 1);
+    }
+
     fn utc(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().into()
     }
@@ -1694,6 +1813,20 @@ mod tests {
         assert_eq!(shields(1, 0.0), [0.9]);
         assert!(!per_pilot[1].contains_key(&1.0f64.to_bits()));
         assert!(per_pilot[2].is_empty());
+    }
+
+    #[test]
+    fn unread_labels_are_retried_on_the_next_frames_with_the_same_rings() {
+        // Two blocks over four frames; block 0's rings move at frame 2, block 1's never do.
+        let jobs: Vec<(usize, usize)> = (0..4).flat_map(|f| [(f, 0), (f, 1)]).collect();
+        let (a, moved, c) = (vec![(88.0, 79.0)], vec![(268.0, 80.0)], vec![(95.0, 389.0)]);
+        let centers = vec![a.clone(), c.clone(), a.clone(), c.clone(), moved.clone(), c.clone(), moved, c];
+        let none = |_| false;
+        assert_eq!(retry_job(&jobs, &centers, none, 0, 0), Some(2), "block 0, frame 1");
+        assert_eq!(retry_job(&jobs, &centers, none, 0, 2), None, "frame 2 shows other rings");
+        assert_eq!(retry_job(&jobs, &centers, none, 1, 3), Some(5));
+        assert_eq!(retry_job(&jobs, &centers, none, 1, 7), None, "end of the batch");
+        assert_eq!(retry_job(&jobs, &centers, |k| k == 5, 1, 3), None, "frame 2 is read anyway");
     }
 
     #[test]

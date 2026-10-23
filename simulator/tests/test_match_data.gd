@@ -354,6 +354,19 @@ func test_fill_unknown_stops_when_other_team_full() -> void:
 	assert_eq(d.teams["u3"], MatchData.Team.UNKNOWN)
 
 
+func test_fill_unknown_keeps_pinned_pilots_unknown() -> void:
+	var d := _teams(10, 3, 3)
+	assert_eq(d.fill_unknown({"u1": true}), ["u0", "u2"])
+	assert_eq(d.teams["u1"], MatchData.Team.UNKNOWN)
+
+
+func test_settle_keeps_pilots_moved_to_unknown() -> void:
+	var d := _teams(10, 9, 0)
+	d.teams["r0"] = MatchData.Team.UNKNOWN
+	TeamDb.settle(d, {}, {"r0": MatchData.Team.UNKNOWN})
+	assert_eq(d.teams["r0"], MatchData.Team.UNKNOWN)
+
+
 func test_fill_unknown_leaves_unknown_while_no_team_full() -> void:
 	var d := _teams(9, 9, 2)
 	assert_eq(d.fill_unknown(), [])
@@ -485,6 +498,34 @@ func test_starting_in_a_capsule_is_still_tracked() -> void:
 	assert_eq(d.sample("a", 3.0), {})
 
 
+func test_hull_vanishing_mid_match_is_a_death() -> void:
+	var d := _load([
+		row(0, "gone", "Rifter", C),
+		row(4, "gone", "Rifter", C + X),
+		row(0, "stays", "Rifter", C),
+		row(20, "stays", "Rifter", C),
+		row(0, "near_end", "Rifter", C),
+		row(20.0 - MatchData.VANISH_S, "near_end", "Rifter", C),
+	])
+	assert_eq(_kinds(d), [MatchData.Event.DEATH])
+	assert_eq(d.events[0].pilot, "gone")
+	assert_eq(d.events[0].t, 4.0)
+	assert_eq(d.events[0].pos, C + X)
+	assert_eq(d.events[0].ship_type, "Rifter")
+	assert_eq(d.podded, {"gone": 4.0})
+	assert_eq(d.sample("gone", 10.0), {}, "a vanished ship isn't held like a pod")
+
+
+func test_vanishing_after_leaving_bounds_is_only_a_boundary_event() -> void:
+	var d := _load([
+		row(0, "a", "Rifter", C + X * 100000.0),
+		row(1, "a", "Rifter", C + X * 150000.0),
+		row(0, "b", "Rifter", C),
+		row(20, "b", "Rifter", C),
+	])
+	assert_eq(_kinds(d), [MatchData.Event.BOUNDARY])
+
+
 func test_boundary_crossing_is_an_event() -> void:
 	var d := _load([
 		row(10, "early", "x", C),
@@ -535,7 +576,7 @@ func test_non_mjd_hops_are_ignored() -> void:
 		row(0, "pod", "Capsule", C),
 		row(1, "pod", "Capsule", C + X * 100000),  # capsules can't MJD
 	])
-	assert_eq(d.events, [])
+	assert_false(_kinds(d).has(MatchData.Event.MJD))
 
 
 func test_events_are_sorted_by_time() -> void:
@@ -739,6 +780,68 @@ func test_damage_not_compared_across_long_blank() -> void:
 	rows.append(_hp_row(5, Vector3(0.5, 1, 1)))
 	var d := MatchData.load_csv(write_csv(rows, HP_HEADER), {}, 0.0, true)
 	assert_false(d.damage_times.has("A"), "older than the window")
+
+
+# --- data_issues -----------------------------------------------------------------
+
+## Rows of a full match: `MatchData.MIN_SHIPS` pilots "P00".. (half on each start line), one
+## sample a second over 0-20 s with full HP. `skip` maps a pilot to the times it has no row;
+## `blank_hp` to the times its HP cells are blank.
+func _full_rows(ships := MatchData.MIN_SHIPS, skip := {}, blank_hp := {}) -> Array:
+	var rows := []
+	for i in ships:
+		var pilot := "P%02d" % i
+		for t in 21:
+			if t in skip.get(pilot, []):
+				continue
+			var hp: Array = ["", "", ""] if t in blank_hp.get(pilot, []) else [1, 1, 1]
+			rows.append(row(t, pilot, "Test Hull", on_line(0 if i % 2 == 0 else 7, 0.5)) + hp)
+	return rows
+
+
+func _issues(rows: Array, header := HP_HEADER) -> Array:
+	return MatchData.load_csv(write_csv(rows, header), {}, 0.0, true).data_issues()
+
+
+func test_full_match_has_no_issues() -> void:
+	assert_eq(_issues(_full_rows()), [])
+
+
+func test_too_few_ships() -> void:
+	assert_eq(_issues(_full_rows(18)), ["Only 18 of 20 ships"])
+
+
+func test_no_hp_columns_is_an_issue() -> void:
+	var rows := _full_rows().map(func(r): return r.slice(0, 11))
+	assert_eq(_issues(rows, DEFAULT_HEADER), ["No HP data"])
+
+
+func test_ship_with_position_gap() -> void:
+	# P03 has no rows 2-15 s: 1->16 is a gap, so only 0-1 and 16-20 count, 5 of 20 s.
+	var issues := _issues(_full_rows(MatchData.MIN_SHIPS, {"P03": range(2, 16)}))
+	assert_eq(issues, ["P03 (Test Hull): positions for 25% of the match"])
+
+
+func test_short_gaps_are_not_missing() -> void:
+	# A sample every 4 s still covers the whole match (gaps up to MAX_GAP_S are interpolated).
+	var skip := range(21).filter(func(t): return t % 4 != 0)
+	assert_eq(_issues(_full_rows(MatchData.MIN_SHIPS, {"P03": skip})), [])
+
+
+func test_ship_podded_early_is_not_missing() -> void:
+	var rows := _full_rows(MatchData.MIN_SHIPS, {"P03": range(5, 21)})
+	rows.append(row(5, "P03", MatchData.CAPSULE, on_line(7, 0.5)) + [1, 1, 1])
+	assert_eq(_issues(rows), [])
+
+
+func test_ship_late_to_the_match() -> void:
+	var issues := _issues(_full_rows(MatchData.MIN_SHIPS, {"P04": range(0, 15)}))
+	assert_eq(issues, ["P04 (Test Hull): positions for 25% of the match"])
+
+
+func test_ship_with_mostly_blank_hp() -> void:
+	var issues := _issues(_full_rows(MatchData.MIN_SHIPS, {}, {"P05": range(0, 15)}))
+	assert_eq(issues, ["P05 (Test Hull): HP for 29% of samples"])
 
 
 # --- plane exits ---------------------------------------------------------------

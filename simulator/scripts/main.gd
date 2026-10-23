@@ -182,6 +182,9 @@ var menu: MainMenu
 ## pitch shift undoes the pitch change of playing faster or slower.
 var audio_player: AudioStreamPlayer
 var audio_pitch: AudioEffectPitchShift
+## Mutes `AUDIO_BUS` (setting `audio/muted`); the player keeps running so unmuting stays in sync.
+var muted := false
+var mute_button: Button
 var play_button: Button
 ## Big centred button shown over a freshly opened (paused) match; gone once playback first starts.
 var start_button: Button
@@ -210,6 +213,8 @@ var assets_dialog: ConfirmationDialog
 var bottom_panel: PanelContainer
 var roster_panel: PanelContainer
 var roster_table: RosterTable
+## Right-click menu of a roster row's ⇄ button: the teams its pilot can move to (`_move_team`).
+var team_menu: PopupMenu
 ## Broadcast-style alternative to the roster (setting `display/broadcast_roster`).
 var broadcast_panel: BroadcastRoster
 var broadcast_button: Button
@@ -268,6 +273,7 @@ func _ready() -> void:
 	broadcast_on = Settings.get_value("display/broadcast_roster")
 	damage_on = Settings.get_value("display/damage_highlight")
 	mjd_on = Settings.get_value("display/mjd_spoolup")
+	muted = Settings.get_value("audio/muted")
 	for field in OVERLAY_FIELDS:
 		ship_overlay[field] = Settings.get_value("overlay/" + field)
 	for kind in CombatStats.LINK_KINDS:
@@ -301,6 +307,7 @@ func _ready() -> void:
 	_apply_visual_mode()
 
 	MatchLibrary.add_demo()
+	_check_for_update()  # not awaited: runs in the background
 	if not OS.has_feature("web"):  # the web build checks once its library is synced (`WebLibrary`)
 		TeamDb.ensure_current(TeamDb.build_id())
 	var args := OS.get_cmdline_user_args()
@@ -346,21 +353,14 @@ func load_match(path: String) -> bool:
 			w.queue_free()
 		breakdown_windows.clear()
 		start_button.visible = true
-	team_db = {}
-	team_sides = {}
-	side_colors = {}
 	match_internal = MatchLibrary.contains(path) and MatchLibrary.is_internal(path)
-	if Settings.get_value("teams/season_db") and MatchLibrary.contains(path) and not match_internal:
-		team_db = TeamDb.read(TeamDb.season_of(path))
-		team_sides = TeamDb.apply(team_db, data)
-		side_colors = TeamDb.side_colors(team_db, TeamDb.folder_key(path), team_sides)
-	for pilot in team_overrides:
-		if data.teams.has(pilot):
-			data.teams[pilot] = team_overrides[pilot]
-	data.fill_unknown()
+	team_db = TeamDb.db_for(path)
+	team_sides = TeamDb.settle(data, team_db, team_overrides)
+	side_colors = {} if team_db.is_empty() else TeamDb.side_colors(team_db, TeamDb.folder_key(path), team_sides)
 	match_path = path
 	audio_player.stop()
 	audio_player.stream = MatchLibrary.load_audio(path) if has_audio else null
+	_update_mute_button()
 	_end_measure()
 	for c in ships_root.get_children():
 		c.queue_free()
@@ -541,6 +541,25 @@ func _prompt_assets(reason: String) -> void:
 	if download_dialog.visible:
 		await download_dialog.visibility_changed
 	assets_dialog.popup_centered()
+
+
+## Offers the release page if GitHub has a newer release than this build; silent otherwise.
+func _check_for_update() -> void:
+	var release := await UpdateCheck.check(self)
+	if release.is_empty():
+		return
+	var dialog := ConfirmationDialog.new()
+	dialog.title = "Update available"
+	dialog.dialog_text = "Scrim Simulator %s is available (you have %s)." % [release.tag, release.local]
+	dialog.ok_button_text = "Open release page"
+	dialog.cancel_button_text = "Not now"
+	dialog.confirmed.connect(OS.shell_open.bind(release.url))
+	dialog.visibility_changed.connect(func(): if not dialog.visible: dialog.queue_free())
+	download_dialog.get_parent().add_child(dialog)
+	for other in [download_dialog, assets_dialog]:
+		if other.visible:
+			await other.visibility_changed
+	dialog.popup_centered()
 
 
 ## New models or icons on disk: redraw ships and markers with them.
@@ -1892,6 +1911,14 @@ func _build_ui() -> void:
 	speed_option.item_selected.connect(func(idx): _set_speed(SPEEDS[idx]))
 	row.add_child(speed_option)
 
+	mute_button = Button.new()
+	mute_button.text = "Mute"
+	mute_button.toggle_mode = true
+	mute_button.button_pressed = muted
+	mute_button.toggled.connect(_set_muted)
+	row.add_child(mute_button)
+	_update_mute_button()
+
 	time_label = Label.new()
 	time_label.text = "--:-- / --:--"
 	row.add_child(time_label)
@@ -2054,6 +2081,7 @@ func _build_audio() -> void:
 		AudioServer.add_bus_effect(bus, AudioEffectPitchShift.new())
 	audio_pitch = AudioServer.get_bus_effect(bus, 0)
 	audio_pitch.pitch_scale = 1.0
+	AudioServer.set_bus_mute(bus, muted)
 	audio_player = AudioStreamPlayer.new()
 	audio_player.bus = AUDIO_BUS
 	# Web defaults to sample playback, which skips bus effects (and so the pitch fix).
@@ -2213,7 +2241,7 @@ func _build_overlay_menu(layer: CanvasLayer) -> void:
 
 
 ## Right-hand table of each team's pilots (ship, pilot, speed, distance from centre): click one to
-## follow it, ⇄ to change its team.
+## follow it, ⇄ to change its team (right-click ⇄ to pick any team, Unknown included).
 func _build_roster(layer: CanvasLayer) -> void:
 	roster_panel = PanelContainer.new()
 	roster_panel.set_anchors_and_offsets_preset(Control.PRESET_RIGHT_WIDE)
@@ -2236,6 +2264,10 @@ func _build_roster(layer: CanvasLayer) -> void:
 	roster_table = RosterTable.new()
 	roster_table.row_pressed.connect(_set_tracked)
 	roster_table.swap_pressed.connect(_swap_team)
+	team_menu = PopupMenu.new()
+	team_menu.index_pressed.connect(func(i): _move_team(team_menu.get_item_metadata(0), team_menu.get_item_metadata(i)))
+	add_child(team_menu)
+	roster_table.swap_context_pressed.connect(_open_team_menu)
 	roster_table.row_context_pressed.connect(func(pilot):
 		_open_ship_debug_menu(pilot, get_viewport().get_mouse_position()))
 	roster_table.group_activated.connect(_ask_rename_team)
@@ -2274,6 +2306,20 @@ func _set_damage_on(on: bool) -> void:
 	_update_roster_cells()
 
 
+func _set_muted(on: bool) -> void:
+	muted = on
+	Settings.set_value("audio/muted", on)
+	AudioServer.set_bus_mute(AudioServer.get_bus_index(AUDIO_BUS), on)
+	mute_button.set_pressed_no_signal(on)
+
+
+## Mute only matters for a match with comms audio: its button is disabled otherwise.
+func _update_mute_button() -> void:
+	var has_audio := audio_player.stream != null
+	mute_button.disabled = not has_audio
+	mute_button.tooltip_text = "Mute the match's comms audio" if has_audio else "This match has no comms audio"
+
+
 func _set_mjd_on(on: bool) -> void:
 	mjd_on = on
 	Settings.set_value("display/mjd_spoolup", on)
@@ -2297,10 +2343,15 @@ func _refresh_roster() -> void:
 	_apply_roster_visibility()
 	if data == null:
 		return
+	_compute_score()
 	var pilots := ships.keys()
-	# By ship type, then pilot.
+	# By points (most first; pilots without any last), then ship type, then pilot.
+	var pts := func(p: String) -> int: return score.values.get(p, -1) if score != null else -1
 	var key := func(p: String) -> String: return "%s\n%s" % [data.tracks[p][0].ship_type, _pilot_name(p)]
-	pilots.sort_custom(func(a, b): return key.call(a).naturalnocasecmp_to(key.call(b)) < 0)
+	pilots.sort_custom(func(a, b):
+		if pts.call(a) != pts.call(b):
+			return pts.call(a) > pts.call(b)
+		return key.call(a).naturalnocasecmp_to(key.call(b)) < 0)
 	for team in [MatchData.Team.BLUE, MatchData.Team.RED, MatchData.Team.UNKNOWN]:
 		var members := pilots.filter(func(p): return data.teams.get(p, MatchData.Team.UNKNOWN) == team)
 		if team == MatchData.Team.UNKNOWN and members.is_empty():
@@ -2311,7 +2362,7 @@ func _refresh_roster() -> void:
 				team if renamable else -1, "Double-click to rename" if renamable else "")
 		var other: int = MatchData.Team.BLUE if team != MatchData.Team.BLUE else MatchData.Team.RED
 		for pilot in members:
-			var button := roster_table.add_row(pilot, color, "Move to %s" % _team_name(other))
+			var button := roster_table.add_row(pilot, color, "Move to %s (right-click for more)" % _team_name(other))
 			button.tooltip_text = "Centre the camera on %s (right-click to rename or debug)" % _pilot_name(pilot)
 			button.set_pressed_no_signal(pilot == tracked)
 			roster_buttons[pilot] = button
@@ -2334,10 +2385,15 @@ func _refresh_roster() -> void:
 	_update_roster_cells()
 
 
-## Recomputes `score` for the current teams and `ruleset_id`, and shows each ship's points.
-func _refresh_score() -> void:
+## Recomputes `score` for the current teams and `ruleset_id`.
+func _compute_score() -> void:
 	var rules := Ruleset.load_id(ruleset_id)
 	score = MatchScore.new(data, rules) if data != null and rules != null else null
+
+
+## Shows each ship's points from `score`.
+func _refresh_score() -> void:
+	var rules: Ruleset = score.ruleset if score != null else null
 	for pilot in broadcast_panel.rows:
 		if score == null or not score.values.has(pilot):
 			broadcast_panel.set_cell(pilot, "pts", "—")
@@ -2358,8 +2414,7 @@ func _set_ruleset(id: String) -> void:
 	ruleset_id = id
 	_select_ruleset_option()
 	_save_meta()
-	_refresh_score()
-	_update_roster_cells()
+	_refresh_roster()  # Points may change, and the rows are sorted by them.
 
 
 func _select_ruleset_option() -> void:
@@ -2480,19 +2535,38 @@ func _follow(pilot: String) -> void:
 		camera.set_target(ships[tracked].node.position)
 
 
-## Moves `pilot` to the other team (unknown pilots go to blue) and recolours it; a team it fills
-## takes in the unknown pilots (`MatchData.fill_unknown`).
+## Moves `pilot` to the other team (unknown pilots go to blue).
 func _swap_team(pilot: String) -> void:
-	var team: int = MatchData.Team.RED if data.teams.get(pilot) == MatchData.Team.BLUE else MatchData.Team.BLUE
+	_move_team(pilot, MatchData.Team.RED if data.teams.get(pilot) == MatchData.Team.BLUE else MatchData.Team.BLUE)
+
+
+## Opens `team_menu` at the mouse for `pilot`: "Move to" each team it isn't on.
+func _open_team_menu(pilot: String) -> void:
+	team_menu.clear()
+	team_menu.add_separator(_pilot_name(pilot))
+	team_menu.set_item_metadata(0, pilot)
+	for team in [MatchData.Team.BLUE, MatchData.Team.RED, MatchData.Team.UNKNOWN]:
+		if data.teams.get(pilot) != team:
+			team_menu.add_item("Move to %s" % _team_name(team))
+			team_menu.set_item_metadata(team_menu.item_count - 1, team)
+	team_menu.popup(Rect2i(Vector2i(get_viewport().get_mouse_position()), Vector2i.ZERO))
+
+
+## Moves `pilot` to `team` and recolours it; a team it fills takes in the unknown pilots
+## (`MatchData.fill_unknown`), except those put on Unknown by hand. Unknown is this match's
+## only: the season db keeps the pilot's team.
+func _move_team(pilot: String, team: int) -> void:
+	if data.teams.get(pilot) == team:
+		return
 	data.teams[pilot] = team
 	team_overrides[pilot] = team
-	if not team_sides.is_empty():
+	if not team_sides.is_empty() and team != MatchData.Team.UNKNOWN:
 		_edit_team_db(func(db):
 			if team_sides[team] == "":
 				team_sides[team] = TeamDb.new_team(db)
 			TeamDb.assign(db, pilot, team_sides[team]))
 	_recolor_ship(pilot)
-	for p in data.fill_unknown():
+	for p in data.fill_unknown(TeamDb.pinned_unknown(team_overrides)):
 		_recolor_ship(p)
 	_save_meta()
 	_update_file_label()
@@ -2571,6 +2645,13 @@ func _edit_team_db(edit: Callable) -> void:
 ## joins it as a scrim folder (`MainMenu.add_folder`); a dropped audio file becomes the audio of
 ## the selected match (menu) or the open library match.
 func _on_files_dropped(files: PackedStringArray) -> void:
+	if not WebBackend.member():
+		var why := "Only whitelisted pilots can add matches, audio or combat logs"
+		if menu.visible:
+			menu.show_error(why)
+		else:
+			file_label.text = why
+		return
 	for f in files:
 		if DirAccess.dir_exists_absolute(f):
 			_show_menu()

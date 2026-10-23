@@ -9,7 +9,7 @@ const PILOTS := 20
 ## Every hull in the demo, with its SDE radius in metres (build 3569502). Pinned here so the
 ## tests run offline; `sde/` is git-ignored and absent in CI.
 const HULL_RADII := {
-	"Capsule": 2.0, "Venture": 41.0, "Prospect": 41.0,
+	"Capsule": 2.0, "Venture": 41.0, "Prospect": 41.0, "Endurance": 41.0,
 	"Procurer": 137.0, "Retriever": 202.0, "Covetor": 254.0, "Skiff": 137.0, "Mackinaw": 202.0,
 	"Porpoise": 450.0, "Orca": 550.0,
 }
@@ -67,6 +67,14 @@ func test_file_exists() -> void:
 	assert_true(FileAccess.file_exists(demo_path()), demo_path())
 
 
+## Re-voiced comms: they start with the CSV's first sample, so they run as long as it does.
+func test_audio() -> void:
+	var stream := MatchLibrary.load_audio(demo_path())
+	assert_true(stream is AudioStreamOggVorbis, MatchLibrary.audio_path(demo_path()))
+	var d := _load()
+	assert_almost(stream.get_length(), d.start_time + d.duration, 1.5)
+
+
 func test_pilots_are_anonymized() -> void:
 	var d := _load()
 	var re := RegEx.create_from_string(PILOT_PATTERN)
@@ -90,13 +98,13 @@ func test_load() -> void:
 	assert_not_null(d)
 	assert_eq(d.tracks.size(), PILOTS)
 	assert_eq(d.start_time, 12.0, "countdown skipped")
-	assert_eq(d.duration, 314.0)
+	assert_eq(d.duration, 286.0)
 	var samples := 0
 	for pilot in d.tracks:
 		samples += d.tracks[pilot].size()
-	assert_eq(samples, 4761, "pods' tracks end where they died")
-	assert_eq(d.eve_start, "2026-10-06T01:08:52.000Z", "countdown's first number")
-	assert_eq(d.eve_end, "2026-10-06T01:14:18.000Z", "the second before WF")
+	assert_eq(samples, 4472, "pods' tracks end where they died")
+	assert_eq(d.eve_start, "2026-10-17T13:50:04.000Z", "countdown's first number")
+	assert_eq(d.eve_end, "2026-10-17T13:55:02.000Z", "the second before WF")
 
 
 ## Ships parked through the countdown stay put in the CSV: positions solved from distances alone
@@ -132,16 +140,17 @@ func test_teams() -> void:
 	assert_eq(counts[MatchData.Team.BLUE], 10, "blue")
 	assert_eq(counts[MatchData.Team.RED], 10, "red")
 	assert_eq(counts[MatchData.Team.UNKNOWN], 0, "unknown")
-	assert_eq(d.teams["Amarr Citizen 2674287"], MatchData.Team.BLUE)
-	assert_eq(d.teams["Caldari Citizen 6206817"], MatchData.Team.RED)
+	assert_eq(d.teams["Caldari Citizen 6206817"], MatchData.Team.BLUE)
+	assert_eq(d.teams["Amarr Citizen 2674287"], MatchData.Team.RED)
 
 
 func test_deaths() -> void:
 	var d := _load()
-	assert_eq(d.deaths, {}, "nobody left the boundary")
-	assert_eq(d.podded.size(), 12)
-	assert_true(d.podded.has("Caldari Citizen 9942864"))
-	assert_false(d.podded.has("Amarr Citizen 5054432"), "survived")
+	assert_eq(d.deaths.keys(), ["Amarr Citizen 2281178"], "left the boundary")
+	assert_almost(d.deaths["Amarr Citizen 2281178"].t, 150.2, 0.1)
+	assert_eq(d.podded.size(), 11)
+	assert_true(d.podded.has("Gallente Citizen 1635012"))
+	assert_false(d.podded.has("Caldari Citizen 9942864"), "survived")
 
 
 ## No surviving pilot's hull ever crosses the boundary.
@@ -169,7 +178,7 @@ func test_events() -> void:
 	var count := {}
 	for e in d.events:
 		count[e.kind] = count.get(e.kind, 0) + 1
-	assert_eq(count.get(MatchData.Event.DEATH, 0), 12, "pilots podded")
+	assert_eq(count.get(MatchData.Event.DEATH, 0), 11, "pilots podded")
 	assert_eq(count.get(MatchData.Event.BOUNDARY, 0), d.deaths.size())
 	assert_eq(count.get(MatchData.Event.MJD, 0), 0, "pod warps aren't MJDs")
 
@@ -179,7 +188,7 @@ func test_sample() -> void:
 	var pilot := "Amarr Citizen 0220922"
 	var s := d.sample(pilot, 89.0)
 	assert_eq(s.ship_type, "Porpoise")
-	assert_almost(s.pos, Vector3(79215, 69636, 52964))
+	assert_almost(s.pos, Vector3(68825, 17265, 35320))
 
 	var a := d.sample(pilot, 89.0)
 	var b := d.sample(pilot, 90.0)
@@ -187,7 +196,7 @@ func test_sample() -> void:
 	assert_almost(mid.pos, a.pos.lerp(b.pos, 0.5))
 
 	assert_eq(d.sample(pilot, -d.start_time - 1.0), {}, "before the recording")
-	assert_eq(d.sample(pilot, 315.0), {}, "after the match")
+	assert_eq(d.sample(pilot, 287.0), {}, "after the match")
 
 
 # --- HP ----------------------------------------------------------------------
@@ -195,6 +204,7 @@ func test_sample() -> void:
 func test_hp_loaded() -> void:
 	var d := _load()
 	assert_true(d.has_hp)
+	var without := []
 	for pilot in d.tracks:
 		var known := 0
 		for s in d.tracks[pilot]:
@@ -205,24 +215,26 @@ func test_hp_loaded() -> void:
 				if s.hp[k] < 0.0 or s.hp[k] > 1.0:
 					fail("%s's HP %s at t=%s" % [pilot, s.hp, s.t])
 					return
-		assert_true(known > 0, "%s has HP" % pilot)
+		if known == 0:
+			without.append(pilot)
+	assert_eq(without, ["Minmatar Citizen 9745080", "Minmatar Citizen 7162778"], "no HP read from the recording")
 
 
 func test_hp_at() -> void:
 	var d := _load()
 	var pilot := "Amarr Citizen 0220922"
 	assert_eq(d.hp_at(pilot, 89.0), Vector3(1, 1, 1), "untouched")
-	assert_almost(d.hp_at(pilot, 120.0), Vector3(0.0, 0.889, 1.0), 1e-3, "shield gone, into armor")
+	assert_almost(d.hp_at(pilot, 120.0), Vector3(0.75, 1.0, 1.0), 1e-3, "shield hit")
 	assert_true(is_nan(d.hp_at(pilot, 155.0).x), "podded: no HP")
 
 
 func test_damage_times() -> void:
 	var d := _load()
 	var pilot := "Amarr Citizen 0220922"
-	assert_eq(d.damage_times[pilot].slice(0, 3), PackedFloat64Array([105.0, 107.0, 108.0]))
-	assert_false(d.taking_damage(pilot, 100.0))
-	assert_true(d.taking_damage(pilot, 105.0))
-	assert_false(d.damage_times.has("Amarr Citizen 5054432"), "never hit")
+	assert_eq(d.damage_times[pilot].slice(0, 3), PackedFloat64Array([92.0, 96.0, 125.0]))
+	assert_false(d.taking_damage(pilot, 89.0))
+	assert_true(d.taking_damage(pilot, 92.0))
+	assert_false(d.damage_times.has("Caldari Citizen 9942864"), "never hit")
 
 
 # --- main.gd -----------------------------------------------------------------
@@ -248,9 +260,9 @@ func test_viewer_loads_demo() -> void:
 	assert_eq(m.ships.size(), PILOTS)
 	assert_true("hp" in m.roster_table.visible_ids())
 	assert_false(m.damage_button.disabled)
-	assert_eq(m.timeline.max_value, 314.0)
+	assert_eq(m.timeline.max_value, 286.0)
 	assert_eq(m.file_label.text,
-		"demo.positions.csv — 20 pilots (blue 10 / red 10 / unknown 0), 0 out of bounds")
+		"demo.positions.csv — 20 pilots (blue 10 / red 10 / unknown 0), 1 out of bounds")
 
 
 # --- combat log --------------------------------------------------------------------
@@ -264,7 +276,11 @@ func test_demo_log_is_anonymized() -> void:
 	var gamelog := CombatLog.load_file(demo_log_path())
 	assert_not_null(gamelog)
 	assert_not_null(RegEx.create_from_string(PILOT_PATTERN).search(gamelog.listener), gamelog.listener)
-	var name_re := RegEx.create_from_string("^(?:(Amarr|Caldari|Gallente|Minmatar) Citizen \\d{7}|.* (Bot I|SW-300))$")
+	# Drones keep their own name where a pilot's goes, made generic like every module.
+	var name_re := RegEx.create_from_string("^(?:(Amarr|Caldari|Gallente|Minmatar) Citizen \\d{7}|Weapon [A-Z]|"
+			+ "(?:(?:Small|Medium|Heavy) )?(?:Remote Repairer|Energy Neutralizer|Energy Nosferatu|ECM|Stasis Webifier|"
+			+ "Target Painter|Sensor Dampener|Tracking Disruptor|Guidance Disruptor|Remote Sensor Booster|"
+			+ "Remote Tracking Computer|Warp Scrambler|Warp Disruptor))$")
 	for e in gamelog.entries:
 		for who in [e.source, e.target]:
 			if who != "" and name_re.search(who) == null:
@@ -280,15 +296,19 @@ func test_demo_log_syncs_to_match() -> void:
 	var d := _load()
 	var gamelog := CombatLog.load_file(demo_log_path())
 	gamelog.sync(d)
-	assert_eq(gamelog.pilot, "", "the listener observed and isn't one of the pilots")
-	assert_eq(gamelog.entries.size(), 30)
+	assert_eq(gamelog.pilot, "Caldari Citizen 6206817", "the listener flew in the match")
+	assert_eq(gamelog.entries.size(), 693)
 	var first: Dictionary = gamelog.entries[0]
-	assert_eq(first.t, 11.0, "01:09:15 is 23 s after the CSV starts, 11 s after match time 0")
-	assert_eq(first.kind, CombatLog.Kind.SCRAM)
-	assert_eq(first.source_pilot, "Caldari Citizen 9942864")
-	assert_eq(first.target_pilot, "Caldari Citizen 8777524")
-	assert_eq(_ship_at(d, first.source_pilot, first.t), first.source_ship)
+	assert_eq(first.t, 5.0, "13:50:21 is 17 s after the CSV starts, 5 s after match time 0")
+	assert_eq(first.kind, CombatLog.Kind.DAMAGE)
+	assert_eq(first.source_pilot, "Caldari Citizen 6206817")
+	assert_eq(first.target_pilot, "Gallente Citizen 1635012")
 	assert_eq(_ship_at(d, first.target_pilot, first.t), first.target_ship)
+	var scram: Dictionary = gamelog.entries[2]
+	assert_eq(scram.kind, CombatLog.Kind.SCRAM)
+	assert_eq(scram.source_pilot, "Caldari Citizen 8777524")
+	assert_eq(_ship_at(d, scram.source_pilot, scram.t), scram.source_ship)
+	assert_eq(_ship_at(d, scram.target_pilot, scram.t), scram.target_ship)
 	var attributed := 0
 	for e in gamelog.entries:
 		if e.t < -d.start_time - MatchData.MAX_GAP_S or e.t > d.duration + MatchData.MAX_GAP_S:
@@ -306,7 +326,7 @@ func test_demo_log_syncs_to_match() -> void:
 func test_viewer_loads_demo_combat_log() -> void:
 	var m := _viewer()
 	assert_eq(m.data.combat_logs.size(), 1)
-	assert_eq(m.data.combat_logs[0].pilot, "")
+	assert_eq(m.data.combat_logs[0].pilot, "Caldari Citizen 6206817")
 
 
 ## Moves the paused viewer to match time `t` and draws a frame.
@@ -317,20 +337,20 @@ static func _show_at(m: Main, t: float) -> void:
 
 func test_viewer_shows_demo_combat_columns() -> void:
 	var m := _viewer()
-	for id in ["ewar_in", "ewar_out"]:
+	for id in ["ewar_in", "ewar_out", "dmg_in", "dmg_out"]:
 		assert_false(m.roster_table.unavailable.has(id), "%s shown" % id)
-	# The log is an observer's: it only saw scrams, no damage, cap warfare or reps.
-	for id in ["dmg_in", "dmg_out", "cap_in", "cap_out", "rep_in"]:
+	# The listener's log: damage and scrams, but no cap warfare and no reps from pilots.
+	for id in ["cap_in", "cap_out", "rep_in"]:
 		assert_true(m.roster_table.unavailable.has(id), "%s hidden" % id)
 	m._set_playing(false)
-	# 01:09:15: Venture [Caldari Citizen 9942864] scrams Prospect [Caldari Citizen 8777524].
-	_show_at(m, 11.0)
-	var box := m.roster_table.icon_box("Caldari Citizen 8777524", "ewar_in")
+	# 13:50:24: Skiff [Caldari Citizen 8777524] scrams Mackinaw [Gallente Citizen 1635012].
+	_show_at(m, 8.0)
+	var box := m.roster_table.icon_box("Gallente Citizen 1635012", "ewar_in")
 	var scram := box.get_children().filter(func(c): return c.get_meta("key") == "scram")
 	assert_eq(scram.size(), 1)
 	assert_true(scram[0].tooltip_text.begins_with("Warp scramble from:"), scram[0].tooltip_text)
-	assert_true(scram[0].tooltip_text.contains(m._pilot_name("Caldari Citizen 9942864")), scram[0].tooltip_text)
-	var out := m.roster_table.icon_box("Caldari Citizen 9942864", "ewar_out").get_children()
+	assert_true(scram[0].tooltip_text.contains(m._pilot_name("Caldari Citizen 8777524")), scram[0].tooltip_text)
+	var out := m.roster_table.icon_box("Caldari Citizen 8777524", "ewar_out").get_children()
 	assert_true(out.any(func(c): return c.get_meta("key") == "scram"), "and on the scrammer's outgoing side")
 
 
@@ -339,5 +359,5 @@ func test_viewer_plays_through() -> void:
 	m.speed = 10.0
 	for i in 60:
 		m._process(1.0)
-	assert_eq(m.time, 314.0)
+	assert_eq(m.time, 286.0)
 	assert_false(m.playing)

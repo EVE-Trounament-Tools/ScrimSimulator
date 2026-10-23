@@ -74,6 +74,21 @@ func test_signals() -> void:
 	assert_eq(got, ["row p", "swap p"])
 
 
+func test_right_click_swap() -> void:
+	var t := _table()
+	t.add_row("p", Color.WHITE, "swap")
+	var got := []
+	t.swap_context_pressed.connect(func(p): got.append(p))
+	var ev := InputEventMouseButton.new()
+	ev.button_index = MOUSE_BUTTON_RIGHT
+	ev.pressed = true
+	var swap: Button = t.rows["p"].button.get_parent().get_child(1)
+	swap.gui_input.emit(ev)
+	ev.button_index = MOUSE_BUTTON_LEFT
+	swap.gui_input.emit(ev)
+	assert_eq(got, ["p"])
+
+
 func test_right_click_row() -> void:
 	var t := _table()
 	t.add_row("p", Color.WHITE, "swap")

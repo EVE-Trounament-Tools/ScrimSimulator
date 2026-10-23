@@ -5,8 +5,14 @@
 //
 // Changes arrive as commits of put/delete ops. Each op names the sha it expects the path to have
 // now (`prev`), so a commit racing another one is refused as a conflict instead of clobbering it.
-// Anyone may add files, create or remove folders and edit a match's sidecar (team swaps and
+// Any member may add files, create or remove folders and edit a match's sidecar (team swaps and
 // names); replacing or deleting a match's files needs the match's uploader or an admin.
+//
+// Viewers (logged in, not whitelisted) can't commit, and only see the public part of the library
+// (`viewable`): matches whose CSV row is public, everything under a public folder, and the
+// folders leading to those. Only admins change what is public (`setVisibility`); uploads start
+// private, a match or folder keeps its flag when moved or renamed, and a match put into a public
+// folder is public with it.
 
 import { Env, User, audit, json, now } from "./util";
 
@@ -17,6 +23,8 @@ export interface FileRow {
   owner_id: number;
   owner_name: string;
   mtime: number;
+  /** 1 on a public match's CSV row or a public folder's row, else 0. */
+  public: number;
 }
 
 export type Op =
@@ -57,11 +65,39 @@ export function matchKey(path: string): string {
 
 export async function manifest(env: Env): Promise<{ version: number; files: FileRow[] }> {
   const [rows, ver] = await env.DB.batch([
-    env.DB.prepare("SELECT path, sha, size, owner_id, owner_name, mtime FROM files ORDER BY path"),
+    env.DB.prepare("SELECT path, sha, size, owner_id, owner_name, mtime, public FROM files ORDER BY path"),
     env.DB.prepare("SELECT value FROM kv WHERE key = 'library_version'"),
   ]);
   const version = parseInt(((ver.results[0] as { value?: string }) ?? {}).value ?? "0", 10);
   return { version, files: rows.results as unknown as FileRow[] };
+}
+
+/** The library as `user` may see it: all of it for members, the `viewable` part for viewers. */
+export async function visibleManifest(env: Env, user: User): Promise<{ version: number; files: FileRow[] }> {
+  const m = await manifest(env);
+  return user.member ? m : { version: m.version, files: viewable(m.files) };
+}
+
+/** The rows of `files` a viewer sees: each match whose CSV is public or under a public folder,
+ * with all its files; other files (a season's team db) only under a public folder, so rosters
+ * of private matches don't leak; and the folders that are public or lead to something shown. */
+export function viewable(files: FileRow[]): FileRow[] {
+  const byPath = new Map(files.map((f) => [f.path, f]));
+  const publicFolders = files.filter((f) => isFolder(f.path) && f.public).map((f) => f.path);
+  const underPublic = (p: string) => publicFolders.some((d) => p !== d && p.startsWith(d));
+  const isPublic = (p: string) => !!byPath.get(p)?.public || underPublic(p);
+  const shown = new Set<string>();
+  for (const f of files) {
+    if (isFolder(f.path)) {
+      if (isPublic(f.path)) shown.add(f.path);
+      continue;
+    }
+    const csv = matchKey(f.path) + ".csv";
+    if (!(byPath.has(csv) ? isPublic(csv) : underPublic(f.path))) continue;
+    shown.add(f.path);
+    for (let i = f.path.indexOf("/"); i !== -1; i = f.path.indexOf("/", i + 1)) shown.add(f.path.slice(0, i + 1));
+  }
+  return files.filter((f) => shown.has(f.path));
 }
 
 // --- blobs ------------------------------------------------------------------------------
@@ -182,11 +218,27 @@ export async function commit(env: Env, user: User, rawOps: unknown): Promise<Com
   if (missing.length) return { status: "missing", shas: missing };
 
   // A put whose content is deleted elsewhere in the same commit is a move (rename, or into
-  // another folder): it keeps its uploader.
-  const movedFrom = new Map<string, FileRow>();
+  // another folder): it keeps its uploader and public flag.
+  const movedFrom = new Map<string, FileRow[]>();
   for (const o of ops) {
     const cur = byPath.get(o.path);
-    if (o.op === "delete" && cur && !isFolder(o.path)) movedFrom.set(cur.sha, cur);
+    if (o.op === "delete" && cur && !isFolder(o.path)) movedFrom.set(cur.sha, [...(movedFrom.get(cur.sha) ?? []), cur]);
+  }
+  // A renamed or moved folder keeps its public flag: a new folder holding a moved file at the
+  // same place within it as in a deleted public folder takes that folder's flag. (An empty
+  // folder can't be told apart from a new one, so it starts private.)
+  const newFolders = new Set(ops.filter((o) => o.op === "put" && isFolder(o.path) && !byPath.has(o.path)).map((o) => o.path));
+  const goneFolders = ops.filter((o) => o.op === "delete" && isFolder(o.path) && byPath.get(o.path)?.public).map((o) => o.path);
+  const publicFolders = new Set<string>();
+  for (const p of puts) {
+    if (byPath.has(p.path)) continue;
+    for (const src of movedFrom.get(p.sha) ?? []) {
+      for (const d of goneFolders) {
+        const rel = src.path.slice(d.length);
+        const folder = p.path.slice(0, p.path.length - rel.length);
+        if (src.path.startsWith(d) && p.path.endsWith("/" + rel) && newFolders.has(folder)) publicFolders.add(folder);
+      }
+    }
   }
   const t = now();
   const stmts: D1PreparedStatement[] = [];
@@ -196,22 +248,19 @@ export async function commit(env: Env, user: User, rawOps: unknown): Promise<Com
       continue;
     }
     const cur = byPath.get(o.path);
-    const src = cur ?? movedFrom.get(o.sha);
+    const src = cur ?? (isFolder(o.path) ? undefined : movedFrom.get(o.sha)?.[0]);
     const ownerId = src?.owner_id ?? user.id;
     const ownerName = src?.owner_name ?? user.name;
+    // An existing path keeps its flag (the upsert leaves it alone).
+    const pub = src?.public ?? (publicFolders.has(o.path) ? 1 : 0);
     stmts.push(
       env.DB.prepare(
-        "INSERT INTO files (path, sha, size, owner_id, owner_name, mtime) VALUES (?, ?, ?, ?, ?, ?) " +
+        "INSERT INTO files (path, sha, size, owner_id, owner_name, mtime, public) VALUES (?, ?, ?, ?, ?, ?, ?) " +
           "ON CONFLICT (path) DO UPDATE SET sha = excluded.sha, size = excluded.size, mtime = excluded.mtime",
-      ).bind(o.path, o.sha, o.size, ownerId, ownerName, t),
+      ).bind(o.path, o.sha, o.size, ownerId, ownerName, t, pub),
     );
   }
-  stmts.push(
-    env.DB.prepare(
-      "INSERT INTO kv (key, value) VALUES ('library_version', '1') " +
-        "ON CONFLICT (key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
-    ),
-  );
+  stmts.push(bumpVersion(env));
   stmts.push(
     env.DB.prepare("INSERT INTO audit (at, char_id, char_name, action, detail) VALUES (?, ?, ?, ?, ?)").bind(
       t,
@@ -223,8 +272,45 @@ export async function commit(env: Env, user: User, rawOps: unknown): Promise<Com
   );
   // D1 batches run as one transaction.
   await env.DB.batch(stmts);
+  return { status: "ok", version: await libraryVersion(env) };
+}
+
+function bumpVersion(env: Env): D1PreparedStatement {
+  return env.DB.prepare(
+    "INSERT INTO kv (key, value) VALUES ('library_version', '1') " +
+      "ON CONFLICT (key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
+  );
+}
+
+async function libraryVersion(env: Env): Promise<number> {
   const ver = await env.DB.prepare("SELECT value FROM kv WHERE key = 'library_version'").first<{ value: string }>();
-  return { status: "ok", version: parseInt(ver?.value ?? "0", 10) };
+  return parseInt(ver?.value ?? "0", 10);
+}
+
+/** POST /api/library/visibility {path, public} (admins only): makes match CSV or folder `path`
+ * public or private. */
+export async function setVisibility(env: Env, user: User, path: unknown, on: unknown): Promise<Response> {
+  if (typeof path !== "string" || !validPath(path) || typeof on !== "boolean") {
+    return json({ error: "needs a library path and public: true or false" }, 400);
+  }
+  if (!isFolder(path) && !path.toLowerCase().endsWith(".csv")) {
+    return json({ error: "only a match's CSV or a folder can be made public" }, 400);
+  }
+  if ((await env.DB.prepare("SELECT 1 FROM files WHERE path = ?").bind(path).first()) === null) {
+    return json({ error: "not in the library" }, 404);
+  }
+  await env.DB.batch([
+    env.DB.prepare("UPDATE files SET public = ? WHERE path = ?").bind(on ? 1 : 0, path),
+    bumpVersion(env),
+    env.DB.prepare("INSERT INTO audit (at, char_id, char_name, action, detail) VALUES (?, ?, ?, ?, ?)").bind(
+      now(),
+      user.id,
+      user.name,
+      on ? "make public" : "make private",
+      JSON.stringify(path),
+    ),
+  ]);
+  return json({ ok: true, version: await libraryVersion(env) });
 }
 
 export function commitResponse(r: CommitResult): Response {
