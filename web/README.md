@@ -25,7 +25,10 @@ and an R2 bucket.
 - **Assets are prepared server-side.** The SDE and the ship models are downloaded and decoded
   once by a scheduled workflow. Browsers fetch only the hulls of the match they open, and cache
   them.
-- **Auto-deploy.** Every `v*` tag on master publishes a new build.
+- **Auto-deploy.** Every `v*` tag on master publishes a new build. Each deploy also adds the
+  checked-in demo match to the library as a public "Demo match" at the top level, unless it is
+  already there (also when renamed or moved), so every visitor has something to watch
+  (`scripts/seed_demo_web.sh`).
 
 The desktop app is unaffected. The web build reuses its scripts, and the browser-only code
 lives in `simulator/scripts/web/`. Each existing script reaches it only through a short
@@ -118,6 +121,7 @@ ADMIN_CHAR_IDS=9000
 DEV_LOGIN_CHAR=9000:Dev Pilot
 EOF
 npx wrangler d1 migrations apply DB --local
+../../scripts/seed_demo_web.sh --local
 npx wrangler d1 execute DB --local --command \
   "INSERT INTO kv (key, value) VALUES ('current_build', 'dev')"
 ../../scripts/build.sh web

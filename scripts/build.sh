@@ -12,9 +12,9 @@
 # are downloaded into .cache/ / the user's Godot data dir if not already present. Override the
 # Godot binary with $GODOT.
 #
-# The simulator bundle's demo/ is copied into the user's match library on first run. By default
-# it holds the checked-in demo match; set DEMO_LIBRARY to a match library directory (e.g.
-# ~/.local/share/godot/app_userdata/simulator/matches) to ship all of it instead: folders,
+# The simulator bundle's demo/ is copied into the user's match library on first run. It always
+# holds the checked-in demo match; set DEMO_LIBRARY to a match library directory (e.g.
+# ~/.local/share/godot/app_userdata/simulator/matches) to ship all of it as well: folders,
 # audio, gamelogs and sidecars. Set BUNDLE_SDE=1 to also ship simulator/sde/ (ship sizes, icons,
 # models) so the bundle works offline.
 set -euo pipefail
@@ -140,15 +140,16 @@ package_simulator() { # <platform> <sim exe path> <undraco exe path>
     local stage="$DIST/$name"
     new_stage "$name"
     cp "$2" "$3" "$stage/"
+    mkdir -p "$stage/demo"
     if [[ -n "${DEMO_LIBRARY:-}" ]]; then
         cp -r "$DEMO_LIBRARY/." "$stage/demo/"
-    else
-        # The CSV and its gamelogs dir must share a stem (MatchLibrary.logs_dir).
-        mkdir -p "$stage/demo/$DEMO_NAME.positions.logs"
-        cp "$DEMO_CSV" "$stage/demo/$DEMO_NAME.positions.csv"
-        cp "${DEMO_CSV%.csv}.logs/"*.txt "$stage/demo/$DEMO_NAME.positions.logs/"
-        cp "${DEMO_CSV%.csv}.ogg" "$stage/demo/$DEMO_NAME.positions.ogg"
     fi
+    # The CSV and its gamelogs dir must share a stem (MatchLibrary.logs_dir). A "Demo match"
+    # already in DEMO_LIBRARY wins.
+    mkdir -p "$stage/demo/$DEMO_NAME.positions.logs"
+    cp --update=none "$DEMO_CSV" "$stage/demo/$DEMO_NAME.positions.csv"
+    cp --update=none "${DEMO_CSV%.csv}.logs/"*.txt "$stage/demo/$DEMO_NAME.positions.logs/"
+    cp --update=none "${DEMO_CSV%.csv}.ogg" "$stage/demo/$DEMO_NAME.positions.ogg"
     if [[ "${BUNDLE_SDE:-}" == 1 ]]; then
         cp -r simulator/sde "$stage/"
     fi
