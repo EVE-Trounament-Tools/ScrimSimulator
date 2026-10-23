@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
+mod update;
+
 const SETTINGS_KEY: &str = "settings";
 
 /// An Archon's hull radius, the default observer.
@@ -390,6 +392,10 @@ struct App {
     video_span: Option<(String, Span)>,
     /// The chat log (path) last searched for gamelogs, and the span it covers.
     chat_span: Option<(String, Span)>,
+    /// The update check in progress (see `update`).
+    update_check: Option<Receiver<update::Release>>,
+    /// A newer release to tell the user about, until they dismiss it.
+    new_release: Option<update::Release>,
 }
 
 impl App {
@@ -418,6 +424,8 @@ impl App {
             video_probe: None,
             video_span: None,
             chat_span: None,
+            update_check: update::spawn_check(cc.egui_ctx.clone()),
+            new_release: None,
         }
     }
 
@@ -443,6 +451,37 @@ impl App {
         if let Some(log) = log.map(path_string).filter(|l| *l != self.settings.chat_log.trim()) {
             self.log.push(format!("Chat log for this video: {log}"));
             self.settings.chat_log = log;
+        }
+    }
+
+    fn poll_update_check(&mut self) {
+        let Some(rx) = &self.update_check else { return };
+        match rx.try_recv() {
+            Ok(release) => {
+                self.new_release = Some(release);
+                self.update_check = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.update_check = None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    /// The "update available" dialog, while there's a newer release not yet dismissed.
+    fn show_new_release(&mut self, ctx: &egui::Context) {
+        let Some(release) = &self.new_release else { return };
+        let modal = egui::Modal::new(egui::Id::new("new_release")).show(ctx, |ui| {
+            ui.heading("Update available");
+            ui.label(format!(
+                "Scrim Positions {} is available (you have {}).",
+                release.tag,
+                update::LOCAL_VERSION.unwrap_or("?")
+            ));
+            ui.hyperlink_to("Open release page", &release.url);
+            ui.add_space(8.0);
+            ui.button("Not now").clicked()
+        });
+        if modal.inner || modal.should_close() {
+            self.new_release = None;
         }
     }
 
@@ -824,6 +863,8 @@ impl eframe::App for App {
         self.poll_scan(ctx);
         self.poll_thumbnail(ctx);
         self.poll_video_probe();
+        self.poll_update_check();
+        self.show_new_release(ctx);
         let chat_warning = self.chat_log_warning();
         let running = self.run.is_some();
 

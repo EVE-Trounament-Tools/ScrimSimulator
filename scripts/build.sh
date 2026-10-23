@@ -35,6 +35,8 @@ case "$TARGET" in
 esac
 
 VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo "v0.0.0")"
+# Baked into scrim-positions-gui (option_env!) for its update check.
+export SCRIM_VERSION="$VERSION"
 CACHE="$ROOT/.cache/godot"
 DIST="$ROOT/dist"
 
@@ -153,6 +155,8 @@ package_simulator() { # <platform> <sim exe path> <undraco exe path>
     if [[ "${BUNDLE_SDE:-}" == 1 ]]; then
         cp -r simulator/sde "$stage/"
     fi
+    # Read by the simulator's update check (UpdateCheck.local_version).
+    echo "$VERSION" > "$stage/version.txt"
     write_simulator_readme "$stage" "$(basename "$2")" "$(basename "$3")"
     zip_stage "$name"
 }

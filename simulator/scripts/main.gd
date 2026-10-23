@@ -307,6 +307,7 @@ func _ready() -> void:
 	_apply_visual_mode()
 
 	MatchLibrary.add_demo()
+	_check_for_update()  # not awaited: runs in the background
 	if not OS.has_feature("web"):  # the web build checks once its library is synced (`WebLibrary`)
 		TeamDb.ensure_current(TeamDb.build_id())
 	var args := OS.get_cmdline_user_args()
@@ -540,6 +541,25 @@ func _prompt_assets(reason: String) -> void:
 	if download_dialog.visible:
 		await download_dialog.visibility_changed
 	assets_dialog.popup_centered()
+
+
+## Offers the release page if GitHub has a newer release than this build; silent otherwise.
+func _check_for_update() -> void:
+	var release := await UpdateCheck.check(self)
+	if release.is_empty():
+		return
+	var dialog := ConfirmationDialog.new()
+	dialog.title = "Update available"
+	dialog.dialog_text = "Scrim Simulator %s is available (you have %s)." % [release.tag, release.local]
+	dialog.ok_button_text = "Open release page"
+	dialog.cancel_button_text = "Not now"
+	dialog.confirmed.connect(OS.shell_open.bind(release.url))
+	dialog.visibility_changed.connect(func(): if not dialog.visible: dialog.queue_free())
+	download_dialog.get_parent().add_child(dialog)
+	for other in [download_dialog, assets_dialog]:
+		if other.visible:
+			await other.visibility_changed
+	dialog.popup_centered()
 
 
 ## New models or icons on disk: redraw ships and markers with them.
