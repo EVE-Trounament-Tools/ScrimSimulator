@@ -439,10 +439,11 @@ func add_file(src: String) -> void:
 	match_chosen.emit(path)
 
 
-## Adds scrim folder `src_dir` to the library, in the `target_folder` (`MatchLibrary.add_folder`),
-## and selects its first match; what couldn't be added or paired is named in the error line.
+## Adds scrim folder `src_dir` to the library, always at its top level whatever is selected (it
+## can be moved into a folder afterwards; `MatchLibrary.add_folder`), and selects its first match;
+## what couldn't be added or paired is named in the error line.
 func add_folder(src_dir: String) -> void:
-	var added := MatchLibrary.add_folder(src_dir, target_folder(), internal_check.button_pressed)
+	var added := MatchLibrary.add_folder(src_dir, "", internal_check.button_pressed)
 	if added.matches.is_empty():
 		show_error("No matches added from %s — it needs scrim-positions CSVs" % src_dir.simplify_path().get_file())
 		return
@@ -691,7 +692,6 @@ func open_context_menu(at: Vector2) -> void:
 		"folder":
 			context_menu.add_item("New folder…", MenuItem.NEW_FOLDER)
 			context_menu.add_item("Add match…", MenuItem.ADD_MATCH)
-			context_menu.add_item("Add folder…", MenuItem.ADD_FOLDER)
 			context_menu.add_item("Add combat logs…", MenuItem.ADD_LOGS)
 			context_menu.set_item_disabled(context_menu.get_item_index(MenuItem.ADD_LOGS),
 				MatchLibrary.matches_in(meta.rel).is_empty())
