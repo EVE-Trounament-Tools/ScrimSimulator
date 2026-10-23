@@ -21,6 +21,11 @@ of locked targets for tracking ship HP (three 3×3 grids, 27 targets in all).
                                   +-----------+
 ```
 
+A recording made with the template looks like this, outlined with `scene.json`'s rectangles as
+`scrim-positions-gui` draws them on its preview. Names, ship types, sizes and chat are blacked out.
+
+![A frame recorded with the template, with scene.json's rectangles outlined](../media/obs-setup-example.png)
+
 The overview and chat sources are fitted into their slots with "scale to inner bounds", so whatever
 you capture keeps its aspect ratio and is anchored to the slot's top-left corner. The Targets
 sources use "maximum size only" instead: a block that fits its slot is recorded at 1:1, and only one
