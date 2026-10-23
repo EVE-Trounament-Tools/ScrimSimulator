@@ -1161,6 +1161,42 @@ func test_swap_persists_for_library_match() -> void:
 	assert_eq(_roster(m2), ["Blue (0)", "Red (2)", "blue", "red", "Unknown (2)", "late", "runner"])
 
 
+func test_move_to_unknown() -> void:
+	Settings.set_value("teams/season_db", false)  # teams of this match only
+	var path := MatchLibrary.add(_match_csv())
+	var m := _main()
+	m.load_match(path)
+	m._move_team("blue", MatchData.Team.UNKNOWN)
+	assert_eq(m.data.teams["blue"], MatchData.Team.UNKNOWN)
+	assert_eq(m.ships["blue"].color, Main.TEAM_COLORS[MatchData.Team.UNKNOWN])
+	assert_eq(_roster(m), ["Blue (0)", "Red (1)", "red", "Unknown (3)", "blue", "late", "runner"])
+	var m2 := _main()
+	m2.load_match(path)
+	assert_eq(m2.data.teams["blue"], MatchData.Team.UNKNOWN)
+
+
+func test_team_menu_moves_pilot() -> void:
+	var m := _main()
+	m.load_match(_match_csv())
+	m._open_team_menu("blue")
+	var items := []
+	for i in range(1, m.team_menu.item_count):
+		items.append(m.team_menu.get_item_text(i))
+	assert_eq(items, ["Move to Red", "Move to Unknown"])
+	m.team_menu.index_pressed.emit(2)
+	assert_eq(m.data.teams["blue"], MatchData.Team.UNKNOWN)
+	m.team_menu.hide()
+
+
+func test_move_to_unknown_leaves_season_db() -> void:
+	var path := _season_match(0, 7)
+	var m := _main()
+	m.load_match(path)
+	m._move_team("blue", MatchData.Team.UNKNOWN)
+	assert_eq(m.data.teams["blue"], MatchData.Team.UNKNOWN)
+	assert_false(TeamDb.read("Season 1").manual.has("blue"), "Unknown is this match's only")
+
+
 func test_rename_team_shows_and_persists() -> void:
 	Settings.set_value("teams/season_db", false)  # teams of this match only
 	var path := MatchLibrary.add(_match_csv())
@@ -1169,7 +1205,8 @@ func test_rename_team_shows_and_persists() -> void:
 	m._rename_team(MatchData.Team.RED, " Them ")
 	assert_eq(_roster(m)[2], "Them (1)")
 	assert_true(m.file_label.text.contains("blue 1 / Them 1 / unknown 2"))
-	assert_eq(m.roster_table.rows["blue"].button.get_parent().get_child(1).tooltip_text, "Move to Them")
+	assert_eq(m.roster_table.rows["blue"].button.get_parent().get_child(1).tooltip_text,
+			"Move to Them (right-click for more)")
 	var m2 := _main()
 	m2.load_match(path)
 	assert_eq(_roster(m2)[2], "Them (1)")

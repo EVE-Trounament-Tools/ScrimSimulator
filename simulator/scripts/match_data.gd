@@ -446,11 +446,12 @@ func _cap_teams(line_d: Dictionary) -> void:
 
 
 ## Once a team has `MAX_TEAM_SIZE` pilots, UNKNOWN pilots (by name) join the other team until it
-## is full too. Returns the pilots moved.
-func fill_unknown() -> Array:
+## is full too; pilots in `pinned` (put on UNKNOWN by hand) stay. Returns the pilots moved.
+func fill_unknown(pinned := {}) -> Array:
 	var members := {Team.BLUE: [], Team.RED: [], Team.UNKNOWN: []}
 	for pilot in teams:
-		members[teams[pilot]].append(pilot)
+		if not (teams[pilot] == Team.UNKNOWN and pinned.has(pilot)):
+			members[teams[pilot]].append(pilot)
 	var unknown: Array = members[Team.UNKNOWN]
 	unknown.sort()
 	var moved := []

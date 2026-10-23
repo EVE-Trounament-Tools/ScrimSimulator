@@ -282,15 +282,24 @@ static func db_for(path: String) -> Dictionary:
 	return read(season_of(path)) if uses_db(path) else {}
 
 
+## The pilots `overrides` (pilot -> Team) put on UNKNOWN by hand, as a set for `MatchData.fill_unknown`.
+static func pinned_unknown(overrides: Dictionary) -> Dictionary:
+	var out := {}
+	for pilot in overrides:
+		if overrides[pilot] == MatchData.Team.UNKNOWN:
+			out[pilot] = true
+	return out
+
+
 ## Puts match `data`'s pilots on their sides as opening it does: known pilots on their team's
 ## side (`apply`, unless `db` is {}), then the match's own swaps `overrides` (pilot -> Team), then
-## `MatchData.fill_unknown`. Returns `apply`'s `{ side -> id }` ({} without a db).
+## `MatchData.fill_unknown` (pilots overridden to UNKNOWN stay there). Returns `apply`'s `{ side -> id }` ({} without a db).
 static func settle(data: MatchData, db: Dictionary, overrides: Dictionary) -> Dictionary:
 	var sides := {} if db.is_empty() else apply(db, data)
 	for pilot in overrides:
 		if data.teams.has(pilot):
 			data.teams[pilot] = overrides[pilot]
-	data.fill_unknown()
+	data.fill_unknown(pinned_unknown(overrides))
 	return sides
 
 

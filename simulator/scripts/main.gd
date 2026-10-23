@@ -213,6 +213,8 @@ var assets_dialog: ConfirmationDialog
 var bottom_panel: PanelContainer
 var roster_panel: PanelContainer
 var roster_table: RosterTable
+## Right-click menu of a roster row's ⇄ button: the teams its pilot can move to (`_move_team`).
+var team_menu: PopupMenu
 ## Broadcast-style alternative to the roster (setting `display/broadcast_roster`).
 var broadcast_panel: BroadcastRoster
 var broadcast_button: Button
@@ -2219,7 +2221,7 @@ func _build_overlay_menu(layer: CanvasLayer) -> void:
 
 
 ## Right-hand table of each team's pilots (ship, pilot, speed, distance from centre): click one to
-## follow it, ⇄ to change its team.
+## follow it, ⇄ to change its team (right-click ⇄ to pick any team, Unknown included).
 func _build_roster(layer: CanvasLayer) -> void:
 	roster_panel = PanelContainer.new()
 	roster_panel.set_anchors_and_offsets_preset(Control.PRESET_RIGHT_WIDE)
@@ -2242,6 +2244,10 @@ func _build_roster(layer: CanvasLayer) -> void:
 	roster_table = RosterTable.new()
 	roster_table.row_pressed.connect(_set_tracked)
 	roster_table.swap_pressed.connect(_swap_team)
+	team_menu = PopupMenu.new()
+	team_menu.index_pressed.connect(func(i): _move_team(team_menu.get_item_metadata(0), team_menu.get_item_metadata(i)))
+	add_child(team_menu)
+	roster_table.swap_context_pressed.connect(_open_team_menu)
 	roster_table.row_context_pressed.connect(func(pilot):
 		_open_ship_debug_menu(pilot, get_viewport().get_mouse_position()))
 	roster_table.group_activated.connect(_ask_rename_team)
@@ -2336,7 +2342,7 @@ func _refresh_roster() -> void:
 				team if renamable else -1, "Double-click to rename" if renamable else "")
 		var other: int = MatchData.Team.BLUE if team != MatchData.Team.BLUE else MatchData.Team.RED
 		for pilot in members:
-			var button := roster_table.add_row(pilot, color, "Move to %s" % _team_name(other))
+			var button := roster_table.add_row(pilot, color, "Move to %s (right-click for more)" % _team_name(other))
 			button.tooltip_text = "Centre the camera on %s (right-click to rename or debug)" % _pilot_name(pilot)
 			button.set_pressed_no_signal(pilot == tracked)
 			roster_buttons[pilot] = button
@@ -2509,19 +2515,38 @@ func _follow(pilot: String) -> void:
 		camera.set_target(ships[tracked].node.position)
 
 
-## Moves `pilot` to the other team (unknown pilots go to blue) and recolours it; a team it fills
-## takes in the unknown pilots (`MatchData.fill_unknown`).
+## Moves `pilot` to the other team (unknown pilots go to blue).
 func _swap_team(pilot: String) -> void:
-	var team: int = MatchData.Team.RED if data.teams.get(pilot) == MatchData.Team.BLUE else MatchData.Team.BLUE
+	_move_team(pilot, MatchData.Team.RED if data.teams.get(pilot) == MatchData.Team.BLUE else MatchData.Team.BLUE)
+
+
+## Opens `team_menu` at the mouse for `pilot`: "Move to" each team it isn't on.
+func _open_team_menu(pilot: String) -> void:
+	team_menu.clear()
+	team_menu.add_separator(_pilot_name(pilot))
+	team_menu.set_item_metadata(0, pilot)
+	for team in [MatchData.Team.BLUE, MatchData.Team.RED, MatchData.Team.UNKNOWN]:
+		if data.teams.get(pilot) != team:
+			team_menu.add_item("Move to %s" % _team_name(team))
+			team_menu.set_item_metadata(team_menu.item_count - 1, team)
+	team_menu.popup(Rect2i(Vector2i(get_viewport().get_mouse_position()), Vector2i.ZERO))
+
+
+## Moves `pilot` to `team` and recolours it; a team it fills takes in the unknown pilots
+## (`MatchData.fill_unknown`), except those put on Unknown by hand. Unknown is this match's
+## only: the season db keeps the pilot's team.
+func _move_team(pilot: String, team: int) -> void:
+	if data.teams.get(pilot) == team:
+		return
 	data.teams[pilot] = team
 	team_overrides[pilot] = team
-	if not team_sides.is_empty():
+	if not team_sides.is_empty() and team != MatchData.Team.UNKNOWN:
 		_edit_team_db(func(db):
 			if team_sides[team] == "":
 				team_sides[team] = TeamDb.new_team(db)
 			TeamDb.assign(db, pilot, team_sides[team]))
 	_recolor_ship(pilot)
-	for p in data.fill_unknown():
+	for p in data.fill_unknown(TeamDb.pinned_unknown(team_overrides)):
 		_recolor_ship(p)
 	_save_meta()
 	_update_file_label()

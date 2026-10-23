@@ -354,6 +354,19 @@ func test_fill_unknown_stops_when_other_team_full() -> void:
 	assert_eq(d.teams["u3"], MatchData.Team.UNKNOWN)
 
 
+func test_fill_unknown_keeps_pinned_pilots_unknown() -> void:
+	var d := _teams(10, 3, 3)
+	assert_eq(d.fill_unknown({"u1": true}), ["u0", "u2"])
+	assert_eq(d.teams["u1"], MatchData.Team.UNKNOWN)
+
+
+func test_settle_keeps_pilots_moved_to_unknown() -> void:
+	var d := _teams(10, 9, 0)
+	d.teams["r0"] = MatchData.Team.UNKNOWN
+	TeamDb.settle(d, {}, {"r0": MatchData.Team.UNKNOWN})
+	assert_eq(d.teams["r0"], MatchData.Team.UNKNOWN)
+
+
 func test_fill_unknown_leaves_unknown_while_no_team_full() -> void:
 	var d := _teams(9, 9, 2)
 	assert_eq(d.fill_unknown(), [])
