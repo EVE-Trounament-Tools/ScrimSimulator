@@ -977,6 +977,31 @@ func test_roster_sorts_by_ship_type_and_abbreviates() -> void:
 	assert_eq(m.roster_buttons["Bob Pilot"].tooltip_text, "Centre the camera on Bob Pilot (right-click to rename or debug)")
 
 
+## Blue (corner 0): an Abaddon, a Punisher (5) and an Atron (4); red (corner 7): two Atrons and a
+## Rifter (4 points each).
+func test_roster_sorts_by_points() -> void:
+	var m := _main()
+	var rows := []
+	for t in 2:
+		rows.append(row(t, "atron", "Atron", on_line(0, 0.5)))
+		rows.append(row(t, "punisher", "Punisher", on_line(0, 0.6)))
+		rows.append(row(t, "abaddon", "Abaddon", on_line(0, 0.7)))
+		rows.append(row(t, "rifter", "Rifter", on_line(7, 0.5)))
+		rows.append(row(t, "y atron", "Atron", on_line(7, 0.6)))
+		rows.append(row(t, "x atron", "Atron", on_line(7, 0.7)))
+	m.load_match(write_csv(rows))
+	var order := ["abaddon", "punisher", "atron", "x atron", "y atron", "rifter"]
+	assert_eq(_roster(m), ["Blue (3)"] + order.slice(0, 3) + ["Red (3)"] + order.slice(3),
+			"most points first, ties by ship type then pilot")
+	var buttons := {}  # row button -> pilot
+	for pilot in m.broadcast_panel.rows:
+		buttons[m.broadcast_panel.rows[pilot].button] = pilot
+	var shown := func(side: int) -> Array:
+		return m.broadcast_panel.sides[side].rows.get_children().map(func(b): return buttons[b])
+	assert_eq(shown.call(BroadcastRoster.Side.LEFT), order.slice(3), "red down the left")
+	assert_eq(shown.call(BroadcastRoster.Side.RIGHT), order.slice(0, 3), "blue down the right")
+
+
 func test_roster_hides_empty_unknown_group() -> void:
 	var m := _main()
 	m.load_match(_match_csv())

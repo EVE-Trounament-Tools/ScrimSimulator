@@ -2289,10 +2289,15 @@ func _refresh_roster() -> void:
 	_apply_roster_visibility()
 	if data == null:
 		return
+	_compute_score()
 	var pilots := ships.keys()
-	# By ship type, then pilot.
+	# By points (most first; pilots without any last), then ship type, then pilot.
+	var pts := func(p: String) -> int: return score.values.get(p, -1) if score != null else -1
 	var key := func(p: String) -> String: return "%s\n%s" % [data.tracks[p][0].ship_type, _pilot_name(p)]
-	pilots.sort_custom(func(a, b): return key.call(a).naturalnocasecmp_to(key.call(b)) < 0)
+	pilots.sort_custom(func(a, b):
+		if pts.call(a) != pts.call(b):
+			return pts.call(a) > pts.call(b)
+		return key.call(a).naturalnocasecmp_to(key.call(b)) < 0)
 	for team in [MatchData.Team.BLUE, MatchData.Team.RED, MatchData.Team.UNKNOWN]:
 		var members := pilots.filter(func(p): return data.teams.get(p, MatchData.Team.UNKNOWN) == team)
 		if team == MatchData.Team.UNKNOWN and members.is_empty():
@@ -2326,10 +2331,15 @@ func _refresh_roster() -> void:
 	_update_roster_cells()
 
 
-## Recomputes `score` for the current teams and `ruleset_id`, and shows each ship's points.
-func _refresh_score() -> void:
+## Recomputes `score` for the current teams and `ruleset_id`.
+func _compute_score() -> void:
 	var rules := Ruleset.load_id(ruleset_id)
 	score = MatchScore.new(data, rules) if data != null and rules != null else null
+
+
+## Shows each ship's points from `score`.
+func _refresh_score() -> void:
+	var rules: Ruleset = score.ruleset if score != null else null
 	for pilot in broadcast_panel.rows:
 		if score == null or not score.values.has(pilot):
 			broadcast_panel.set_cell(pilot, "pts", "—")
@@ -2350,8 +2360,7 @@ func _set_ruleset(id: String) -> void:
 	ruleset_id = id
 	_select_ruleset_option()
 	_save_meta()
-	_refresh_score()
-	_update_roster_cells()
+	_refresh_roster()  # Points may change, and the rows are sorted by them.
 
 
 func _select_ruleset_option() -> void:
