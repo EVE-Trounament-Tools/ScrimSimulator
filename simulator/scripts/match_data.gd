@@ -11,6 +11,9 @@ extends RefCounted
 
 ## Samples further apart than this are treated as a gap: the ship is hidden in between.
 const MAX_GAP_S := 5.0
+## A hull whose track ends more than this before the CSV's last sample, still in the arena, was
+## destroyed with its pod never seen (it drops off the overview).
+const VANISH_S := MAX_GAP_S
 
 ## Teams start strung along lines from two cube corners to the centre.
 enum Team { UNKNOWN = -1, BLUE = 0, RED = 1 }
@@ -63,7 +66,8 @@ enum Event { DEATH, BOUNDARY, MJD }
 ## A podded pilot's track ends at its first capsule sample (`pod: true`, with unknown speed and HP):
 ## nothing the pod does after is kept, and `sample` holds it there until the match ends.
 var tracks: Dictionary = {}
-## pilot name -> match time it was podded (as its DEATH event). Pilots never podded are absent.
+## pilot name -> match time it was podded, or vanished from the overview mid-match (as its DEATH
+## event; the vanished track's last sample has `vanished: true`). Pilots never podded are absent.
 var podded: Dictionary = {}
 ## pilot name -> Team, from each pilot's first position.
 var teams: Dictionary = {}
@@ -185,6 +189,9 @@ static func load_csv(path: String, ship_radii := {}, move_threshold_m := 0.0, ke
 	for pilot in data.tracks:
 		var last: Dictionary = data.tracks[pilot][-1]
 		if last.get("pod", false):
+			data.podded[pilot] = maxf(last.t - data.start_time, 0.0)
+		elif last.ship_type != CAPSULE and t_max - last.t > VANISH_S:
+			last.vanished = true
 			data.podded[pilot] = maxf(last.t - data.start_time, 0.0)
 	if not data.eve_start.is_empty():
 		data.eve_unix_start = CombatLog.parse_eve_time(data.eve_start)
@@ -530,6 +537,13 @@ func _find_events() -> void:
 					"t": t, "pilot": pilot, "kind": Event.MJD, "pos": a.pos, "to_pos": b.pos,
 					"ship_type": a.ship_type,
 				})
+		var last: Dictionary = track[-1]
+		var gone: bool = last.get("vanished", false) and last.t >= start_time
+		if gone and (not deaths.has(pilot) or deaths[pilot].t > podded[pilot]):
+			events.append({
+				"t": podded[pilot], "pilot": pilot, "kind": Event.DEATH, "pos": last.pos,
+				"ship_type": last.ship_type,
+			})
 		if deaths.has(pilot):
 			var death: Dictionary = deaths[pilot]
 			var s := sample(pilot, death.t)

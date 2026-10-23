@@ -498,6 +498,34 @@ func test_starting_in_a_capsule_is_still_tracked() -> void:
 	assert_eq(d.sample("a", 3.0), {})
 
 
+func test_hull_vanishing_mid_match_is_a_death() -> void:
+	var d := _load([
+		row(0, "gone", "Rifter", C),
+		row(4, "gone", "Rifter", C + X),
+		row(0, "stays", "Rifter", C),
+		row(20, "stays", "Rifter", C),
+		row(0, "near_end", "Rifter", C),
+		row(20.0 - MatchData.VANISH_S, "near_end", "Rifter", C),
+	])
+	assert_eq(_kinds(d), [MatchData.Event.DEATH])
+	assert_eq(d.events[0].pilot, "gone")
+	assert_eq(d.events[0].t, 4.0)
+	assert_eq(d.events[0].pos, C + X)
+	assert_eq(d.events[0].ship_type, "Rifter")
+	assert_eq(d.podded, {"gone": 4.0})
+	assert_eq(d.sample("gone", 10.0), {}, "a vanished ship isn't held like a pod")
+
+
+func test_vanishing_after_leaving_bounds_is_only_a_boundary_event() -> void:
+	var d := _load([
+		row(0, "a", "Rifter", C + X * 100000.0),
+		row(1, "a", "Rifter", C + X * 150000.0),
+		row(0, "b", "Rifter", C),
+		row(20, "b", "Rifter", C),
+	])
+	assert_eq(_kinds(d), [MatchData.Event.BOUNDARY])
+
+
 func test_boundary_crossing_is_an_event() -> void:
 	var d := _load([
 		row(10, "early", "x", C),
@@ -548,7 +576,7 @@ func test_non_mjd_hops_are_ignored() -> void:
 		row(0, "pod", "Capsule", C),
 		row(1, "pod", "Capsule", C + X * 100000),  # capsules can't MJD
 	])
-	assert_eq(d.events, [])
+	assert_false(_kinds(d).has(MatchData.Event.MJD))
 
 
 func test_events_are_sorted_by_time() -> void:
