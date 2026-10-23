@@ -182,6 +182,9 @@ var menu: MainMenu
 ## pitch shift undoes the pitch change of playing faster or slower.
 var audio_player: AudioStreamPlayer
 var audio_pitch: AudioEffectPitchShift
+## Mutes `AUDIO_BUS` (setting `audio/muted`); the player keeps running so unmuting stays in sync.
+var muted := false
+var mute_button: Button
 var play_button: Button
 ## Big centred button shown over a freshly opened (paused) match; gone once playback first starts.
 var start_button: Button
@@ -268,6 +271,7 @@ func _ready() -> void:
 	broadcast_on = Settings.get_value("display/broadcast_roster")
 	damage_on = Settings.get_value("display/damage_highlight")
 	mjd_on = Settings.get_value("display/mjd_spoolup")
+	muted = Settings.get_value("audio/muted")
 	for field in OVERLAY_FIELDS:
 		ship_overlay[field] = Settings.get_value("overlay/" + field)
 	for kind in CombatStats.LINK_KINDS:
@@ -353,6 +357,7 @@ func load_match(path: String) -> bool:
 	match_path = path
 	audio_player.stop()
 	audio_player.stream = MatchLibrary.load_audio(path) if has_audio else null
+	_update_mute_button()
 	_end_measure()
 	for c in ships_root.get_children():
 		c.queue_free()
@@ -1884,6 +1889,14 @@ func _build_ui() -> void:
 	speed_option.item_selected.connect(func(idx): _set_speed(SPEEDS[idx]))
 	row.add_child(speed_option)
 
+	mute_button = Button.new()
+	mute_button.text = "Mute"
+	mute_button.toggle_mode = true
+	mute_button.button_pressed = muted
+	mute_button.toggled.connect(_set_muted)
+	row.add_child(mute_button)
+	_update_mute_button()
+
 	time_label = Label.new()
 	time_label.text = "--:-- / --:--"
 	row.add_child(time_label)
@@ -2046,6 +2059,7 @@ func _build_audio() -> void:
 		AudioServer.add_bus_effect(bus, AudioEffectPitchShift.new())
 	audio_pitch = AudioServer.get_bus_effect(bus, 0)
 	audio_pitch.pitch_scale = 1.0
+	AudioServer.set_bus_mute(bus, muted)
 	audio_player = AudioStreamPlayer.new()
 	audio_player.bus = AUDIO_BUS
 	# Web defaults to sample playback, which skips bus effects (and so the pitch fix).
@@ -2264,6 +2278,20 @@ func _set_damage_on(on: bool) -> void:
 	damage_button.set_pressed_no_signal(on)
 	damage_setting.set_pressed_no_signal(on)
 	_update_roster_cells()
+
+
+func _set_muted(on: bool) -> void:
+	muted = on
+	Settings.set_value("audio/muted", on)
+	AudioServer.set_bus_mute(AudioServer.get_bus_index(AUDIO_BUS), on)
+	mute_button.set_pressed_no_signal(on)
+
+
+## Mute only matters for a match with comms audio: its button is disabled otherwise.
+func _update_mute_button() -> void:
+	var has_audio := audio_player.stream != null
+	mute_button.disabled = not has_audio
+	mute_button.tooltip_text = "Mute the match's comms audio" if has_audio else "This match has no comms audio"
 
 
 func _set_mjd_on(on: bool) -> void:

@@ -29,6 +29,9 @@ func after_each() -> void:
 	Settings._cfg = null
 	MatchLibrary.dir = _saved_library
 	ShipSizes.dir = ""
+	var bus := AudioServer.get_bus_index(Main.AUDIO_BUS)
+	if bus >= 0:
+		AudioServer.set_bus_mute(bus, false)
 
 
 func _main() -> Main:
@@ -245,6 +248,30 @@ func test_broadcast_clock_counts_down_to_first_move() -> void:
 		m._seek(c[0])
 		m._process(0.0)
 		assert_eq(m.broadcast_panel.clock.text, c[1], "at %s" % c[0])
+
+
+func test_mute() -> void:
+	var m := _main()
+	m.load_match(_match_csv())
+	assert_true(m.mute_button.disabled, "no audio, nothing to mute")
+	var path := _countdown_match()
+	MatchLibrary.set_audio(path, write_wav(10.0))
+	m.load_match(path)
+	assert_false(m.mute_button.disabled)
+	var bus := AudioServer.get_bus_index(Main.AUDIO_BUS)
+	assert_false(AudioServer.is_bus_mute(bus))
+	m._toggle_play()
+	m.mute_button.button_pressed = true
+	assert_true(AudioServer.is_bus_mute(bus))
+	assert_true(Settings.get_value("audio/muted"))
+	assert_true(m.audio_player.playing, "keeps playing muted, so unmuting stays in sync")
+	m._set_muted(false)
+	assert_false(AudioServer.is_bus_mute(bus))
+	assert_false(m.mute_button.button_pressed)
+	Settings.set_value("audio/muted", true)
+	var m2 := _main()
+	assert_true(m2.mute_button.button_pressed, "remembered")
+	assert_true(AudioServer.is_bus_mute(bus))
 
 
 func test_audio_follows_playback() -> void:

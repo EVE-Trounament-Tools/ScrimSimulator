@@ -16,6 +16,8 @@ const DEFAULTS := {
 	"display/damage_highlight": false,
 	# Draw micro jump drive spool-ups in space (ring, projected landing and arrow).
 	"display/mjd_spoolup": true,
+	# Silence the match's comms audio (the bar's Mute button).
+	"audio/muted": false,
 	# Match start detection: ignore position changes up to this many metres (overview jitter).
 	"match/ignore_jitter": false,
 	"match/jitter_threshold_m": 500.0,
