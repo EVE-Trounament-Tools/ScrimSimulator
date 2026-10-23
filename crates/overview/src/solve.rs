@@ -304,6 +304,25 @@ pub fn infer_observers(pilots: &[Vec<Reading>], fixed_r: Option<f64>) -> Observe
     }
 }
 
+/// Two observers whose distances agree on at least this share of the ticks both read...
+const SAME_OBSERVER_SHARE: f64 = 0.9;
+/// ...out of at least this many such ticks, are one overview captured twice.
+const SAME_OBSERVER_MIN_TICKS: usize = 30;
+
+/// The first pair of observers (indices into [`Reading::d`]) whose distances are the same on
+/// nearly every tick both read, with that share: one overview captured in two panels, which
+/// leaves two observers to trilaterate from. Distinct observers agree only when the 1 km rounding
+/// happens to line up (~1% of ticks).
+pub fn duplicate_observers(pilots: &[Vec<Reading>]) -> Option<(usize, usize, f64)> {
+    [(0, 1), (0, 2), (1, 2)].into_iter().find_map(|(i, j)| {
+        let both: Vec<&Reading> =
+            pilots.iter().flatten().filter(|r| !r.d[i].is_nan() && !r.d[j].is_nan()).collect();
+        let same = both.iter().filter(|r| r.d[i] == r.d[j]).count();
+        let share = same as f64 / both.len().max(1) as f64;
+        (both.len() >= SAME_OBSERVER_MIN_TICKS && share >= SAME_OBSERVER_SHARE).then_some((i, j, share))
+    })
+}
+
 /// Speed windows span at least this long, so the 1 km rounding of distances stays small next to
 /// the distance flown...
 const SPEED_WINDOW_S: f64 = 10.0;
@@ -829,6 +848,20 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn one_overview_in_two_panels_is_caught() {
+        let obs = observers_at([0, 1, 2], 450_000.0);
+        assert_eq!(duplicate_observers(&flying(obs)), None, "distinct observers");
+        let twice: Vec<Vec<Reading>> = flying(obs)
+            .into_iter()
+            .map(|p| p.into_iter().map(|r| Reading { d: [r.d[0], r.d[1], r.d[1]], ..r }).collect())
+            .collect();
+        assert_eq!(duplicate_observers(&twice), Some((1, 2, 1.0)));
+        assert_eq!(duplicate_observers(&twice[..1]), Some((1, 2, 1.0)), "40 ticks");
+        let few: Vec<Vec<Reading>> = vec![twice[0][..20].to_vec()];
+        assert_eq!(duplicate_observers(&few), None, "too few ticks to tell");
     }
 
     #[test]

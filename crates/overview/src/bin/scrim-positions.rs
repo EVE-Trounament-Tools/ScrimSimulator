@@ -378,6 +378,18 @@ fn main() -> Result<()> {
         }
         let pilots: Vec<Vec<Reading>> =
             reads.iter().flat_map(|(_, m)| m.readings.iter().map(|r| r.as_readings(cli.observer_radius_m))).collect();
+        let names: Vec<&str> = scene.panels.iter().map(|p| p.name.as_str()).collect();
+        if let Some((i, j, share)) = solve::duplicate_observers(&pilots) {
+            eprintln!(
+                "  error: panels {} and {} read the same distances on {:.0}% of ticks: the recording shows one \
+                 observer's overview twice (check the OBS sources), so positions can't be solved",
+                names[i],
+                names[j],
+                share * 100.0
+            );
+            failed += reads.len();
+            continue;
+        }
         let fit = infer_observers(&pilots, cli.observer_distance_km.map(|km| km * 1000.0));
         println!(
             "== {}: observers ({} m hull radius), from {} match(es)",
@@ -385,7 +397,6 @@ fn main() -> Result<()> {
             cli.observer_radius_m,
             reads.len()
         );
-        let names: Vec<&str> = scene.panels.iter().map(|p| p.name.as_str()).collect();
         print_corners(&names, &fit);
         for (i, m) in &reads {
             let Some(i) = i else {

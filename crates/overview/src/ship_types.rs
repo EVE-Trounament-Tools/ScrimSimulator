@@ -30,14 +30,26 @@ pub struct ShipTypes {
 /// clipped single glyph); only an exact match is accepted.
 const MIN_LEN_FOR_FUZZY: usize = 4;
 
-/// Max edit distance tolerated between a reading and a candidate ship (or that ship's
-/// same-length prefix — see [`ShipTypes::score`]): one misread glyph, same reasoning as
-/// `track::FUZZY_NAME_DISTANCE`. Kept at `1` rather than widened for longer readings: this
-/// catalog has 400+ names, and at distance `2` a reading can be equidistant from several unrelated
-/// ships (e.g. `Tomado` sits 2 from each of `Tornado`, `Nomad`, and `Komodo`) — `1` keeps
-/// corrections to cases actually safe to make, leaving anything looser `Unknown` rather than
-/// guessed.
+/// Max edit distance tolerated between a short reading and a candidate ship (or one of that ship's
+/// prefixes — see [`ShipTypes::score`]): one misread glyph, same reasoning as
+/// `track::FUZZY_NAME_DISTANCE`. Short readings stay at `1`: this catalog has 400+ names, and at
+/// distance `2` a short reading can be equidistant from several unrelated ships (e.g. `Tomado`
+/// sits 2 from each of `Tornado`, `Nomad`, and `Komodo`).
 const MAX_CORRECTION_DISTANCE: usize = 1;
+
+/// Readings at least this long tolerate [`LONG_MAX_CORRECTION_DISTANCE`]: enough glyphs that two
+/// misreads (e.g. `rm` merged into `n`, as in `Anageddon N` for a truncated `Armageddon Navy Issue`)
+/// still leave one ship clearly closest, and a tie is still [`Resolution::Ambiguous`].
+const LONG_READING_LEN: usize = 10;
+const LONG_MAX_CORRECTION_DISTANCE: usize = 2;
+
+/// How far a truncated reading's length may drift from the prefix it was clipped from, for glyphs
+/// OCR dropped or split before the cut.
+const PREFIX_SLACK: usize = 2;
+
+fn max_distance(len: usize) -> usize {
+    if len >= LONG_READING_LEN { LONG_MAX_CORRECTION_DISTANCE } else { MAX_CORRECTION_DISTANCE }
+}
 
 impl ShipTypes {
     /// Load the ship-type list bundled into this crate (`assets/ship_types.txt`). Cheap — safe to
@@ -61,9 +73,9 @@ impl ShipTypes {
     /// match safely. Otherwise: exact match wins outright (so `Scorpion` is never out-scored by
     /// `Scorpion Navy Issue`'s prefix distance); failing that, each known name is scored against
     /// the reading as the *minimum* of the reading's own edit distance to that name and to that
-    /// name's same-length prefix (which is what a Type-column truncation like `Griffin Navy Is`
-    /// actually looks like), and the closest name is accepted only if it is within
-    /// [`MAX_CORRECTION_DISTANCE`] *and* no other known name ties it — a tie is
+    /// name's prefixes of about the same length (which is what a Type-column truncation like
+    /// `Griffin Navy Is` actually looks like), and the closest name is accepted only if it is within
+    /// [`max_distance`] *and* no other known name ties it — a tie is
     /// [`Resolution::Ambiguous`], never a guess.
     pub fn resolve<'a>(&'a self, reading: &str) -> Resolution<'a> {
         let reading = reading.trim();
@@ -79,11 +91,12 @@ impl ShipTypes {
             return Resolution::Unknown;
         }
 
+        let max = max_distance(len);
         let mut best: Option<usize> = None;
         let mut winners: Vec<&str> = Vec::new();
         for name in &self.names {
             let d = self.score(reading, name, len);
-            if d > MAX_CORRECTION_DISTANCE {
+            if d > max {
                 continue;
             }
             match best {
@@ -108,19 +121,20 @@ impl ShipTypes {
         }
     }
 
-    /// Edit distance from `reading` (already known to be `len` chars) to `name`, or to the
-    /// same-length prefix of `name` when `name` is longer than `reading` — whichever is smaller.
-    /// The prefix comparison is what makes a Type-column truncation resolve without also letting
-    /// a genuinely short, different ship name score better than it should.
+    /// Edit distance from `reading` (already known to be `len` chars) to `name`, or to a prefix of
+    /// `name` within [`PREFIX_SLACK`] chars of `len` when `name` is longer than that — whichever is
+    /// smallest. The prefix comparison is what makes a Type-column truncation resolve (even one that
+    /// also lost or gained a glyph) without also letting a genuinely short, different ship name
+    /// score better than it should.
     fn score(&self, reading: &str, name: &str, len: usize) -> usize {
-        let whole = levenshtein(reading, name);
-        let name_len = name.chars().count();
-        if name_len > len {
-            let prefix: String = name.chars().take(len).collect();
-            whole.min(levenshtein(reading, &prefix))
-        } else {
-            whole
+        let name: Vec<char> = name.chars().collect();
+        let whole: String = name.iter().collect();
+        let mut best = levenshtein(reading, &whole);
+        for n in len.saturating_sub(PREFIX_SLACK).max(1)..=(len + PREFIX_SLACK).min(name.len().saturating_sub(1)) {
+            let prefix: String = name[..n].iter().collect();
+            best = best.min(levenshtein(reading, &prefix));
         }
+        best
     }
 
     /// The name to use in place of `reading`: `reading` itself unless [`Self::resolve`] finds an
@@ -199,6 +213,24 @@ mod tests {
         let types = ShipTypes::builtin();
         assert_eq!(types.resolve("Griffin Navy Is"), Resolution::Corrected { name: "Griffin Navy Issue", distance: 0 });
         assert_eq!(types.resolve("Wor"), Resolution::Unknown); // shorter than MIN_LEN_FOR_FUZZY
+    }
+
+    #[test]
+    fn merged_glyphs_in_a_long_truncation_correct_to_the_real_ship() {
+        let types = ShipTypes::builtin();
+        // "rm" read as "n", then clipped mid-word: 2 from the "Armageddon N" prefix, 3 from
+        // "Armageddon I", so the Navy Issue is the unique closest.
+        assert_eq!(types.resolve("Anageddon N"), Resolution::Corrected { name: "Armageddon Navy Issue", distance: 2 });
+        assert_eq!(types.resolve("Megathon Navy I"), Resolution::Corrected { name: "Megathron Navy Issue", distance: 1 });
+        assert_eq!(types.resolve("Megahon Navy Is"), Resolution::Corrected { name: "Megathron Navy Issue", distance: 2 });
+    }
+
+    #[test]
+    fn every_known_ship_resolves_exactly_to_itself() {
+        let types = ShipTypes::builtin();
+        for name in &types.names {
+            assert_eq!(types.resolve(name), Resolution::Exact(name.as_str()));
+        }
     }
 
     #[test]
