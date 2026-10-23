@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { prune } from "../src/activity";
 import { folders } from "../src/admin";
 import { deps, resetJwksCache, startSession, verifyJwt } from "../src/auth";
-import { matchKey, validPath } from "../src/library";
+import { FileRow, matchKey, validPath, viewable } from "../src/library";
 import { route } from "../src/index";
 import { Env, base64url, sha256Hex } from "../src/util";
 
@@ -86,7 +86,15 @@ async function upload(cookie: string, content: string): Promise<{ sha: string; s
 
 async function manifest(cookie: string) {
   const r = await call("/api/library", { cookie });
-  return (await r.json()) as { version: number; files: { path: string; sha: string; owner_id: number }[] };
+  return (await r.json()) as { version: number; files: { path: string; sha: string; owner_id: number; public: number }[] };
+}
+
+async function commitOps(cookie: string, ops: unknown[]) {
+  return call("/api/library/commit", { method: "POST", cookie, json: { ops } });
+}
+
+async function setPublic(cookie: string, path: string, on: boolean) {
+  return call("/api/library/visibility", { method: "POST", cookie, json: { path, public: on } });
 }
 
 describe("access", () => {
@@ -97,29 +105,38 @@ describe("access", () => {
     expect((await call("/index.wasm")).status).toBe(302);
   });
 
-  it("lets in whitelisted characters, alliance members and admins only", async () => {
+  it("lets anyone in, as a member if whitelisted, in a whitelisted alliance or an admin", async () => {
     await whitelist("character", 1);
     await whitelist("alliance", 500);
     expect((await startSession(E, 1, "A")).ok).toBe(false); // ESI affiliation unknown
     alliances = { 1: null, 2: 500, 3: 600, [ADMIN]: null };
-    expect((await startSession(E, 1, "A")).ok).toBe(true);
-    expect((await startSession(E, 2, "B")).ok).toBe(true);
-    const denied = await startSession(E, 3, "C");
-    expect(denied.ok).toBe(false);
-    expect(denied.ok === false && denied.status).toBe(403);
-    expect((await startSession(E, ADMIN, "Boss")).ok).toBe(true);
+    const member = async (id: number) => {
+      const r = await startSession(E, id, "X");
+      if (!r.ok) throw new Error(r.message);
+      return r.user.member;
+    };
+    expect(await member(1)).toBe(true);
+    expect(await member(2)).toBe(true);
+    expect(await member(3)).toBe(false);
+    expect(await member(ADMIN)).toBe(true);
   });
 
-  it("drops a session whose pilot left the alliance, at the daily re-check", async () => {
+  it("makes a pilot who left the alliance a viewer at the daily re-check", async () => {
     await whitelist("alliance", 500);
     const cookie = await session(2, "B", 500);
-    expect((await call("/api/me", { cookie })).status).toBe(200);
+    const me = async () => (await (await call("/api/me", { cookie })).json()) as { member: boolean };
+    expect((await me()).member).toBe(true);
     alliances[2] = 700;
-    expect((await call("/api/me", { cookie })).status).toBe(200); // not re-checked yet
+    expect((await me()).member).toBe(true); // not re-checked yet
     await E.DB.prepare("UPDATE sessions SET checked_at = 0").run();
-    const r = await call("/api/me", { cookie });
-    expect(r.status).toBe(403);
-    expect((await call("/api/me", { cookie })).status).toBe(401);
+    expect((await me()).member).toBe(false);
+  });
+
+  it("makes a pilot taken off the whitelist a viewer right away", async () => {
+    await whitelist("character", 1);
+    const cookie = await session(1);
+    await E.DB.prepare("DELETE FROM whitelist").run();
+    expect(((await (await call("/api/me", { cookie })).json()) as { member: boolean }).member).toBe(false);
   });
 
   it("refuses cross-origin state changes", async () => {
@@ -187,7 +204,7 @@ describe("EVE SSO", () => {
     expect(await verifyJwt(await sign(other.pair.privateKey, claims()), "test-client")).toBeNull();
   });
 
-  it("logs a whitelisted character in through the callback", async () => {
+  it("logs a character in through the callback", async () => {
     const { pair, jwk } = await keyPair();
     const token = await sign(pair.privateKey, claims());
     ssoHandler = (url, init) => {
@@ -208,12 +225,15 @@ describe("EVE SSO", () => {
 
     alliances[1] = null;
     expect((await call(`/auth/callback?code=abc&state=wrong`, { cookie: stateCookie })).status).toBe(400);
-    expect((await call(`/auth/callback?code=abc&state=${state}`, { cookie: stateCookie })).status).toBe(403);
+    const viewer = await call(`/auth/callback?code=abc&state=${state}`, { cookie: stateCookie });
+    expect(viewer.status).toBe(302);
+    const viewerCookie = viewer.headers.get("Set-Cookie")!.split(";")[0];
+    expect(await (await call("/api/me", { cookie: viewerCookie })).json()).toEqual({ id: 1, name: "Test Pilot", admin: false, member: false });
     await whitelist("character", 1);
     const ok = await call(`/auth/callback?code=abc&state=${state}`, { cookie: stateCookie });
     expect(ok.status).toBe(302);
     const cookie = ok.headers.get("Set-Cookie")!.split(";")[0];
-    expect(await (await call("/api/me", { cookie })).json()).toEqual({ id: 1, name: "Test Pilot", admin: false });
+    expect(await (await call("/api/me", { cookie })).json()).toEqual({ id: 1, name: "Test Pilot", admin: false, member: true });
   });
 });
 
@@ -343,6 +363,131 @@ describe("library", () => {
     expect(m.version).toBeGreaterThan(0);
   });
 
+  it("shows viewers only public matches, public folders' contents and the folders leading to them", () => {
+    const row = (path: string, pub = 0): FileRow => ({ path, sha: "", size: 0, owner_id: 1, owner_name: "A", mtime: 0, public: pub });
+    const files = [
+      row("Open/", 1),
+      row("Open/Sub/"),
+      row("Open/Sub/a.positions.csv"),
+      row("Open/Sub/a.positions.json"),
+      row("Open/pilot-teams.db.json"),
+      row("S1/"),
+      row("S1/Week/"),
+      row("S1/Week/b.positions.csv", 1),
+      row("S1/Week/b.positions.ogg"),
+      row("S1/Week/b.positions.logs/x.txt"),
+      row("S1/Week/c.positions.csv"),
+      row("S1/Week/c.positions.json"),
+      row("S1/pilot-teams.db.json"),
+      row("Private/"),
+      row("top.positions.csv"),
+    ];
+    expect(viewable(files).map((f) => f.path)).toEqual([
+      "Open/",
+      "Open/Sub/",
+      "Open/Sub/a.positions.csv",
+      "Open/Sub/a.positions.json",
+      "Open/pilot-teams.db.json",
+      "S1/",
+      "S1/Week/",
+      "S1/Week/b.positions.csv",
+      "S1/Week/b.positions.ogg",
+      "S1/Week/b.positions.logs/x.txt",
+    ]);
+  });
+
+  it("lets viewers read but not change the public library, and admins alone set what is public", async () => {
+    await whitelist("character", 1);
+    const a = await session(1, "Alice");
+    const v = await session(3, "Viewer");
+    alliances[ADMIN] = null;
+    const admin = await session(ADMIN, "Boss");
+    const pub = await upload(a, "public csv");
+    const priv = await upload(a, "private csv");
+    expect(
+      (
+        await commitOps(a, [
+          { op: "put", path: "S1/", sha: "", size: 0, prev: null },
+          { op: "put", path: "S1/p.positions.csv", ...pub, prev: null },
+          { op: "put", path: "S1/q.positions.csv", ...priv, prev: null },
+        ])
+      ).status,
+    ).toBe(200);
+    // Private by default.
+    expect((await manifest(a)).files.every((f) => f.public === 0)).toBe(true);
+    expect((await manifest(v)).files).toEqual([]);
+
+    expect((await setPublic(a, "S1/p.positions.csv", true)).status).toBe(403);
+    expect((await setPublic(admin, "S1/nope.positions.csv", true)).status).toBe(404);
+    expect((await setPublic(admin, "S1/p.positions.json", true)).status).toBe(400);
+    expect((await setPublic(admin, "S1/p.positions.csv", true)).status).toBe(200);
+    expect((await manifest(v)).files.map((f) => f.path)).toEqual(["S1/", "S1/p.positions.csv"]);
+    expect(await (await call(`/api/blobs/${pub.sha}`, { cookie: v })).text()).toBe("public csv");
+    expect((await call(`/api/blobs/${priv.sha}`, { cookie: v })).status).toBe(404);
+
+    // Viewers can't upload or commit.
+    const bytes = new TextEncoder().encode("viewer");
+    const sha = await sha256Hex(bytes);
+    expect((await call(`/api/blobs/${sha}`, { method: "PUT", cookie: v, body: bytes, headers: { "Content-Length": "6" } })).status).toBe(403);
+    expect((await call("/api/blobs/missing", { method: "POST", cookie: v, json: { shas: [sha] } })).status).toBe(403);
+    expect((await commitOps(v, [{ op: "put", path: "V/", sha: "", size: 0, prev: null }])).status).toBe(403);
+
+    // Viewers' watch reports only count matches they can see.
+    expect((await call("/api/watched", { method: "POST", cookie: v, json: { path: "S1/p.positions.csv" } })).status).toBe(200);
+    expect((await call("/api/watched", { method: "POST", cookie: v, json: { path: "S1/q.positions.csv" } })).status).toBe(400);
+  });
+
+  it("keeps the public flag on moves, renames and replaced files, and makes public folders' new matches public", async () => {
+    alliances[ADMIN] = null;
+    const admin = await session(ADMIN, "Boss");
+    const v = await session(3, "Viewer");
+    const m = await upload(admin, "match");
+    const m2 = await upload(admin, "match v2");
+    const n = await upload(admin, "new match");
+    await commitOps(admin, [
+      { op: "put", path: "S1/", sha: "", size: 0, prev: null },
+      { op: "put", path: "S1/Sub/", sha: "", size: 0, prev: null },
+      { op: "put", path: "S1/Sub/m.positions.csv", ...m, prev: null },
+      { op: "put", path: "S2/", sha: "", size: 0, prev: null },
+    ]);
+    await setPublic(admin, "S1/Sub/m.positions.csv", true);
+
+    // Moved into another folder, then replaced: still public.
+    await commitOps(admin, [
+      { op: "delete", path: "S1/Sub/m.positions.csv", prev: m.sha },
+      { op: "put", path: "S2/m.positions.csv", ...m, prev: null },
+    ]);
+    await commitOps(admin, [{ op: "put", path: "S2/m.positions.csv", ...m2, prev: m.sha }]);
+    expect((await manifest(v)).files.map((f) => f.path)).toEqual(["S2/", "S2/m.positions.csv"]);
+
+    // A public folder renamed (with a subfolder) stays public; new matches in it are public too.
+    await commitOps(admin, [
+      { op: "delete", path: "S2/m.positions.csv", prev: m2.sha },
+      { op: "put", path: "S1/Sub/m.positions.csv", ...m2, prev: null },
+    ]);
+    await setPublic(admin, "S1/", true);
+    await commitOps(admin, [
+      { op: "delete", path: "S1/", prev: "" },
+      { op: "delete", path: "S1/Sub/", prev: "" },
+      { op: "delete", path: "S1/Sub/m.positions.csv", prev: m2.sha },
+      { op: "put", path: "Renamed/", sha: "", size: 0, prev: null },
+      { op: "put", path: "Renamed/Sub/", sha: "", size: 0, prev: null },
+      { op: "put", path: "Renamed/Sub/m.positions.csv", ...m2, prev: null },
+    ]);
+    await commitOps(admin, [{ op: "put", path: "Renamed/n.positions.csv", ...n, prev: null }]);
+    const all = await manifest(admin);
+    expect(all.files.filter((f) => f.public).map((f) => f.path)).toEqual(["Renamed/", "Renamed/Sub/m.positions.csv"]);
+    expect((await manifest(v)).files.map((f) => f.path)).toEqual([
+      "Renamed/",
+      "Renamed/Sub/",
+      "Renamed/Sub/m.positions.csv",
+      "Renamed/n.positions.csv",
+    ]);
+
+    await setPublic(admin, "Renamed/", false);
+    expect((await manifest(v)).files.map((f) => f.path)).toEqual(["Renamed/", "Renamed/Sub/", "Renamed/Sub/m.positions.csv"]);
+  });
+
   it("rejects malformed commits", async () => {
     await whitelist("character", 1);
     const cookie = await session(1);
@@ -387,7 +532,7 @@ describe("admin", () => {
   });
 
   it("lists library folders to download", async () => {
-    const row = (path: string, size = 0) => ({ path, sha: "", size, owner_id: 1, owner_name: "A", mtime: 0 });
+    const row = (path: string, size = 0) => ({ path, sha: "", size, owner_id: 1, owner_name: "A", mtime: 0, public: 0 });
     expect(
       folders([
         row("Empty/"),
@@ -430,6 +575,7 @@ describe("site", () => {
     const page = await (await call("/", { cookie })).text();
     expect(page).toContain("window.scrimBoot = ");
     expect(page).toContain('"name":"Alice"');
+    expect(page).toContain('"member":true');
     const wasm = await call("/index.wasm", { cookie });
     expect(wasm.headers.get("Content-Type")).toBe("application/wasm");
     const a = await call("/assets/ship_sizes.json", { cookie });

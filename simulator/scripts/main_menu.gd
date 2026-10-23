@@ -7,6 +7,8 @@ extends PanelContainer
 ## or by right-click). Matches missing data (`DataCheck`: too few ships, no HP, ships with big
 ## gaps) get a warning badge naming what is missing, and matches with pilots on no team once
 ## opened (`DataCheck.unassigned`) a badge naming them. Covers the viewer until a match is chosen.
+## On the website, public matches and folders (`WebLibrary.public_via`) have a green background,
+## admins make them public by right-click, and viewers (not whitelisted) can't change anything.
 
 ## The library path of the match to open.
 signal match_chosen(path: String)
@@ -23,7 +25,7 @@ signal internal_changed(path: String)
 
 ## Ids of a match row's badges (`TreeItem` buttons).
 enum Badge { MISSING_DATA, NO_TEAM }
-enum MenuItem { ADD_AUDIO, REMOVE_AUDIO, ADD_LOGS, REMOVE_LOGS, RENAME, REMOVE, NEW_FOLDER, ADD_FOLDER, ADD_MATCH, INTERNAL }
+enum MenuItem { ADD_AUDIO, REMOVE_AUDIO, ADD_LOGS, REMOVE_LOGS, RENAME, REMOVE, NEW_FOLDER, ADD_FOLDER, ADD_MATCH, INTERNAL, PUBLIC }
 
 ## Badge on matches with audio: a speaker.
 const AUDIO_ICON_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
@@ -46,6 +48,8 @@ const NO_TEAM_ICON_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" 
 </svg>"""
 ## Text colour of matches missing data.
 const WARNING_COLOR := Color(1.0, 0.8, 0.5)
+## Background of public matches and folders (web only).
+const PUBLIC_BG := Color(0.10, 0.24, 0.17)
 ## Most lines (issues or pilots) a badge's tooltip lists.
 const MAX_ISSUES_SHOWN := 8
 ## Icon of folders.
@@ -144,8 +148,17 @@ func _init() -> void:
 
 	empty_label = Label.new()
 	empty_label.text = "No matches yet — Add match… / Add folder…, or drop a *.positions.csv or a scrim folder here"
+	if not WebBackend.member():
+		empty_label.text = "No public matches yet"
 	empty_label.modulate = Color(1, 1, 1, 0.6)
 	box.add_child(empty_label)
+
+	if OS.has_feature("web"):
+		var legend := Label.new()
+		legend.text = "Green rows are public: anyone who logs in can watch them. The rest only whitelisted pilots see."
+		legend.modulate = Color(0.55, 0.85, 0.65, 0.8)
+		legend.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		box.add_child(legend)
 
 	error_label = Label.new()
 	error_label.modulate = Color(1.0, 0.45, 0.4)
@@ -209,6 +222,13 @@ func _init() -> void:
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	buttons.add_child(spacer)
+
+	# Viewers on the website can only watch.
+	if not WebBackend.member():
+		list.read_only = true
+		for c in [add_button, add_folder_button, internal_check, new_folder_button, rename_button,
+				remove_button, audio_button]:
+			c.visible = false
 
 	resume_button = Button.new()
 	resume_button.text = "Back to match"
@@ -311,6 +331,7 @@ func refresh() -> void:
 		item.set_icon(0, folder_icon)
 		item.set_metadata(0, {"kind": "folder", "rel": rel})
 		item.collapsed = collapsed.has(rel)
+		item.set_tooltip_text(0, _public_note(item))
 		parents[rel] = item
 	entries = MatchLibrary.list()
 	for e in entries:
@@ -326,6 +347,9 @@ func refresh() -> void:
 			notes.append("%d combat log%s" % [logs, "" if logs == 1 else "s"])
 		if MatchLibrary.is_internal(e.path):
 			notes.append("Internal match")
+		var public := _public_note(item)
+		if public != "":
+			notes.append(public)
 		var flags := []
 		var missing := flag_text("Missing data:", DataCheck.issues(e.path))
 		if missing != "":
@@ -346,6 +370,21 @@ func refresh() -> void:
 	_update_buttons()
 	if OS.has_feature("web"):
 		WebLibrary.local_changed()
+
+
+## On the website: gives `item` (a match or folder) the public background if it is public, and
+## returns the note saying so ("" if private, or outside the web build).
+func _public_note(item: TreeItem) -> String:
+	if not OS.has_feature("web"):
+		return ""
+	var meta: Dictionary = item.get_metadata(0)
+	var via := WebLibrary.public_via(WebLibrary.site_path(meta))
+	if via == "":
+		return ""
+	item.set_custom_bg_color(0, PUBLIC_BG)
+	if via == WebLibrary.site_path(meta):
+		return "Public: anyone who logs in can watch"
+	return "Public through folder %s: anyone who logs in can watch" % via.trim_suffix("/")
 
 
 ## Tooltip of a badge: the first `MAX_ISSUES_SHOWN` of `items` (issues or pilots) under `title`,
@@ -625,6 +664,8 @@ func _on_empty_clicked(at: Vector2, button: int) -> void:
 ## Shows the right-click menu of the selected match or folder (of the library itself if
 ## nothing is selected) at screen position `at`.
 func open_context_menu(at: Vector2) -> void:
+	if not WebBackend.member():
+		return
 	var meta := _selected_meta()
 	context_menu.clear()
 	match meta.get("kind"):
@@ -642,6 +683,7 @@ func open_context_menu(at: Vector2) -> void:
 				MatchLibrary.is_internal(meta.path))
 			context_menu.set_item_tooltip(context_menu.get_item_index(MenuItem.INTERNAL),
 				"One team against itself: teams come only from start positions, not the season's teams")
+			_add_public_item(meta)
 			context_menu.add_separator()
 			_add_move_submenu(meta)
 			context_menu.add_item("Rename…", MenuItem.RENAME)
@@ -653,6 +695,7 @@ func open_context_menu(at: Vector2) -> void:
 			context_menu.add_item("Add combat logs…", MenuItem.ADD_LOGS)
 			context_menu.set_item_disabled(context_menu.get_item_index(MenuItem.ADD_LOGS),
 				MatchLibrary.matches_in(meta.rel).is_empty())
+			_add_public_item(meta)
 			context_menu.add_separator()
 			_add_move_submenu(meta)
 			context_menu.add_item("Rename…", MenuItem.RENAME)
@@ -663,6 +706,22 @@ func open_context_menu(at: Vector2) -> void:
 			context_menu.add_item("Add folder…", MenuItem.ADD_FOLDER)
 	context_menu.reset_size()
 	context_menu.popup(Rect2i(Vector2i(at), Vector2i.ZERO))
+
+
+## Admins on the website: adds "Public" to `context_menu` for `meta` (a match or folder), ticked
+## when it is public; when public only through a folder it is in, ticked and disabled.
+func _add_public_item(meta: Dictionary) -> void:
+	if not WebBackend.admin():
+		return
+	var own := WebLibrary.site_path(meta)
+	var via := WebLibrary.public_via(own)
+	context_menu.add_check_item("Public", MenuItem.PUBLIC)
+	var i := context_menu.get_item_index(MenuItem.PUBLIC)
+	context_menu.set_item_checked(i, via != "")
+	context_menu.set_item_disabled(i, via != "" and via != own)
+	context_menu.set_item_tooltip(i, "Public through folder %s" % via.trim_suffix("/") if via != "" and via != own
+		else "Anyone who logs in can watch it%s, not just whitelisted pilots" % (
+			", and everything put in it later" if meta.kind == "folder" else ""))
 
 
 ## Adds "Move to" to `context_menu`: the library and every folder, those `what` (a match or
@@ -692,6 +751,9 @@ func _on_context_item(id: int) -> void:
 			remove_logs_selected()
 		MenuItem.INTERNAL:
 			toggle_internal_selected()
+		MenuItem.PUBLIC:
+			var p := WebLibrary.site_path(_selected_meta())
+			WebLibrary.set_public(p, WebLibrary.public_via(p) != p)
 		MenuItem.RENAME:
 			_ask_rename()
 		MenuItem.REMOVE:

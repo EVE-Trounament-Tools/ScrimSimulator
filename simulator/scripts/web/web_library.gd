@@ -18,6 +18,12 @@ extends RefCounted
 ## The site only lets a match's uploader (or an admin) replace or remove its files. Changes it
 ## refuses are undone here, a match (its CSV, sidecar, audio and logs, and where it was moved or
 ## renamed from) at a time, and the reason is shown in the menu.
+##
+## A viewer (not whitelisted: `WebBackend.member` false) only gets the library's public matches
+## and never sends anything: their local changes (team swaps in the viewer) stay in this browser,
+## until the site changes the same file (the site wins). Should they become a member, those local
+## changes are dropped first, so they never reach the site. Admins make matches and folders
+## public (`set_public`); the menu shows which are (`public_via`).
 
 const STATE_PATH := "user://web_library.json"
 const MARKER := "#scrimsim-remote "
@@ -41,6 +47,10 @@ static var _change_timer: Timer
 static var _quiet := false
 ## Whether the season team dbs have been checked against this build (after the first sync).
 static var _teams_checked := false
+## Site paths (match CSVs, and folders ending in "/") public on the site.
+static var _public := {}
+## Whether the last session in this browser was a viewer's (see the class description).
+static var _was_viewer := false
 
 
 ## Called once by the menu (before its first `refresh`): brings the local copy up to the library
@@ -51,11 +61,20 @@ static func attach(m: MainMenu) -> void:
 	var lib: Variant = WebBackend.boot().get("library")
 	if lib is Dictionary and lib.get("files") is Array:
 		var remote := _manifest_map(lib.files)
+		_public = remote.public
 		var local := scan_local()
-		var local_changes := _diff(_base, local)
-		var remote_changes := _diff(_base, remote.shas)
-		for p in _apply_order(remote_changes):
-			if not local_changes.has(p):
+		if _was_viewer and WebBackend.member():
+			# Newly a member: drop what was changed here as a viewer, so it is never sent.
+			for p in _apply_order(_diff(local, remote.shas)):
+				_apply(p, remote.shas.get(p), remote.sizes.get(p, 0))
+			_base = remote.shas.duplicate()
+			_was_viewer = false
+		else:
+			var local_changes := _diff(_base, local)
+			var remote_changes := _diff(_base, remote.shas)
+			for p in _apply_order(remote_changes):
+				if WebBackend.member() and local_changes.has(p):
+					continue
 				_apply(p, remote_changes[p], remote.sizes.get(p, 0))
 				_set_base(p, remote_changes[p])
 		_save_state()
@@ -113,6 +132,40 @@ static func report_watched(path: String) -> void:
 		JSON.stringify({"path": _rel(path)}), ["Content-Type: application/json"])
 
 
+## The site path of `meta` (a `LibraryTree` item's metadata): a match's CSV, or a folder with "/".
+static func site_path(meta: Dictionary) -> String:
+	return _rel(meta.path) if meta.kind == "match" else meta.rel + "/"
+
+
+## The public site path (`site_path`) that makes site path `p` public: `p` itself or the nearest
+## folder it is in; "" if it is private.
+static func public_via(p: String) -> String:
+	while p != "":
+		if _public.has(p):
+			return p
+		p = p.trim_suffix("/").get_base_dir()
+		p = p + "/" if p != "" else ""
+	return ""
+
+
+## Admins: makes site path `p` (`site_path`) public or private on the site.
+static func set_public(p: String, on: bool) -> void:
+	var r := await WebBackend.request(menu, HTTPClient.METHOD_POST, "/api/library/visibility",
+		JSON.stringify({"path": p, "public": on}), ["Content-Type: application/json"])
+	if not r.ok:
+		var why: String = "it isn't on the site yet — try again in a moment" if r.code == 404 else (
+			str(r.json.error) if r.json is Dictionary and r.json.has("error") else "HTTP %d" % r.code)
+		menu.show_error("Couldn't make %s %s: %s" % [p.trim_suffix("/").get_file(), "public" if on else "private", why])
+		return
+	if on:
+		_public[p] = true
+	else:
+		_public.erase(p)
+	_quiet = true
+	menu.refresh()
+	_quiet = false
+
+
 ## Downloads library file `abs` if it is still a placeholder. False if it couldn't.
 static func fetch_file(abs: String) -> bool:
 	if not _is_marker(abs):
@@ -157,19 +210,21 @@ static func _sync_once() -> String:
 	var local := scan_local()
 	var local_changes := _diff(_base, local)
 	var remote_changes := _diff(_base, remote.shas)
-	var touched := false
+	var touched: bool = remote.public != _public
+	_public = remote.public
+	var member := WebBackend.member()
 
-	# Site -> here, where not changed here too.
+	# Site -> here, where not changed here too (for viewers, the site wins).
 	for p in _apply_order(remote_changes):
-		if local_changes.has(p):
+		if member and local_changes.has(p):
 			continue
 		_apply(p, remote_changes[p], remote.sizes.get(p, 0))
 		_set_base(p, remote_changes[p])
 		touched = true
 
-	# Here -> site.
+	# Here -> site (not for viewers: their changes stay here).
 	var ops := []
-	for p in local_changes:
+	for p in (local_changes if member else {}):
 		var mine: Variant = local_changes[p]
 		var theirs: Variant = remote.shas.get(p)
 		if mine == theirs:
@@ -400,15 +455,18 @@ static func _rel(abs: String) -> String:
 
 # --- manifests ---------------------------------------------------------------------------
 
-## The site's file rows as { shas: path -> sha, sizes: path -> size }.
+## The site's file rows as { shas: path -> sha, sizes: path -> size, public: public path -> true }.
 static func _manifest_map(rows: Array) -> Dictionary:
 	var shas := {}
 	var sizes := {}
+	var public := {}
 	for row in rows:
 		if row is Dictionary and row.has("path"):
 			shas[str(row.path)] = str(row.get("sha", ""))
 			sizes[str(row.path)] = int(row.get("size", 0))
-	return {"shas": shas, "sizes": sizes}
+			if int(row.get("public", 0)) != 0:
+				public[str(row.path)] = true
+	return {"shas": shas, "sizes": sizes, "public": public}
 
 
 ## Paths whose value differs from `from` to `to`: path -> its value in `to` (null if gone).
@@ -494,6 +552,7 @@ static func _load_state() -> void:
 	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(STATE_PATH))
 	if parsed is Dictionary:
 		_base = parsed.get("base", {})
+		_was_viewer = parsed.get("member", true) == false
 		_hashes = parsed.get("hashes", {})
 		for p in _hashes:
 			_hashes[p] = [int(_hashes[p][0]), int(_hashes[p][1]), str(_hashes[p][2])]
@@ -504,4 +563,4 @@ static func _save_state() -> void:
 	if f == null:
 		push_error("Cannot save %s: %s" % [STATE_PATH, error_string(FileAccess.get_open_error())])
 		return
-	f.store_string(JSON.stringify({"base": _base, "hashes": _hashes}))
+	f.store_string(JSON.stringify({"base": _base, "hashes": _hashes, "member": WebBackend.member() and not _was_viewer}))

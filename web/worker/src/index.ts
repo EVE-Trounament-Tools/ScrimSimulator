@@ -1,27 +1,28 @@
-// Scrim Simulator website. Every route but the login flow needs a session of an allowed
-// character (see auth.ts). Layout:
+// Scrim Simulator website. Every route but the login flow needs a session (see auth.ts); members
+// see and change the whole library, viewers only see its public part. Layout:
 //   /auth/*               EVE SSO login, logout (and /auth/dev for local development)
 //   /admin                whitelist management (admins only)
-//   /api/*                shared match library, blobs, per-character settings (library.ts),
-//                         match-open reports (activity.ts)
+//   /api/*                shared match library, blobs, per-character settings, match visibility
+//                         (library.ts), match-open reports (activity.ts)
 //   /assets/*             server-side SDE / ship model / icon mirror (R2 assets/*)
 //   / and /<file>         the Godot web build named by kv current_build (R2 builds/<tag>/*)
 
 import { prune, record, watched } from "./activity";
 import { adminPage, adminPost } from "./admin";
-import { SESSION_COOKIE, callback, currentUser, devLoginAllowed, login, logout, startSession } from "./auth";
+import { callback, currentUser, devLoginAllowed, login, logout, startSession } from "./auth";
 import {
   commit,
   commitResponse,
   getBlob,
   getSettings,
-  manifest,
   missingBlobs,
   putBlob,
   putSettings,
+  setVisibility,
+  visibleManifest,
 } from "./library";
 import { errorPage, loginPage, noBuildPage } from "./pages";
-import { Env, User, cookie, escapeHtml, json, redirect, sameOrigin, scriptJson, withSecurity } from "./util";
+import { Env, User, escapeHtml, json, redirect, sameOrigin, scriptJson, withSecurity } from "./util";
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
@@ -60,11 +61,6 @@ export async function route(req: Request, env: Env): Promise<Response> {
   }
 
   const user = await currentUser(req, env);
-  if (user === "denied") {
-    const res = errorPage("Your character is no longer on this site's whitelist.", 403);
-    res.headers.append("Set-Cookie", cookie(SESSION_COOKIE, "", 0));
-    return res;
-  }
   if (user === null) {
     if (path.startsWith("/api/") || path.startsWith("/assets/")) return json({ error: "not logged in" }, 401);
     if (path === "/") return loginPage(devLoginAllowed(req, env));
@@ -87,8 +83,23 @@ export async function route(req: Request, env: Env): Promise<Response> {
 
 async function api(req: Request, env: Env, user: User, sub: string): Promise<Response> {
   const m = req.method;
-  if (sub === "me" && m === "GET") return json({ id: user.id, name: user.name, admin: user.admin });
-  if (sub === "library" && m === "GET") return json(await manifest(env));
+  if (sub === "me" && m === "GET") return json({ id: user.id, name: user.name, admin: user.admin, member: user.member });
+  if (sub === "library" && m === "GET") return json(await visibleManifest(env, user));
+  const blob = /^blobs\/([0-9a-f]{64})$/.exec(sub);
+  if (blob && m === "GET") {
+    if (!user.member && !(await visibleManifest(env, user)).files.some((f) => f.sha === blob[1])) {
+      return json({ error: "not found" }, 404);
+    }
+    return getBlob(env, blob[1]);
+  }
+  if (sub === "library/visibility" && m === "POST") {
+    if (!user.admin) return json({ error: "only admins can make matches public or private" }, 403);
+    const body = (await req.json().catch(() => null)) as { path?: unknown; public?: unknown } | null;
+    return setVisibility(env, user, body?.path, body?.public);
+  }
+  if (!user.member && (sub === "library/commit" || sub.startsWith("blobs/"))) {
+    return json({ error: "only whitelisted pilots can change the library" }, 403);
+  }
   if (sub === "library/commit" && m === "POST") {
     const body = (await req.json().catch(() => null)) as { ops?: unknown } | null;
     return commitResponse(await commit(env, user, body?.ops));
@@ -97,8 +108,6 @@ async function api(req: Request, env: Env, user: User, sub: string): Promise<Res
     const body = (await req.json().catch(() => null)) as { shas?: unknown } | null;
     return missingBlobs(env, body?.shas);
   }
-  const blob = /^blobs\/([0-9a-f]{64})$/.exec(sub);
-  if (blob && m === "GET") return getBlob(env, blob[1]);
   if (blob && m === "PUT") return putBlob(req, env, blob[1]);
   if (sub === "settings" && m === "GET") {
     const body = await getSettings(env, user);
@@ -166,8 +175,9 @@ async function build(req: Request, env: Env, user: User, file: string): Promise<
     build: tag,
     character: { id: user.id, name: user.name },
     admin: user.admin,
+    member: user.member,
     settings: await getSettings(env, user),
-    library: await manifest(env),
+    library: await visibleManifest(env, user),
   };
   const bar = `<div id="scrim-user" style="position:fixed;right:6px;bottom:4px;z-index:10;font:11px system-ui,sans-serif;color:#aab;opacity:.75">
 ${escapeHtml(user.name)}${user.admin ? ' · <a href="/admin" style="color:#8fc3ff">admin</a>' : ""} · <a href="/auth/logout" style="color:#8fc3ff">log out</a></div>`;

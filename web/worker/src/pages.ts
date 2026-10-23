@@ -17,8 +17,8 @@ main{max-width:440px;padding:24px;text-align:center}h1{font-weight:500}a{color:#
 export function loginPage(devLogin: boolean): Response {
   return page(
     "Scrim Simulator",
-    `<h1>Scrim Simulator</h1><p>Replay viewer for EVE Online scrims. Access is limited to whitelisted
-characters and alliances.</p><a class="btn" href="/auth/login">Log in with EVE Online</a>
+    `<h1>Scrim Simulator</h1><p>Replay viewer for EVE Online scrims. Any pilot can log in to watch the
+public matches; whitelisted characters and alliances see and add the rest.</p><a class="btn" href="/auth/login">Log in with EVE Online</a>
 ${devLogin ? '<p><a href="/auth/dev">Development login</a></p>' : ""}`,
   );
 }

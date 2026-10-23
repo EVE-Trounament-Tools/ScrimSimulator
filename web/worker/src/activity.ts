@@ -3,6 +3,7 @@
 // build reports a match open itself (WebLibrary.report_watched): blobs are cached forever and
 // mirrored locally, so re-opening a match never reaches the server otherwise.
 
+import { visibleManifest } from "./library";
 import { Env, User, json } from "./util";
 
 const KEEP_DAYS = 90;
@@ -23,8 +24,7 @@ export async function watched(req: Request, env: Env, user: User): Promise<Respo
   const body = (await req.json().catch(() => null)) as { path?: unknown } | null;
   const path = body?.path;
   if (typeof path !== "string" || !path.toLowerCase().endsWith(".csv")) return json({ error: "path must be a match CSV" }, 400);
-  const row = await env.DB.prepare("SELECT 1 FROM files WHERE path = ?").bind(path).first();
-  if (row === null) return json({ error: "no such match" }, 400);
+  if (!(await visibleManifest(env, user)).files.some((f) => f.path === path)) return json({ error: "no such match" }, 400);
   await record(env, user, path);
   return json({ ok: true });
 }

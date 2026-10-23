@@ -8,6 +8,9 @@ extends Tree
 ## `what` (an item's metadata) was dropped onto folder `folder`.
 signal dropped(what: Dictionary, folder: String)
 
+## Set: nothing can be dragged (a website viewer, who can't change the library).
+var read_only := false
+
 
 func _init() -> void:
 	hide_root = true
@@ -57,7 +60,7 @@ func drop_folder(at: Vector2, what: Variant) -> Variant:
 
 func _get_drag_data(at: Vector2) -> Variant:
 	var item := get_item_at_position(at)
-	if item == null:
+	if item == null or read_only:
 		return null
 	var preview := Label.new()
 	preview.text = item.get_text(0)

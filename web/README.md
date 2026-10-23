@@ -3,11 +3,20 @@
 The simulator's Godot web build, hosted on Cloudflare's free tier: one Worker, a D1 database
 and an R2 bucket.
 
-- **Login** goes through EVE SSO and needs no scopes. Only whitelisted characters, members of
-  whitelisted alliances and admins get in. Affiliation is re-checked daily.
-- **Shared match library.** Everything anyone uploads (match CSVs, audio, gamelogs, team edits)
-  is kept on the site and visible to every allowed user. Only a match's uploader or an admin can
-  rename, move, replace or remove it. Admins can download any folder, or the whole library, as a
+- **Login** goes through EVE SSO and needs no scopes. Any character can log in. Whitelisted
+  characters, members of whitelisted alliances and admins are *members*. Everyone else is a
+  *viewer*. Membership is looked up on every request, and affiliation is re-checked daily.
+- **Shared match library.** Everything members upload (match CSVs, audio, gamelogs, team edits)
+  is kept on the site and visible to every member. Only members can upload or change anything.
+  Only a match's uploader or an admin can rename, move, replace or remove it.
+- **Public matches.** Everything starts private. An admin can make a match or a folder public
+  by right-clicking it in the match list. Public rows have a green background. Viewers see only
+  public matches and read-only, with no edit buttons. Anything a viewer changes in the viewer
+  (team swaps, names) stays in their browser. A public folder makes everything in it public,
+  including matches uploaded or moved into it later. Matches and folders keep their flag when
+  moved or renamed, except an empty folder, which starts private again. A season's team db is
+  only shown to viewers when its folder is public. Otherwise their browser builds one from the
+  public matches. Admins can download any folder, or the whole library, as a
   zip at `/admin`.
 - **Basic usage tracking.** Each day's page loads and match opens are counted per character
   (one small row per character, day and match) and shown to admins at `/admin`. Counts older
@@ -28,7 +37,8 @@ lives in `simulator/scripts/web/`. Each existing script reaches it only through 
 browser ──> Worker (web/worker, one origin)
              /auth/*    EVE SSO login, logout
              /admin     whitelist, usage, folder downloads (admins: ADMIN_CHAR_IDS)
-             /api/*     library manifest + commits, blobs, settings      D1 + R2 blobs/<sha>
+             /api/*     library manifest + commits, blobs, settings,     D1 + R2 blobs/<sha>
+                        match visibility (admins)
              /assets/*  ship_sizes.json, icons.zip, gallery/…, types/…   R2 assets/
              /, /<f>    Godot web export of kv current_build             R2 builds/<tag>/
 ```
@@ -94,6 +104,8 @@ on everything, and the browser only ever talks to this one origin.
 6. **Deploy.** Push a version tag on master (`git tag v1.1.0 && git push origin v1.1.0`), or run
    **deploy-web** by hand.
 7. **Whitelist.** Log in as an admin character and add characters and alliances at `/admin`.
+   The whitelist decides who sees private matches and may upload. Anyone else who logs in sees
+   only the public ones.
 
 ## Local development
 
@@ -136,3 +148,6 @@ capped there (`MAX_UPLOAD_BYTES`). Watch R2 storage if a lot of audio piles up.
 
 Usage tracking costs one D1 write per page load or match open, well inside the free tier's
 100k writes a day.
+
+Since any EVE character can log in, viewers also load the build and the ship models of the
+public matches they open. Their requests count against the same daily limits.

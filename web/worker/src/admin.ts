@@ -1,5 +1,6 @@
-// /admin: who may log in. Admins (ADMIN_CHAR_IDS) add or remove whitelisted characters and
-// alliances by name or ID; names are resolved through ESI. Admins can also download any library
+// /admin: who is a member (sees private matches and may change the library; anyone else who
+// logs in only views public matches). Admins (ADMIN_CHAR_IDS) add or remove whitelisted
+// characters and alliances by name or ID; names are resolved through ESI. Admins can also download any library
 // folder as a zip, which the page builds in the browser from the blobs (a Worker has too little
 // CPU time to checksum audio files).
 
@@ -56,7 +57,7 @@ ${message ? `<p class="msg">${escapeHtml(message)}</p>` : ""}
 <select name="kind"><option value="character">Character</option><option value="alliance">Alliance</option></select>
 <input name="who" placeholder="Exact name or ID" required size="32"> <button>Add</button></form>
 <table><tr><th>Kind</th><th>Name</th><th>ID</th><th>Added</th><th></th></tr>${rows ||
-    '<tr><td colspan="5">Nobody yet: only admins can log in.</td></tr>'}</table>
+    '<tr><td colspan="5">Nobody yet: only admins see private matches and change the library.</td></tr>'}</table>
 <h1>Library</h1>
 <table><tr><th>Folder</th><th>Matches</th><th>Size</th><th></th></tr>${lib}</table>
 <h1>Activity (last ${act.days} days)</h1>
@@ -208,9 +209,8 @@ export async function adminPost(req: Request, env: Env, user: User, action: stri
   if (kind !== "character" && kind !== "alliance") return adminPage(env, user, "Pick character or alliance.");
   if (action === "remove") {
     const id = parseInt(String(form.get("id") ?? ""), 10);
+    // Membership is looked up on every request: they are viewers from their next one.
     await env.DB.prepare("DELETE FROM whitelist WHERE kind = ? AND id = ?").bind(kind, id).run();
-    // Their sessions are dropped at the next affiliation re-check; drop characters' right away.
-    if (kind === "character") await env.DB.prepare("DELETE FROM sessions WHERE char_id = ?").bind(id).run();
     await audit(env, user, "whitelist remove", { kind, id });
     return redirect("/admin");
   }

@@ -1,7 +1,9 @@
 // EVE SSO login (OAuth2 authorization code flow, no scopes: only the character's identity is
-// needed) and sessions. Access needs a whitelisted character, membership of a whitelisted
-// alliance, or an admin character (ADMIN_CHAR_IDS); affiliation is re-checked daily, so a pilot
-// who leaves the alliance loses access.
+// needed) and sessions. Any character can log in, but only members (a whitelisted character, a
+// member of a whitelisted alliance, or an admin character: ADMIN_CHAR_IDS) see private matches
+// and change the library; everyone else is a viewer of the public matches. Membership is looked
+// up on every request and the alliance re-checked daily, so a pilot who leaves the alliance or
+// the whitelist becomes a viewer.
 
 import {
   Env,
@@ -90,15 +92,12 @@ export async function callback(req: Request, env: Env): Promise<CallbackResult> 
   return startSession(env, id, name);
 }
 
-/** Checks `id` against the whitelist and, if allowed, makes a session for it. `known` skips the
- * ESI affiliation lookup (the development login's made-up character has none). */
+/** Makes a session for character `id`. `known` skips the ESI affiliation lookup (the development
+ * login's made-up character has none). */
 export async function startSession(env: Env, id: number, name: string, known?: Affiliation): Promise<CallbackResult> {
   const aff = known ?? (await affiliation(id));
   if (aff === null) {
     return { ok: false, status: 502, message: "Couldn't look up your alliance on ESI. Please try again." };
-  }
-  if (!(await allowed(env, id, aff.allianceId))) {
-    return { ok: false, status: 403, message: `${name} isn't on this site's whitelist.` };
   }
   const sid = randomToken(32);
   const t = now();
@@ -110,7 +109,7 @@ export async function startSession(env: Env, id: number, name: string, known?: A
   return {
     ok: true,
     setCookie: cookie(SESSION_COOKIE, sid, SESSION_TTL),
-    user: { id, name, allianceId: aff.allianceId, admin: adminIds(env).has(id) },
+    user: { id, name, allianceId: aff.allianceId, admin: adminIds(env).has(id), member: await isMember(env, id, aff.allianceId) },
   };
 }
 
@@ -129,9 +128,8 @@ export function devLoginAllowed(req: Request, env: Env): boolean {
 
 // --- sessions ----------------------------------------------------------------------------
 
-/** The request's logged-in user: null when there is no valid session, "denied" when the
- * session's character is no longer allowed (the session is then deleted). */
-export async function currentUser(req: Request, env: Env): Promise<User | null | "denied"> {
+/** The request's logged-in user, or null when there is no valid session. */
+export async function currentUser(req: Request, env: Env): Promise<User | null> {
   const sid = getCookie(req, SESSION_COOKIE);
   if (!sid) return null;
   const hash = await sha256Hex(sid);
@@ -148,19 +146,22 @@ export async function currentUser(req: Request, env: Env): Promise<User | null |
     // ESI down: keep the session on its last known affiliation until it next succeeds.
     if (aff !== null) {
       allianceId = aff.allianceId;
-      if (!(await allowed(env, row.char_id, allianceId))) {
-        await env.DB.prepare("DELETE FROM sessions WHERE char_id = ?").bind(row.char_id).run();
-        return "denied";
-      }
       await env.DB.prepare("UPDATE sessions SET alliance_id = ?, checked_at = ? WHERE id_hash = ?")
         .bind(allianceId, t, hash)
         .run();
     }
   }
-  return { id: row.char_id, name: row.char_name, allianceId, admin: adminIds(env).has(row.char_id) };
+  return {
+    id: row.char_id,
+    name: row.char_name,
+    allianceId,
+    admin: adminIds(env).has(row.char_id),
+    member: await isMember(env, row.char_id, allianceId),
+  };
 }
 
-export async function allowed(env: Env, charId: number, allianceId: number | null): Promise<boolean> {
+/** Whether the character is a member: an admin, whitelisted, or in a whitelisted alliance. */
+export async function isMember(env: Env, charId: number, allianceId: number | null): Promise<boolean> {
   if (adminIds(env).has(charId)) return true;
   const row = await env.DB.prepare(
     "SELECT 1 FROM whitelist WHERE (kind = 'character' AND id = ?) OR (kind = 'alliance' AND id = ?) LIMIT 1",

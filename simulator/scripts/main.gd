@@ -2625,6 +2625,13 @@ func _edit_team_db(edit: Callable) -> void:
 ## joins it as a scrim folder (`MainMenu.add_folder`); a dropped audio file becomes the audio of
 ## the selected match (menu) or the open library match.
 func _on_files_dropped(files: PackedStringArray) -> void:
+	if not WebBackend.member():
+		var why := "Only whitelisted pilots can add matches, audio or combat logs"
+		if menu.visible:
+			menu.show_error(why)
+		else:
+			file_label.text = why
+		return
 	for f in files:
 		if DirAccess.dir_exists_absolute(f):
 			_show_menu()

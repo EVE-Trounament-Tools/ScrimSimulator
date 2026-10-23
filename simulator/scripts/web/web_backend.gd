@@ -1,8 +1,9 @@
 class_name WebBackend
 extends RefCounted
 ## Web build only (`OS.has_feature("web")`): talks to the site the page was served from
-## (web/worker). The page is only served to a logged-in, whitelisted character, and every
-## request here is same-origin, so the session cookie goes along by itself.
+## (web/worker). The page is only served to a logged-in character, and every request here is
+## same-origin, so the session cookie goes along by itself. Whitelisted characters are members
+## (`member`); anyone else only views the library's public matches.
 ##
 ## The desktop app never calls into this; its scripts only reach the web classes behind an
 ## `OS.has_feature("web")` check.
@@ -20,8 +21,8 @@ static var _origin := ""
 
 
 ## What the site put in the page for this session (`window.scrimBoot`): `{ build, character:
-## { id, name }, admin, settings (settings.cfg text or null), library: { version, files } }`.
-## {} outside the web build.
+## { id, name }, admin, member, settings (settings.cfg text or null), library: { version, files }
+## }`. {} outside the web build.
 static func boot() -> Dictionary:
 	if _boot == null:
 		_boot = {}
@@ -31,6 +32,18 @@ static func boot() -> Dictionary:
 			if parsed is Dictionary:
 				_boot = parsed
 	return _boot
+
+
+## Whether the user may change the library (and sees its private matches): always outside the
+## web build.
+static func member() -> bool:
+	return not OS.has_feature("web") or bool(boot().get("member", false))
+
+
+## Whether the user is a site admin (makes matches public or private). Outside the web build there
+## is nothing to make public, so false there.
+static func admin() -> bool:
+	return OS.has_feature("web") and bool(boot().get("admin", false))
 
 
 ## "https://host" the page was served from.
