@@ -21,9 +21,7 @@ const ICON_PX := 20.0
 const MJU_RADIUS_KM := 1.0
 ## Below this speed (m/s) a model keeps its last heading.
 const MIN_HEADING_SPEED := 5.0
-## With smooth motion, heading is the average velocity over this many seconds either side of
-## now (evens out tracking noise), and models turn toward it with this time constant (match s).
-const HEADING_WINDOW_S := 2.0
+## With smooth motion, models turn toward their heading with this time constant (match s).
 const TURN_TIME_S := 0.6
 ## A playback step longer than this (a seek) snaps models to their heading instead of turning.
 const MAX_TURN_STEP_S := 2.0
@@ -972,14 +970,11 @@ func _add_ring(lines: ImmediateMesh, centre: Vector3, radius: float, fraction: f
 
 
 ## Keeps `pilot`'s `mjd_dir` (its last known heading) up to date: the direction of its velocity
-## over the last `HEADING_WINDOW_S`, never looking ahead (which would give away where a jump
-## lands); left as it was while the ship is (nearly) stopped.
+## (`MatchData.velocity`), never looking ahead (which would give away where a jump lands); left as
+## it was while the ship is (nearly) stopped. A spooling ship can't steer, so the fit settles
+## along its course as the spool goes on.
 func _track_mjd_heading(pilot: String) -> void:
-	var prev := data.sample(pilot, time - HEADING_WINDOW_S)
-	var now := data.sample(pilot, time)
-	if prev.is_empty() or now.is_empty() or now.t <= prev.t:
-		return
-	var v: Vector3 = (now.pos - prev.pos) / (now.t - prev.t)
+	var v := data.velocity(pilot, time)
 	if v.length() >= MIN_HEADING_SPEED:
 		ships[pilot].mjd_dir = v.normalized()
 
@@ -1096,8 +1091,8 @@ func _refresh_visual(ship: Dictionary) -> void:
 	_set_icon(ship.icon, tex, Color(color, maxf(color.a, 0.7)))
 
 
-## Turns model ships to face along their movement. Smooth motion averages the velocity over
-## `HEADING_WINDOW_S` either side and eases the turn; otherwise half a second of track, snapped.
+## Turns model ships to face along their movement (`_velocity`). Smooth motion eases the turn;
+## otherwise it snaps.
 func _face_heading(ship: Dictionary, pilot: String) -> void:
 	if ship.model_id == 0:
 		return
@@ -1117,18 +1112,21 @@ func _face_heading(ship: Dictionary, pilot: String) -> void:
 	ship.visual.basis = Basis(ship.heading)
 
 
-## `pilot`'s velocity (m/s) now, from its track: averaged over `HEADING_WINDOW_S` either side with
-## smooth motion, else over the last half second. ZERO when it can't be told.
+## `pilot`'s velocity (m/s) now, from its track. With smooth motion, a straight line fitted either
+## side of now (`MatchData.velocity`), as fast as the overview speed when the match has real
+## speeds; otherwise over the last half second. ZERO when it can't be told.
 func _velocity(pilot: String) -> Vector3:
-	var window := HEADING_WINDOW_S if smooth_on else 0.5
-	var prev := data.sample(pilot, time - window)
-	var next := data.sample(pilot, time + window) if smooth_on else {}
+	if smooth_on:
+		var v := data.velocity(pilot, time, true)
+		var speed: float = data.sample(pilot, time).get("speed", NAN)
+		if data.has_speed and not is_nan(speed) and v != Vector3.ZERO:
+			return v.normalized() * speed
+		return v
+	var prev := data.sample(pilot, time - 0.5)
 	var now := data.sample(pilot, time)
-	var a: Dictionary = prev if not prev.is_empty() else now
-	var b: Dictionary = next if not next.is_empty() else now
-	if a.is_empty() or b.is_empty() or b.t <= a.t:
+	if prev.is_empty() or now.is_empty() or now.t <= prev.t:
 		return Vector3.ZERO
-	return (b.pos - a.pos) / (b.t - a.t)
+	return (now.pos - prev.pos) / (now.t - prev.t)
 
 
 ## Scene units from the node's centre to just above an `ICON_PX` icon at the camera's distance.
