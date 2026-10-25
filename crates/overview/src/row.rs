@@ -25,18 +25,26 @@ pub fn read_rows(img: &RgbImage, layout: &Layout, font: &Font) -> Vec<RowReading
 /// [`read_rows`], but with `keep_blank_names` a blank Name cell only ends the list when the
 /// row's Distance cell is unreadable too: a name hidden under something drawn over the overview
 /// (a hover tooltip) still has a row under it, which `overview::recover` can name from its slot.
+/// A name under the tooltip's dim text, which reads as faded ink, is kept the same way, blank.
 pub fn read_rows_opts(img: &RgbImage, layout: &Layout, font: &Font, keep_blank_names: bool) -> Vec<RowReading> {
     let mut rows = Vec::new();
     let mut i = 0u32;
     while let Some((y, h)) = layout.row_rect(i) {
         // Checked before the Name is read: a faded row's dim name can read blank, which would
         // otherwise end the list there and lose every live row below it.
-        let span = layout.column(Column::Name);
-        if name_ink(img, span.x, y, span.w, h) == Ink::Faded {
-            i += 1;
-            continue;
+        let hidden_name = match name_cell(img, layout, y, h, keep_blank_names) {
+            NameCell::Faded => {
+                i += 1;
+                continue;
+            }
+            NameCell::Hidden => true,
+            NameCell::Live => false,
+        };
+        let mut name = read_cell(img, layout, Column::Name, y, h, font, Alphabet::Name);
+        if hidden_name {
+            name.text.clear();
+            name.chars.clear();
         }
-        let name = read_cell(img, layout, Column::Name, y, h, font, Alphabet::Name);
         let distance_r = read_cell(img, layout, Column::Distance, y, h, font, Alphabet::Numeric);
         if name.text.trim().is_empty() && !(keep_blank_names && parse_distance(&distance_r.text).ok().is_some()) {
             break;
@@ -54,6 +62,32 @@ pub fn read_rows_opts(img: &RgbImage, layout: &Layout, font: &Font, keep_blank_n
         i += 1;
     }
     rows
+}
+
+/// How a row's Name cell is to be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NameCell {
+    /// A faded row ([`Ink::Faded`]): skipped.
+    Faded,
+    /// A name under a hover tooltip, whose dim text reads as faded ink while the row's other
+    /// cells stay live: kept, nameless, for `overview::recover` (only with `keep_blank_names`).
+    Hidden,
+    Live,
+}
+
+/// Classify the Name cell of the row band `y..y+h`. A faded row is dim all the way across, so a
+/// dim Name beside a live Distance is a tooltip over the Name column, not a faded row.
+fn name_cell(img: &RgbImage, layout: &Layout, y: u32, h: u32, keep_blank_names: bool) -> NameCell {
+    let name = layout.column(Column::Name);
+    if name_ink(img, name.x, y, name.w, h) != Ink::Faded {
+        return NameCell::Live;
+    }
+    let dist = layout.column(Column::Distance);
+    if keep_blank_names && name_ink(img, dist.x, y, dist.w, h) == Ink::Live {
+        NameCell::Hidden
+    } else {
+        NameCell::Faded
+    }
 }
 
 /// A Name cell whose brightest ink stands out from its background by less than this (max
@@ -149,6 +183,46 @@ mod tests {
     #[test]
     fn a_dimmed_selected_row_is_faded() {
         assert_eq!(name_ink(&cell([40, 40, 40], [110, 110, 110]), 0, 0, 160, 30), Ink::Faded);
+    }
+
+    /// A one-row layout: Name at x 0..160, Distance at 160..320, both 30 tall.
+    fn two_column_layout() -> Layout {
+        let columns = [(Column::Name, 0), (Column::Distance, 160), (Column::Type, 320), (Column::Velocity, 480)]
+            .into_iter()
+            .map(|(c, x)| (c, crate::layout::ColSpan { x, w: 160 }))
+            .collect();
+        Layout { columns, row_height: 30, row0_y: 0, row_pitch: 30.0, list_bottom: 30 }
+    }
+
+    /// A row with the given Name and Distance cells side by side.
+    fn row(name: RgbImage, distance: RgbImage) -> RgbImage {
+        let mut img = RgbImage::new(640, 30);
+        image::imageops::replace(&mut img, &name, 0, 0);
+        image::imageops::replace(&mut img, &distance, 160, 0);
+        img
+    }
+
+    const DIM: ([u8; 3], [u8; 3]) = ([12, 12, 20], [69, 69, 69]);
+    const LIVE: ([u8; 3], [u8; 3]) = ([24, 24, 60], [235, 235, 235]);
+
+    #[test]
+    fn a_dim_name_beside_a_live_distance_is_hidden_when_recovering() {
+        let img = row(cell(DIM.0, DIM.1), cell(LIVE.0, LIVE.1));
+        let layout = two_column_layout();
+        assert_eq!(name_cell(&img, &layout, 0, 30, true), NameCell::Hidden);
+        assert_eq!(name_cell(&img, &layout, 0, 30, false), NameCell::Faded);
+    }
+
+    #[test]
+    fn a_row_dim_all_the_way_across_stays_faded() {
+        let img = row(cell(DIM.0, DIM.1), cell(DIM.0, DIM.1));
+        assert_eq!(name_cell(&img, &two_column_layout(), 0, 30, true), NameCell::Faded);
+    }
+
+    #[test]
+    fn a_live_name_is_live() {
+        let img = row(cell(LIVE.0, LIVE.1), cell(LIVE.0, LIVE.1));
+        assert_eq!(name_cell(&img, &two_column_layout(), 0, 30, true), NameCell::Live);
     }
 
     #[test]

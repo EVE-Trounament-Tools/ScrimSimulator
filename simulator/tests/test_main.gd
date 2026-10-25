@@ -2030,15 +2030,20 @@ func test_mjd_projection_holds_heading_when_stopped() -> void:
 
 
 func test_movement_vector_projects_velocity() -> void:
-	var m := _select_main()
+	var m := _main()
+	var rows := []
+	for t in 21:
+		rows.append(row(t, "blue", "Test Hull", C + X * 100 * t))
+	m.load_match(write_csv(rows))
+	m._seek(2.0)
+	m._process(0.0)
 	var ship: Dictionary = m.ships["blue"]
 	assert_false(ship.vector.visible)
 	m._open_ship_debug_menu("blue", Vector2.ZERO)
 	m.ship_debug_menu.vector_check.button_pressed = true
 	assert_true(ship.vector.visible)
 	m._process(0.0)
-	# Smooth motion: blue's 0 s -> 4 s samples either side of 2 s.
-	var v := (on_line(0, 0.4) - on_line(0, 0.5)) / 4.0
+	var v := X * 100
 	assert_almost(ship.vector_tip, v * Main.VECTOR_SECONDS * Main.M_TO_UNITS)
 	m.all_debug_menu.seconds_spin.value = 10.0
 	m._process(0.0)
