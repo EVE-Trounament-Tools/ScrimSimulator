@@ -70,6 +70,34 @@ func test_list_natural_name_order() -> void:
 	assert_eq(MatchLibrary.list().map(func(e): return e.name), ["m_1", "m_02", "M_3", "m_10"])
 
 
+## Sets library file `path`'s modified time to Unix time `unix`.
+func _touch(path: String, unix: int) -> void:
+	OS.execute("touch", ["-m", "-d", "@%d" % unix, ProjectSettings.globalize_path(path)])
+
+
+func test_list_loose_matches_newest_first_folders_in_match_order() -> void:
+	MatchLibrary.create_folder("", "f")
+	for n in ["m_2", "m_1", "m_3"]:
+		_touch(MatchLibrary.add(_file(n + ".csv", n)), 1000 + n.to_int())
+		_touch(MatchLibrary.add(_file(n + ".csv", n), "f"), 2000 - n.to_int())
+	assert_eq(MatchLibrary.list().map(func(e): return [e.folder, e.name]), [
+		["", "m_3"], ["", "m_2"], ["", "m_1"], ["f", "m_1"], ["f", "m_2"], ["f", "m_3"],
+	])
+
+
+func test_folders_newest_first() -> void:
+	MatchLibrary.create_folder("", "empty")
+	MatchLibrary.create_folder("", "old")
+	MatchLibrary.create_folder("", "new")
+	MatchLibrary.create_folder("old", "newest")
+	MatchLibrary.create_folder("old", "older")
+	_touch(MatchLibrary.add(_file("a.csv", "a"), "new"), 2000)
+	_touch(MatchLibrary.add(_file("b.csv", "b"), "old"), 1000)
+	_touch(MatchLibrary.add(_file("c.csv", "c"), "old/newest"), 3000)
+	_touch(MatchLibrary.add(_file("d.csv", "d"), "old/older"), 500)
+	assert_eq(MatchLibrary.folders(), ["old", "old/newest", "old/older", "new", "empty"])
+
+
 func test_list_ignores_other_files() -> void:
 	MatchLibrary.add(_file("m.csv", "1"))
 	var f := FileAccess.open(MatchLibrary.dir.path_join("notes.txt"), FileAccess.WRITE)
