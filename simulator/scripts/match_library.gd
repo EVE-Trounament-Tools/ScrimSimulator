@@ -18,9 +18,9 @@ const AUDIO_EXTENSIONS := ["ogg", "mp3", "wav"]
 
 
 ## `[{ path, name, modified, audio, folder }]` for every CSV in the library: the library's own
-## first, then each of `folders()` in turn, in natural name order within each (`_2` before `_10`); `name` drops the
-## `.positions.csv` / `.csv` extension, `modified` is a Unix time, `audio` whether the match has
-## an audio file and `folder` the folder it is in.
+## first, newest first, then each of `folders()` in turn, in match order within each: natural name
+## order (`_2` before `_10`); `name` drops the `.positions.csv` / `.csv` extension, `modified` is
+## a Unix time, `audio` whether the match has an audio file and `folder` the folder it is in.
 static func list() -> Array:
 	var out := []
 	if not DirAccess.dir_exists_absolute(dir):
@@ -36,23 +36,45 @@ static func list() -> Array:
 				"path": path, "name": display_name(file), "modified": FileAccess.get_modified_time(path),
 				"audio": audio_path(path) != "", "folder": folder,
 			})
-		here.sort_custom(func(a, b): return a.name.naturalnocasecmp_to(b.name) < 0)
+		if folder == "":
+			here.sort_custom(func(a, b): return a.modified > b.modified \
+					or (a.modified == b.modified and a.name.naturalnocasecmp_to(b.name) < 0))
+		else:
+			here.sort_custom(func(a, b): return a.name.naturalnocasecmp_to(b.name) < 0)
 		out.append_array(here)
 	return out
 
 
 ## Every folder inside folder `parent` (all of them for ""), at any depth, as paths relative to
-## `dir`: sorted by name, each followed by its own subfolders.
+## `dir`: newest first (by the newest match in each, at any depth; empty ones last), then by
+## name, each followed by its own subfolders.
 static func folders(parent := "") -> Array:
 	var out := []
 	var d := folder_abs(parent)
 	if not DirAccess.dir_exists_absolute(d):
 		return out
 	var names := Array(DirAccess.get_directories_at(d)).filter(func(n): return not _is_logs_dir(n))
-	names.sort_custom(func(a, b): return a.naturalnocasecmp_to(b) < 0)
+	var newest := {}
+	for n in names:
+		newest[n] = _newest_match(d.path_join(n))
+	names.sort_custom(func(a, b): return newest[a] > newest[b] \
+			or (newest[a] == newest[b] and a.naturalnocasecmp_to(b) < 0))
 	for n in names:
 		out.append(parent.path_join(n))
 		out.append_array(folders(parent.path_join(n)))
+	return out
+
+
+## Modified time of the newest match CSV in directory `d` or its folders, at any depth; -1 if
+## there are none.
+static func _newest_match(d: String) -> int:
+	var out := -1
+	for file in DirAccess.get_files_at(d):
+		if file.get_extension().to_lower() == "csv":
+			out = maxi(out, FileAccess.get_modified_time(d.path_join(file)))
+	for n in DirAccess.get_directories_at(d):
+		if not _is_logs_dir(n):
+			out = maxi(out, _newest_match(d.path_join(n)))
 	return out
 
 
