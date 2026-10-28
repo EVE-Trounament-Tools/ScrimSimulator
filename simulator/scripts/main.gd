@@ -77,8 +77,6 @@ const AUDIO_DRIFT_S := 0.15
 const AUDIO_BUS := "Match audio"
 ## Jumping to an event lands this many seconds before it, to see the lead-up.
 const EVENT_LEAD_S := 2.0
-## A micro jump's take-off -> landing line stays up this long (match s) after the jump.
-const MJD_TRAIL_S := 5.0
 ## Radius (screen px) of the spool ring drawn around a ship spooling its micro jump drive, and of
 ## the marker where it lands.
 const MJD_RING_PX := 24.0
@@ -193,8 +191,6 @@ var event_strip: EventStrip
 var mjd_on := true
 var mjd_button: Button
 var mjd_setting: CheckBox
-## { t: float, node: Node3D } per micro jump: a line from take-off to landing.
-var mjd_trails: Array = []
 var time_label: Label
 var boundary_setting: CheckBox
 var models_setting: CheckBox
@@ -649,7 +645,6 @@ func _process(delta: float) -> void:
 	_update_ships()
 	_update_vectors()
 	_update_links()
-	_update_mjd_trails()
 	_update_mjd_spool()
 	if tracked != "" and ships[tracked].node.visible:
 		camera.set_target(ships[tracked].node.position)
@@ -871,16 +866,12 @@ func _death_marker(pilot: String, death: Dictionary, color: Color) -> Node3D:
 
 # --- events ------------------------------------------------------------------
 
-## Fills the timeline strip with the match's events and draws a line for each micro jump.
+## Fills the timeline strip with the match's events.
 func _build_events() -> void:
 	var marks := []
 	for e in data.events:
 		marks.append({"t": e.t, "color": EVENT_COLORS[e.kind], "text": _event_text(e, _pilot_name(e.pilot))})
 	event_strip.set_marks(marks, data.duration)
-	mjd_trails.clear()
-	for e in data.events:
-		if e.kind == MatchData.Event.MJD:
-			mjd_trails.append({"t": e.t, "node": _mjd_trail(e)})
 
 
 ## "03:42 Pilot — Died (Venture)", with the pilot shown as `pilot_name`.
@@ -889,26 +880,6 @@ static func _event_text(e: Dictionary, pilot_name: String) -> String:
 	if e.kind == MatchData.Event.MJD:
 		what += " %.0f km" % (e.pos.distance_to(e.to_pos) * M_TO_UNITS)
 	return "%s %s — %s (%s)" % [_fmt_time(e.t), pilot_name, what, e.ship_type]
-
-
-## A line from where a micro jump took off to where it landed; hidden until shown by time.
-func _mjd_trail(e: Dictionary) -> Node3D:
-	var lines := ImmediateMesh.new()
-	lines.surface_begin(Mesh.PRIMITIVE_LINES)
-	lines.surface_add_vertex(e.pos * M_TO_UNITS)
-	lines.surface_add_vertex(e.to_pos * M_TO_UNITS)
-	lines.surface_end()
-	var mesh := MeshInstance3D.new()
-	mesh.mesh = lines
-	mesh.material_override = _material(Color(MJD_COLOR, 0.8), false)
-	mesh.visible = false
-	ships_root.add_child(mesh)
-	return mesh
-
-
-func _update_mjd_trails() -> void:
-	for trail in mjd_trails:
-		trail.node.visible = time >= trail.t and time - trail.t <= MJD_TRAIL_S
 
 
 ## Draws each micro jump drive spool-up (`mjd_on`): a ring around the ship filling over the

@@ -798,17 +798,6 @@ func test_playback_keys() -> void:
 	assert_almost(m.time, 0.0)
 
 
-func test_mjd_trail_shows_briefly_after_jump() -> void:
-	var m := _main()
-	m.load_match(_events_csv())
-	assert_eq(m.mjd_trails.size(), 1)
-	var trail: Node3D = m.mjd_trails[0].node
-	for case in [[2.5, false], [3.0, true], [7.0, true], [8.5, false]]:
-		m._seek(case[0])
-		m._process(0.0)
-		assert_eq(trail.visible, case[1], "at %s s" % case[0])
-
-
 func test_info_shows_podding() -> void:
 	var m := _main()
 	m.load_match(_events_csv())
@@ -2016,6 +2005,7 @@ func test_mjd_spool_up_graphics() -> void:
 	m._seek(21.0)
 	m._process(0.0)
 	assert_false(ship.mjd_ring.visible, "landed")
+	assert_false(ship.mjd_projection.visible, "nothing lingers after the jump")
 	assert_eq(icons.get_child_count(), 0)
 
 
