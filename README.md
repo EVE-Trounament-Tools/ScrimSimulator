@@ -56,6 +56,12 @@ Each release has two zips per platform. You only need the first to watch matches
 clients side by side, and explains how to set it up: which windows to capture, how to crop to the
 overview, and which video settings to use. Record near-lossless. The OCR needs crisp text.
 
+A recording made with the template should look like this: three overviews (A, B, C), the Local
+chat, and three 3×3 blocks of locked targets, each in its slot of `scene.json`. Names, ship types,
+sizes and chat are blacked out here.
+
+![A frame recorded with the OBS template, with scene.json's rectangles outlined](docs/media/obs-setup-example.png)
+
 Every observer's overview must be **sorted by Name** (as the layout below is), and keep the mouse
 off the observer clients while recording: a hover tooltip over the overview hides names. See
 [Overview sort](docs/eve/README.md#overview-sort) for why.

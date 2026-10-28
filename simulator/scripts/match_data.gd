@@ -35,6 +35,16 @@ const MJD_DISTANCE_M := 100000.0
 const MJD_TOLERANCE_M := 15000.0
 ## A micro jump drive spools up for 12 server ticks before the jump.
 const MJD_SPOOL_S := 12.0
+## `velocity` fits a straight line through a pilot's samples: solved positions wander by a few
+## hundred metres, which swings a heading taken over a couple of seconds by tens of degrees for a
+## slow ship. The fit spans at least `VELOCITY_MIN_WINDOW_S` (either side, looking ahead), and
+## keeps growing, up to `VELOCITY_MAX_WINDOW_S`, while the ship flew straight: its net
+## displacement is at least `STRAIGHT_RATIO` of the distance its overview speed covered, less
+## `STRAIGHT_MARGIN_M` (about twice the typical position error). A turn, a bump or a stop ends it.
+const VELOCITY_MIN_WINDOW_S := 2.0
+const VELOCITY_MAX_WINDOW_S := 15.0
+const STRAIGHT_RATIO := 0.9
+const STRAIGHT_MARGIN_M := 600.0
 const CAPSULE := "Capsule"
 ## An overview speed above this means the ship has started moving (ships waiting out the
 ## countdown read 0–1 m/s).
@@ -80,8 +90,12 @@ var deaths: Dictionary = {}
 var events: Array = []
 ## pilot name -> match times (sorted) of its micro jumps (the landing samples).
 var mjd_times: Dictionary = {}
+## pilot name -> where (metres) each of its micro jumps landed, in step with `mjd_times`.
+var mjd_landings: Dictionary = {}
 ## Whether any sample has HP.
 var has_hp := false
+## Whether the CSV's overview speeds are real: some get above `MOVE_SPEED_MPS`.
+var has_speed := false
 ## pilot name -> match times (sorted) at which an HP reading showed a hit (see `DAMAGE_MIN_DROP`).
 var damage_times: Dictionary = {}
 ## Lowercase ship type -> published hull radius in metres (from `ShipSizes`); unknown types
@@ -181,6 +195,10 @@ static func load_csv(path: String, ship_radii := {}, move_threshold_m := 0.0, ke
 	for pilot in data.tracks:
 		data.tracks[pilot].sort_custom(func(a, b): return a.t < b.t)
 	data._freeze_pods()
+	for pilot in data.tracks:
+		if data.tracks[pilot].any(func(s): return s.speed > MOVE_SPEED_MPS):
+			data.has_speed = true
+			break
 	var first_move := data._find_start(move_threshold_m)
 	data.start_time = first_move if first_move < INF and not keep_lead_in else t_min
 	data.lead_in = first_move - data.start_time if first_move < INF else 0.0
@@ -367,18 +385,13 @@ static func _parse_hp(row: PackedStringArray, cols: Array) -> Vector3:
 ## A move is an overview speed over `MOVE_SPEED_MPS` when the CSV's speeds ever get there, else
 ## a position beyond `threshold_m` from the pilot's first sample.
 func _find_start(threshold_m: float) -> float:
-	var by_speed := false
-	for pilot in tracks:
-		if tracks[pilot].any(func(s): return s.speed > MOVE_SPEED_MPS):
-			by_speed = true
-			break
 	var start := INF
 	for pilot in tracks:
 		var track: Array = tracks[pilot]
 		for i in range(1, track.size()):
 			if track[i - 1].t >= start:
 				break
-			var moved: bool = track[i].speed > MOVE_SPEED_MPS if by_speed \
+			var moved: bool = track[i].speed > MOVE_SPEED_MPS if has_speed \
 				else track[i].pos.distance_to(track[0].pos) > threshold_m
 			if moved:
 				start = track[i - 1].t
@@ -519,6 +532,7 @@ func _find_mjds() -> void:
 func _find_events() -> void:
 	events.clear()
 	mjd_times.clear()
+	mjd_landings.clear()
 	for pilot in tracks:
 		var track: Array = tracks[pilot]
 		for i in range(1, track.size()):
@@ -532,7 +546,9 @@ func _find_events() -> void:
 			if b.get("mjd", false):
 				if not mjd_times.has(pilot):
 					mjd_times[pilot] = PackedFloat64Array()
+					mjd_landings[pilot] = PackedVector3Array()
 				mjd_times[pilot].append(t)
+				mjd_landings[pilot].append(b.pos)
 				events.append({
 					"t": t, "pilot": pilot, "kind": Event.MJD, "pos": a.pos, "to_pos": b.pos,
 					"ship_type": a.ship_type,
@@ -602,6 +618,89 @@ func mjd_spool(pilot: String, t: float) -> float:
 	if i >= jumps.size() or jumps[i] - t > MJD_SPOOL_S:
 		return -1.0
 	return 1.0 - (jumps[i] - t) / MJD_SPOOL_S
+
+
+## Where (metres) `pilot`'s micro jump lands when it is spooling at match time `t` (see
+## `mjd_spool`); `Vector3.INF` when it isn't spooling.
+func mjd_landing(pilot: String, t: float) -> Vector3:
+	var jumps: PackedFloat64Array = mjd_times.get(pilot, PackedFloat64Array())
+	var i := jumps.bsearch(t, false)  # first jump after t
+	if i >= jumps.size() or jumps[i] - t > MJD_SPOOL_S:
+		return Vector3.INF
+	return mjd_landings[pilot][i]
+
+
+## `pilot`'s velocity (m/s) at match time `t`: the least-squares slope of its samples over a window
+## that grows while it flew straight (see `VELOCITY_MIN_WINDOW_S`). Only samples at or before `t`
+## count unless `ahead`, which also blends the fits either side of `t` so the result moves
+## smoothly. A window never spans a gap, a micro jump or a change of ship, and without real
+## overview speeds (`has_speed`) it stays at the minimum. ZERO when it can't be told.
+func velocity(pilot: String, t: float, ahead := false) -> Vector3:
+	var track: Array = tracks.get(pilot, [])
+	t += start_time
+	var i := track.bsearch_custom(t, func(s, v): return s.t <= v) - 1  # last sample at or before t
+	if i < 0:
+		return Vector3.ZERO
+	var v := _fit(track, i, ahead)
+	if not ahead or i + 1 >= track.size() or not _joins_previous(track, i + 1):
+		return v
+	var w: float = (t - track[i].t) / (track[i + 1].t - track[i].t)
+	return v.lerp(_fit(track, i + 1, ahead), w)
+
+
+## Least-squares velocity over the window around `track[i]` (see `velocity`), ZERO when the window
+## is a single sample.
+func _fit(track: Array, i: int, ahead: bool) -> Vector3:
+	var lo := i
+	var hi := i
+	var grew := true
+	while grew:
+		grew = false
+		if lo > 0 and _joins_previous(track, lo) and _may_widen(track, i, lo - 1, hi, lo - 1):
+			lo -= 1
+			grew = true
+		if ahead and hi + 1 < track.size() and _joins_previous(track, hi + 1) \
+				and _may_widen(track, i, lo, hi + 1, hi + 1):
+			hi += 1
+			grew = true
+	if hi == lo:
+		return Vector3.ZERO
+	var n := hi - lo + 1
+	var mean_t := 0.0
+	var mean_p := Vector3.ZERO
+	for j in range(lo, hi + 1):
+		mean_t += track[j].t / n
+		mean_p += track[j].pos / n
+	var stt := 0.0
+	var stp := Vector3.ZERO
+	for j in range(lo, hi + 1):
+		var dt: float = track[j].t - mean_t
+		stt += dt * dt
+		stp += (track[j].pos - mean_p) * dt
+	return stp / stt
+
+
+## Whether `track[i]` carries on from `track[i - 1]` in one velocity fit: not a micro jump landing,
+## not across a gap, the same ship.
+static func _joins_previous(track: Array, i: int) -> bool:
+	return not track[i].get("mjd", false) and track[i].t - track[i - 1].t <= MAX_GAP_S \
+			and track[i].ship_type == track[i - 1].ship_type
+
+
+## Whether `_fit`'s window around `track[i]` may become `track[lo..hi]` by taking in
+## `track[added]`: always `track[i]`'s neighbours and samples within `VELOCITY_MIN_WINDOW_S` of it,
+## then up to `VELOCITY_MAX_WINDOW_S` while the ship flew straight over the whole window.
+func _may_widen(track: Array, i: int, lo: int, hi: int, added: int) -> bool:
+	var reach := absf(track[added].t - track[i].t)
+	if reach <= VELOCITY_MIN_WINDOW_S or absi(added - i) == 1:
+		return true
+	if reach > VELOCITY_MAX_WINDOW_S or not has_speed:
+		return false
+	var covered := 0.0
+	for j in range(lo + 1, hi + 1):
+		covered += (track[j - 1].speed + track[j].speed) / 2.0 * (track[j].t - track[j - 1].t)
+	# A blank speed (NAN) fails this too.
+	return track[lo].pos.distance_to(track[hi].pos) >= STRAIGHT_RATIO * covered - STRAIGHT_MARGIN_M
 
 
 ## `pilot`'s remaining shield, armor and hull (0-1) at match time `t`: those of the latest sample

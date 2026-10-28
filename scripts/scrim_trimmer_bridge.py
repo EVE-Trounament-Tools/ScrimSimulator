@@ -10,7 +10,8 @@ Called by `scrim-positions --chat-log`. Uses the ScrimTrimmer submodule
     interval early; `refine_t0` then pins it to the second by OCR'ing only the
     few seconds where some matched messages must have first appeared;
   - CD / WF (GF) video seconds from `chat_log_parser.parse_chat_logs`, paired by
-    `chat_analyzer.pair_cd_wf`.
+    `pair_cd_wf` here: like ScrimTrimmer's, but a typed CD beats a bare 10..0 countdown, which
+    is often a timer call near the end of the round.
 
 Prints one JSON object on stdout; everything else goes to stderr:
 
@@ -46,14 +47,13 @@ def _import_trimmer():
         )
     sys.path.insert(0, TRIMMER_SRC)
     try:
-        import chat_analyzer
         import chat_log_parser
         import frame_extractor
         import log_matcher
         import ocr_processor
     except ImportError as e:
         sys.exit(f"{e}; install the bridge's Python deps: pip install -r scripts/requirements-trimmer.txt")
-    return chat_analyzer, chat_log_parser, frame_extractor, log_matcher, ocr_processor
+    return chat_log_parser, frame_extractor, log_matcher, ocr_processor
 
 
 def t0_datetime(t0_sec: int, log_first: datetime) -> datetime:
@@ -84,6 +84,25 @@ def spans_overlap(a: tuple, b: tuple, slack: timedelta = DATE_SLACK) -> bool:
 
 def _fmt_span(span: tuple) -> str:
     return f"{span[0]:%Y-%m-%d %H:%M}-{span[1]:%H:%M} UTC"
+
+
+def pair_cd_wf(cds: list, synthetic: list, wfs: list) -> list:
+    """(start, end) video seconds for each WF, from the CDs after the previous paired WF.
+
+    As ScrimTrimmer's `chat_analyzer.pair_cd_wf`, which takes the latest such CD, except that a
+    typed CD (`cds`) wins over a bare countdown (`synthetic`): a "10".."0" typed later in the round
+    is usually a call of the last seconds, not a restart. A bare countdown starts a round only when
+    nobody typed CD for it.
+    """
+    pairs = []
+    last = -1
+    for wf in sorted(wfs):
+        typed = [c for c in cds if last < c < wf]
+        bare = [c for c in synthetic if last < c < wf]
+        if typed or bare:
+            pairs.append((max(typed or bare), wf))
+            last = wf
+    return pairs
 
 
 # How many messages `refine_t0` tries, and how many first appearances it needs before it stops.
@@ -196,7 +215,7 @@ def main() -> None:
     p.add_argument("--verbose", "-v", action="store_true")
     args = p.parse_args()
 
-    chat_analyzer, chat_log_parser, frame_extractor, log_matcher, ocr_processor = _import_trimmer()
+    chat_log_parser, frame_extractor, log_matcher, ocr_processor = _import_trimmer()
 
     entries = [e for path in args.chat_logs for e in chat_log_parser.read_chat_log(path)]
     if not entries:
@@ -238,11 +257,14 @@ def main() -> None:
                 )
             source = "auto"
         cd, wf = chat_log_parser.parse_chat_logs(
-            args.chat_logs, t0_sec, duration,
-            tournament_mode=args.tournament, detect_countdown=args.detect_countdown,
+            args.chat_logs, t0_sec, duration, tournament_mode=args.tournament, detect_countdown=False,
         )
-        pairs = chat_analyzer.pair_cd_wf(cd, wf)
-        print(f"  t0 {t0_sec} s ({source}); CDs {cd}; WFs {wf}; pairs {pairs}")
+        synthetic = []
+        if args.detect_countdown and not args.tournament:
+            all_cd, _ = chat_log_parser.parse_chat_logs(args.chat_logs, t0_sec, duration)
+            synthetic = sorted(set(all_cd) - set(cd))
+        pairs = pair_cd_wf(cd, synthetic, wf)
+        print(f"  t0 {t0_sec} s ({source}); CDs {cd}; countdowns {synthetic}; WFs {wf}; pairs {pairs}")
 
     t0 = t0_datetime(t0_sec, log_first).astimezone(timezone.utc)
     if args.date_check and abs(t0 - recorded[0]) > T0_SLACK:

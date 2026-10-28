@@ -1987,9 +1987,8 @@ func test_mjd_spool_up_graphics() -> void:
 	assert_true(ship.mjd_ring.visible)
 	assert_true(ship.mjd_projection.visible)
 	assert_eq(ship.mjd_label.text, "jumper MJD 6 s")
-	# 100 km ahead along its current heading (+Y), not where it actually lands (+X).
-	var pos := (on_line(0, 0.5) + Vector3.UP * 1500) * Main.M_TO_UNITS
-	assert_almost(ship.mjd_land, pos + Vector3.UP * 100.0)
+	# Where it actually lands (+X), not 100 km along its current heading (+Y).
+	assert_almost(ship.mjd_land, (on_line(0, 0.5) + Vector3.UP * 2000 + X * 100000) * Main.M_TO_UNITS)
 	var icons: HBoxContainer = m.broadcast_panel.rows["jumper"].mjd
 	assert_eq(icons.get_child_count(), 1)
 	assert_eq(icons.get_child(0).tooltip_text, "Micro jump drive spooling: jumps in 6 s")
@@ -2010,7 +2009,7 @@ func test_mjd_spool_up_graphics() -> void:
 	assert_eq(icons.get_child_count(), 0)
 
 
-func test_mjd_projection_holds_heading_when_stopped() -> void:
+func test_mjd_projection_shows_landing_when_stopped() -> void:
 	var m := _main()
 	var rows := []
 	for t in 21:
@@ -2020,25 +2019,27 @@ func test_mjd_projection_holds_heading_when_stopped() -> void:
 	rows.append(row(21, "jumper", "Test Hull", on_line(0, 0.5) + Vector3.UP * 500 + X * 100000))
 	m.load_match(write_csv(rows))
 	var ship: Dictionary = m.ships["jumper"]
-	m._seek(3.0)
-	m._process(0.0)
 	m._seek(15.0)
 	m._process(0.0)
-	assert_true(ship.mjd_projection.visible, "keeps the heading it had while moving")
-	var pos := (on_line(0, 0.5) + Vector3.UP * 500) * Main.M_TO_UNITS
-	assert_almost(ship.mjd_land, pos + Vector3.UP * 100.0)
+	assert_true(ship.mjd_projection.visible)
+	assert_almost(ship.mjd_land, (on_line(0, 0.5) + Vector3.UP * 500 + X * 100000) * Main.M_TO_UNITS)
 
 
 func test_movement_vector_projects_velocity() -> void:
-	var m := _select_main()
+	var m := _main()
+	var rows := []
+	for t in 21:
+		rows.append(row(t, "blue", "Test Hull", C + X * 100 * t))
+	m.load_match(write_csv(rows))
+	m._seek(2.0)
+	m._process(0.0)
 	var ship: Dictionary = m.ships["blue"]
 	assert_false(ship.vector.visible)
 	m._open_ship_debug_menu("blue", Vector2.ZERO)
 	m.ship_debug_menu.vector_check.button_pressed = true
 	assert_true(ship.vector.visible)
 	m._process(0.0)
-	# Smooth motion: blue's 0 s -> 4 s samples either side of 2 s.
-	var v := (on_line(0, 0.4) - on_line(0, 0.5)) / 4.0
+	var v := X * 100
 	assert_almost(ship.vector_tip, v * Main.VECTOR_SECONDS * Main.M_TO_UNITS)
 	m.all_debug_menu.seconds_spin.value = 10.0
 	m._process(0.0)

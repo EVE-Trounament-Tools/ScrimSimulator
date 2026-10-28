@@ -21,7 +21,7 @@ RES = os.path.join(HERE, "..", "third_party", "ScrimTrimmer", "src", "tests", "r
 CHAT_REGION = ["0", str(312 / 800), str(192 / 1280), str(738 / 800)]
 
 sys.path.insert(0, HERE)
-from scrim_trimmer_bridge import spans_overlap, t0_datetime  # noqa: E402
+from scrim_trimmer_bridge import pair_cd_wf, spans_overlap, t0_datetime  # noqa: E402
 
 HAVE_DEPS = (
     os.path.isdir(RES)
@@ -81,6 +81,28 @@ class SpansOverlap(unittest.TestCase):
     def test_another_day(self):
         self.assertFalse(spans_overlap(self.span(4, 12, 15), self.span(8, 12, 15)))
         self.assertFalse(spans_overlap(self.span(8, 12, 15), self.span(4, 12, 15)))
+
+
+class PairCdWf(unittest.TestCase):
+    def test_typed_cd_beats_later_countdown(self):
+        # CD, then the last 10 s counted down before the WF.
+        self.assertEqual(pair_cd_wf([100], [690], [702]), [(100, 702)])
+
+    def test_countdown_without_cd(self):
+        self.assertEqual(pair_cd_wf([], [100], [400]), [(100, 400)])
+
+    def test_latest_typed_cd(self):
+        self.assertEqual(pair_cd_wf([100, 160], [], [400]), [(160, 400)])
+
+    def test_rounds(self):
+        self.assertEqual(
+            pair_cd_wf([100, 900], [500, 1300], [520, 1310, 1700]),
+            [(100, 520), (900, 1310)],
+        )
+        self.assertEqual(pair_cd_wf([900], [100], [400, 1200]), [(100, 400), (900, 1200)])
+
+    def test_wf_without_cd(self):
+        self.assertEqual(pair_cd_wf([500], [], [400, 800]), [(500, 800)])
 
 
 @unittest.skipUnless(HAVE_DEPS, "needs the ScrimTrimmer submodule, tesseract, ffprobe and Python deps")
