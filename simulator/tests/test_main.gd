@@ -76,6 +76,16 @@ func test_fmt_speed() -> void:
 	assert_eq(Main._fmt_speed(2450.0), "2.5 km/s")
 
 
+func test_link_offsets() -> void:
+	var ab := {"kind": "shooting", "source": "A", "target": "B"}
+	assert_eq(Main._link_offsets([ab]), [0.0], "a lone line runs through the icon centres")
+	assert_eq(Main._link_offsets([ab, {"kind": "tackle", "source": "A", "target": "B"}]), [-0.5, 0.5])
+	assert_eq(Main._link_offsets([ab, {"kind": "shooting", "source": "B", "target": "A"}]), [-0.5, 0.5],
+		"lines both ways share the pair's slots")
+	assert_eq(Main._link_offsets([ab, {"kind": "shooting", "source": "A", "target": "C"}]), [0.0, 0.0],
+		"other pairs don't shift it")
+
+
 func test_material() -> void:
 	var m := Main._material(Color(1, 0, 0, 0.5), false)
 	assert_eq(m.transparency, BaseMaterial3D.TRANSPARENCY_ALPHA)
