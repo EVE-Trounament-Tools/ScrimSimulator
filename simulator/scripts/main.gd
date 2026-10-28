@@ -21,9 +21,7 @@ const ICON_PX := 20.0
 const MJU_RADIUS_KM := 1.0
 ## Below this speed (m/s) a model keeps its last heading.
 const MIN_HEADING_SPEED := 5.0
-## With smooth motion, heading is the average velocity over this many seconds either side of
-## now (evens out tracking noise), and models turn toward it with this time constant (match s).
-const HEADING_WINDOW_S := 2.0
+## With smooth motion, models turn toward their heading with this time constant (match s).
 const TURN_TIME_S := 0.6
 ## A playback step longer than this (a seek) snaps models to their heading instead of turning.
 const MAX_TURN_STEP_S := 2.0
@@ -82,7 +80,7 @@ const EVENT_LEAD_S := 2.0
 ## A micro jump's take-off -> landing line stays up this long (match s) after the jump.
 const MJD_TRAIL_S := 5.0
 ## Radius (screen px) of the spool ring drawn around a ship spooling its micro jump drive, and of
-## the marker at its projected landing.
+## the marker where it lands.
 const MJD_RING_PX := 24.0
 const MJD_RING_SEGMENTS := 48
 ## Jump range drawn around the corner and centre beacons (debug menu).
@@ -149,13 +147,13 @@ var vector_seconds := VECTOR_SECONDS
 
 ## pilot -> { node, visual, model_id, icon, select_icon, label, ship_type, radius, dead, color, tint, death_t,
 ## death_marker, heading, heading_t, vector, vector_tip, spheres, mjd_ring, mjd_projection,
-## mjd_lines, mjd_label, mjd_dir, mjd_land }; `heading` is the model's
+## mjd_lines, mjd_label, mjd_land }; `heading` is the model's
 ## rotation as of match time `heading_t`; `radius` is the true hull radius in scene units (0 if
 ## unknown), `visual` the sphere or model under `node`, `model_id` the type ID it shows
 ## (0 = sphere), `tint` the colour the ship is currently drawn in; `vector` the debug movement
 ## line (ending at `vector_tip`, relative to the ship) and `spheres` the node holding its debug
 ## range spheres; `mjd_ring` and `mjd_projection` (lines `mjd_lines` and label `mjd_label`, in
-## world space) draw its micro jump drive spool-up, aimed along `mjd_dir` to `mjd_land`.
+## world space) draw its micro jump drive spool-up, aimed at its landing `mjd_land`.
 var ships := {}
 var ships_root: Node3D
 var boundary: Node3D
@@ -771,7 +769,7 @@ func _add_ship(pilot: String) -> void:
 		"death_t": INF, "death_marker": null, "heading": Quaternion.IDENTITY, "heading_t": -INF,
 		"vector": vector, "vector_tip": Vector3.ZERO, "spheres": spheres,
 		"mjd_ring": mjd_ring, "mjd_projection": mjd_projection, "mjd_lines": mjd_lines,
-		"mjd_label": mjd_label, "mjd_dir": Vector3.ZERO, "mjd_land": Vector3.ZERO,
+		"mjd_label": mjd_label, "mjd_land": Vector3.ZERO,
 	}
 	_apply_debug(pilot)
 	if data.deaths.has(pilot):
@@ -914,15 +912,14 @@ func _update_mjd_trails() -> void:
 
 
 ## Draws each micro jump drive spool-up (`mjd_on`): a ring around the ship filling over the
-## `MatchData.MJD_SPOOL_S`, and an arrow to where it would land if it jumped now, 100 km along its
-## current heading (`_mjd_heading`), labelled with the seconds left.
+## `MatchData.MJD_SPOOL_S`, and an arrow to where it actually lands (`MatchData.mjd_landing`),
+## labelled with the seconds left.
 func _update_mjd_spool() -> void:
 	for pilot in ships:
 		var ship: Dictionary = ships[pilot]
 		var spool := -1.0
 		if mjd_on and ship.node.visible and time < ship.death_t:
 			spool = data.mjd_spool(pilot, time)
-			_track_mjd_heading(pilot)
 		var on := spool >= 0.0
 		ship.mjd_ring.visible = on
 		if not on:
@@ -938,11 +935,11 @@ func _update_mjd_spool() -> void:
 			_add_ring(ring, Vector3.ZERO, r * k, spool, MJD_COLOR)
 		ring.surface_end()
 
-		var dir := _mjd_heading(ship)
+		var land := data.mjd_landing(pilot, time) * M_TO_UNITS
+		var dir := pos.direction_to(land)
 		ship.mjd_projection.visible = dir != Vector3.ZERO
 		if dir == Vector3.ZERO:
 			continue
-		var land := pos + dir * MatchData.MJD_DISTANCE_M * M_TO_UNITS
 		ship.mjd_land = land
 		var land_r := _units_per_px(camera.global_position.distance_to(land)) * MJD_RING_PX
 		var lines: ImmediateMesh = ship.mjd_lines.mesh
@@ -969,27 +966,6 @@ func _add_ring(lines: ImmediateMesh, centre: Vector3, radius: float, fraction: f
 		for k in [j, j + 1]:
 			var a: float = TAU * fraction * k / n
 			lines.surface_add_vertex(centre + x * sin(a) + y * cos(a))
-
-
-## Keeps `pilot`'s `mjd_dir` (its last known heading) up to date: the direction of its velocity
-## over the last `HEADING_WINDOW_S`, never looking ahead (which would give away where a jump
-## lands); left as it was while the ship is (nearly) stopped.
-func _track_mjd_heading(pilot: String) -> void:
-	var prev := data.sample(pilot, time - HEADING_WINDOW_S)
-	var now := data.sample(pilot, time)
-	if prev.is_empty() or now.is_empty() or now.t <= prev.t:
-		return
-	var v: Vector3 = (now.pos - prev.pos) / (now.t - prev.t)
-	if v.length() >= MIN_HEADING_SPEED:
-		ships[pilot].mjd_dir = v.normalized()
-
-
-## Unit direction `ship` is heading now, for its projected micro jump: its last known heading
-## (`_track_mjd_heading`), else its model's facing. ZERO when unknown.
-func _mjd_heading(ship: Dictionary) -> Vector3:
-	if ship.mjd_dir == Vector3.ZERO and ship.model_id != 0 and ship.heading_t > -INF:
-		return Basis(ship.heading).z.normalized()
-	return ship.mjd_dir
 
 
 ## Seeks to the lead-up of the next (`dir` 1) or previous (-1) event from now.
@@ -1096,8 +1072,8 @@ func _refresh_visual(ship: Dictionary) -> void:
 	_set_icon(ship.icon, tex, Color(color, maxf(color.a, 0.7)))
 
 
-## Turns model ships to face along their movement. Smooth motion averages the velocity over
-## `HEADING_WINDOW_S` either side and eases the turn; otherwise half a second of track, snapped.
+## Turns model ships to face along their movement (`_velocity`). Smooth motion eases the turn;
+## otherwise it snaps.
 func _face_heading(ship: Dictionary, pilot: String) -> void:
 	if ship.model_id == 0:
 		return
@@ -1117,18 +1093,21 @@ func _face_heading(ship: Dictionary, pilot: String) -> void:
 	ship.visual.basis = Basis(ship.heading)
 
 
-## `pilot`'s velocity (m/s) now, from its track: averaged over `HEADING_WINDOW_S` either side with
-## smooth motion, else over the last half second. ZERO when it can't be told.
+## `pilot`'s velocity (m/s) now, from its track. With smooth motion, a straight line fitted either
+## side of now (`MatchData.velocity`), as fast as the overview speed when the match has real
+## speeds; otherwise over the last half second. ZERO when it can't be told.
 func _velocity(pilot: String) -> Vector3:
-	var window := HEADING_WINDOW_S if smooth_on else 0.5
-	var prev := data.sample(pilot, time - window)
-	var next := data.sample(pilot, time + window) if smooth_on else {}
+	if smooth_on:
+		var v := data.velocity(pilot, time, true)
+		var speed: float = data.sample(pilot, time).get("speed", NAN)
+		if data.has_speed and not is_nan(speed) and v != Vector3.ZERO:
+			return v.normalized() * speed
+		return v
+	var prev := data.sample(pilot, time - 0.5)
 	var now := data.sample(pilot, time)
-	var a: Dictionary = prev if not prev.is_empty() else now
-	var b: Dictionary = next if not next.is_empty() else now
-	if a.is_empty() or b.is_empty() or b.t <= a.t:
+	if prev.is_empty() or now.is_empty() or now.t <= prev.t:
 		return Vector3.ZERO
-	return (b.pos - a.pos) / (b.t - a.t)
+	return (now.pos - prev.pos) / (now.t - prev.t)
 
 
 ## Scene units from the node's centre to just above an `ICON_PX` icon at the camera's distance.
@@ -1969,7 +1948,7 @@ func _build_ui() -> void:
 	mjd_button.text = "MJD"
 	mjd_button.toggle_mode = true
 	mjd_button.button_pressed = mjd_on
-	mjd_button.tooltip_text = "Show micro jump drive spool-ups in space: a ring around the ship and its projected landing"
+	mjd_button.tooltip_text = "Show micro jump drive spool-ups in space: a ring around the ship and where it lands"
 	mjd_button.toggled.connect(_set_mjd_on)
 	row.add_child(mjd_button)
 
@@ -2132,7 +2111,7 @@ func _build_settings(layer: CanvasLayer) -> void:
 	box.add_child(damage_setting)
 
 	mjd_setting = CheckBox.new()
-	mjd_setting.text = "Show micro jump drive spool-ups in space (ring, projected landing)"
+	mjd_setting.text = "Show micro jump drive spool-ups in space (ring, landing)"
 	mjd_setting.button_pressed = mjd_on
 	mjd_setting.toggled.connect(_set_mjd_on)
 	box.add_child(mjd_setting)
