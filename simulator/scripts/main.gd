@@ -80,7 +80,7 @@ const EVENT_LEAD_S := 2.0
 ## A micro jump's take-off -> landing line stays up this long (match s) after the jump.
 const MJD_TRAIL_S := 5.0
 ## Radius (screen px) of the spool ring drawn around a ship spooling its micro jump drive, and of
-## the marker at its projected landing.
+## the marker where it lands.
 const MJD_RING_PX := 24.0
 const MJD_RING_SEGMENTS := 48
 ## Jump range drawn around the corner and centre beacons (debug menu).
@@ -147,13 +147,13 @@ var vector_seconds := VECTOR_SECONDS
 
 ## pilot -> { node, visual, model_id, icon, select_icon, label, ship_type, radius, dead, color, tint, death_t,
 ## death_marker, heading, heading_t, vector, vector_tip, spheres, mjd_ring, mjd_projection,
-## mjd_lines, mjd_label, mjd_dir, mjd_land }; `heading` is the model's
+## mjd_lines, mjd_label, mjd_land }; `heading` is the model's
 ## rotation as of match time `heading_t`; `radius` is the true hull radius in scene units (0 if
 ## unknown), `visual` the sphere or model under `node`, `model_id` the type ID it shows
 ## (0 = sphere), `tint` the colour the ship is currently drawn in; `vector` the debug movement
 ## line (ending at `vector_tip`, relative to the ship) and `spheres` the node holding its debug
 ## range spheres; `mjd_ring` and `mjd_projection` (lines `mjd_lines` and label `mjd_label`, in
-## world space) draw its micro jump drive spool-up, aimed along `mjd_dir` to `mjd_land`.
+## world space) draw its micro jump drive spool-up, aimed at its landing `mjd_land`.
 var ships := {}
 var ships_root: Node3D
 var boundary: Node3D
@@ -769,7 +769,7 @@ func _add_ship(pilot: String) -> void:
 		"death_t": INF, "death_marker": null, "heading": Quaternion.IDENTITY, "heading_t": -INF,
 		"vector": vector, "vector_tip": Vector3.ZERO, "spheres": spheres,
 		"mjd_ring": mjd_ring, "mjd_projection": mjd_projection, "mjd_lines": mjd_lines,
-		"mjd_label": mjd_label, "mjd_dir": Vector3.ZERO, "mjd_land": Vector3.ZERO,
+		"mjd_label": mjd_label, "mjd_land": Vector3.ZERO,
 	}
 	_apply_debug(pilot)
 	if data.deaths.has(pilot):
@@ -912,15 +912,14 @@ func _update_mjd_trails() -> void:
 
 
 ## Draws each micro jump drive spool-up (`mjd_on`): a ring around the ship filling over the
-## `MatchData.MJD_SPOOL_S`, and an arrow to where it would land if it jumped now, 100 km along its
-## current heading (`_mjd_heading`), labelled with the seconds left.
+## `MatchData.MJD_SPOOL_S`, and an arrow to where it actually lands (`MatchData.mjd_landing`),
+## labelled with the seconds left.
 func _update_mjd_spool() -> void:
 	for pilot in ships:
 		var ship: Dictionary = ships[pilot]
 		var spool := -1.0
 		if mjd_on and ship.node.visible and time < ship.death_t:
 			spool = data.mjd_spool(pilot, time)
-			_track_mjd_heading(pilot)
 		var on := spool >= 0.0
 		ship.mjd_ring.visible = on
 		if not on:
@@ -936,11 +935,11 @@ func _update_mjd_spool() -> void:
 			_add_ring(ring, Vector3.ZERO, r * k, spool, MJD_COLOR)
 		ring.surface_end()
 
-		var dir := _mjd_heading(ship)
+		var land := data.mjd_landing(pilot, time) * M_TO_UNITS
+		var dir := pos.direction_to(land)
 		ship.mjd_projection.visible = dir != Vector3.ZERO
 		if dir == Vector3.ZERO:
 			continue
-		var land := pos + dir * MatchData.MJD_DISTANCE_M * M_TO_UNITS
 		ship.mjd_land = land
 		var land_r := _units_per_px(camera.global_position.distance_to(land)) * MJD_RING_PX
 		var lines: ImmediateMesh = ship.mjd_lines.mesh
@@ -967,24 +966,6 @@ func _add_ring(lines: ImmediateMesh, centre: Vector3, radius: float, fraction: f
 		for k in [j, j + 1]:
 			var a: float = TAU * fraction * k / n
 			lines.surface_add_vertex(centre + x * sin(a) + y * cos(a))
-
-
-## Keeps `pilot`'s `mjd_dir` (its last known heading) up to date: the direction of its velocity
-## (`MatchData.velocity`), never looking ahead (which would give away where a jump lands); left as
-## it was while the ship is (nearly) stopped. A spooling ship can't steer, so the fit settles
-## along its course as the spool goes on.
-func _track_mjd_heading(pilot: String) -> void:
-	var v := data.velocity(pilot, time)
-	if v.length() >= MIN_HEADING_SPEED:
-		ships[pilot].mjd_dir = v.normalized()
-
-
-## Unit direction `ship` is heading now, for its projected micro jump: its last known heading
-## (`_track_mjd_heading`), else its model's facing. ZERO when unknown.
-func _mjd_heading(ship: Dictionary) -> Vector3:
-	if ship.mjd_dir == Vector3.ZERO and ship.model_id != 0 and ship.heading_t > -INF:
-		return Basis(ship.heading).z.normalized()
-	return ship.mjd_dir
 
 
 ## Seeks to the lead-up of the next (`dir` 1) or previous (-1) event from now.
@@ -1967,7 +1948,7 @@ func _build_ui() -> void:
 	mjd_button.text = "MJD"
 	mjd_button.toggle_mode = true
 	mjd_button.button_pressed = mjd_on
-	mjd_button.tooltip_text = "Show micro jump drive spool-ups in space: a ring around the ship and its projected landing"
+	mjd_button.tooltip_text = "Show micro jump drive spool-ups in space: a ring around the ship and where it lands"
 	mjd_button.toggled.connect(_set_mjd_on)
 	row.add_child(mjd_button)
 
@@ -2130,7 +2111,7 @@ func _build_settings(layer: CanvasLayer) -> void:
 	box.add_child(damage_setting)
 
 	mjd_setting = CheckBox.new()
-	mjd_setting.text = "Show micro jump drive spool-ups in space (ring, projected landing)"
+	mjd_setting.text = "Show micro jump drive spool-ups in space (ring, landing)"
 	mjd_setting.button_pressed = mjd_on
 	mjd_setting.toggled.connect(_set_mjd_on)
 	box.add_child(mjd_setting)
