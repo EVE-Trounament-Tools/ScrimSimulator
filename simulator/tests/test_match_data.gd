@@ -567,6 +567,18 @@ func test_mjd_spool_covers_the_12_ticks_before_a_jump() -> void:
 	assert_eq(d.mjd_spool("nobody", 15.0), -1.0)
 
 
+func test_mjd_landing_is_where_the_jump_lands() -> void:
+	var rows := []
+	for t in 21:
+		rows.append(row(t, "a", "Rifter", C + X * 100 * t))
+	rows.append(row(21, "a", "Rifter", C + X * 102000))
+	var d := _load(rows)
+	assert_eq(d.mjd_landing("a", 8.9), Vector3.INF)
+	assert_almost(d.mjd_landing("a", 15.0), C + X * 102000)
+	assert_eq(d.mjd_landing("a", 21.0), Vector3.INF, "landed")
+	assert_eq(d.mjd_landing("nobody", 15.0), Vector3.INF)
+
+
 func test_non_mjd_hops_are_ignored() -> void:
 	var d := _load([
 		row(0, "short", "Rifter", C),

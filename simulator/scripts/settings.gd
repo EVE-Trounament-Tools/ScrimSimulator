@@ -14,7 +14,7 @@ const DEFAULTS := {
 	"display/broadcast_roster": true,
 	# Highlight roster rows of ships taking damage (HP dropping).
 	"display/damage_highlight": false,
-	# Draw micro jump drive spool-ups in space (ring, projected landing and arrow).
+	# Draw micro jump drive spool-ups in space (ring, landing and arrow).
 	"display/mjd_spoolup": true,
 	# Silence the match's comms audio (the bar's Mute button).
 	"audio/muted": false,

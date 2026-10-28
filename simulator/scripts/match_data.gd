@@ -90,6 +90,8 @@ var deaths: Dictionary = {}
 var events: Array = []
 ## pilot name -> match times (sorted) of its micro jumps (the landing samples).
 var mjd_times: Dictionary = {}
+## pilot name -> where (metres) each of its micro jumps landed, in step with `mjd_times`.
+var mjd_landings: Dictionary = {}
 ## Whether any sample has HP.
 var has_hp := false
 ## Whether the CSV's overview speeds are real: some get above `MOVE_SPEED_MPS`.
@@ -530,6 +532,7 @@ func _find_mjds() -> void:
 func _find_events() -> void:
 	events.clear()
 	mjd_times.clear()
+	mjd_landings.clear()
 	for pilot in tracks:
 		var track: Array = tracks[pilot]
 		for i in range(1, track.size()):
@@ -543,7 +546,9 @@ func _find_events() -> void:
 			if b.get("mjd", false):
 				if not mjd_times.has(pilot):
 					mjd_times[pilot] = PackedFloat64Array()
+					mjd_landings[pilot] = PackedVector3Array()
 				mjd_times[pilot].append(t)
+				mjd_landings[pilot].append(b.pos)
 				events.append({
 					"t": t, "pilot": pilot, "kind": Event.MJD, "pos": a.pos, "to_pos": b.pos,
 					"ship_type": a.ship_type,
@@ -615,6 +620,16 @@ func mjd_spool(pilot: String, t: float) -> float:
 	return 1.0 - (jumps[i] - t) / MJD_SPOOL_S
 
 
+## Where (metres) `pilot`'s micro jump lands when it is spooling at match time `t` (see
+## `mjd_spool`); `Vector3.INF` when it isn't spooling.
+func mjd_landing(pilot: String, t: float) -> Vector3:
+	var jumps: PackedFloat64Array = mjd_times.get(pilot, PackedFloat64Array())
+	var i := jumps.bsearch(t, false)  # first jump after t
+	if i >= jumps.size() or jumps[i] - t > MJD_SPOOL_S:
+		return Vector3.INF
+	return mjd_landings[pilot][i]
+
+
 ## `pilot`'s velocity (m/s) at match time `t`: the least-squares slope of its samples over a window
 ## that grows while it flew straight (see `VELOCITY_MIN_WINDOW_S`). Only samples at or before `t`
 ## count unless `ahead`, which also blends the fits either side of `t` so the result moves
@@ -682,8 +697,8 @@ func _may_widen(track: Array, i: int, lo: int, hi: int, added: int) -> bool:
 	if reach > VELOCITY_MAX_WINDOW_S or not has_speed:
 		return false
 	var covered := 0.0
-	for i in range(lo + 1, hi + 1):
-		covered += (track[i - 1].speed + track[i].speed) / 2.0 * (track[i].t - track[i - 1].t)
+	for j in range(lo + 1, hi + 1):
+		covered += (track[j - 1].speed + track[j].speed) / 2.0 * (track[j].t - track[j - 1].t)
 	# A blank speed (NAN) fails this too.
 	return track[lo].pos.distance_to(track[hi].pos) >= STRAIGHT_RATIO * covered - STRAIGHT_MARGIN_M
 
