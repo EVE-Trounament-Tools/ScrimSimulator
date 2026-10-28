@@ -1435,32 +1435,42 @@ static func _arrow_points(from: Vector3, to: Vector3) -> Array:
 
 ## Redraws the activity lines active now (`CombatStats.links_at`) between visible ships: dashes
 ## flowing from source to target in the kind's colour, each fading in from its tail, with an
-## arrowhead short of the target. Kinds joining the same two ships are drawn side by side.
+## arrowhead short of the target. Lines joining the same two ships (either way) are drawn side by
+## side, centred on the line between their icons.
 func _update_links() -> void:
 	var lines: ImmediateMesh = links_mesh.mesh
 	lines.clear_surfaces()
-	var active := combat_stats.links_at(time)
-	if active.is_empty():
-		return
-	var flow := Time.get_ticks_msec() / 1000.0 * LINK_FLOW_PX_S
-	var began := false
-	for l in active:
-		var state: Dictionary = links.get(l.kind, {})
-		if not state.get("on", false) or not ships.has(l.source) or not ships.has(l.target):
+	var shown := []
+	for l in combat_stats.links_at(time):
+		if not links.get(l.kind, {}).get("on", false) or not ships.has(l.source) or not ships.has(l.target):
 			continue
 		var a: Node3D = ships[l.source].node
 		var b: Node3D = ships[l.target].node
 		if not a.visible or not b.visible:
 			continue
 		var mid := (a.position + b.position) / 2.0
+		if a.position.distance_to(b.position) < _units_per_px(camera.global_position.distance_to(mid)):
+			continue
+		shown.append(l)
+	if shown.is_empty():
+		return
+	var slots := _link_offsets(shown)
+	var flow := Time.get_ticks_msec() / 1000.0 * LINK_FLOW_PX_S
+	var began := false
+	for i in shown.size():
+		var l: Dictionary = shown[i]
+		var state: Dictionary = links[l.kind]
+		var a: Node3D = ships[l.source].node
+		var b: Node3D = ships[l.target].node
+		var mid := (a.position + b.position) / 2.0
 		var px := _units_per_px(camera.global_position.distance_to(mid))
 		var along := b.position - a.position
-		var length := along.length()
-		if length < px:
-			continue
-		var dir := along / length
+		var dir := along.normalized()
 		var side := dir.cross(camera.global_position - mid).normalized()
-		var offset := side * (CombatStats.LINK_KINDS.find(l.kind) - (CombatStats.LINK_KINDS.size() - 1) / 2.0) * LINK_SPACING_PX * px
+		# Offset along the pair's own side (lower name to higher), so lines both ways don't mirror
+		# onto the same slot.
+		var pair_side: Vector3 = side if l.source < l.target else -side
+		var offset: Vector3 = pair_side * slots[i] * LINK_SPACING_PX * px
 		var from := a.position + offset + dir * _icon_clearance(a) * 0.6
 		var to := b.position + offset - dir * _icon_clearance(b)
 		var span := (to - from).dot(dir)
@@ -1489,6 +1499,23 @@ func _update_links() -> void:
 			lines.surface_add_vertex(p)
 	if began:
 		lines.surface_end()
+
+
+## Sideways slot of each of `active`'s links ({ source, target, … }), in line spacings: lines
+## joining the same two ships, either way, spread evenly around 0; a lone line sits at 0.
+static func _link_offsets(active: Array) -> Array:
+	var pairs := {}
+	for l in active:
+		var key: String = l.source + "\n" + l.target if l.source < l.target else l.target + "\n" + l.source
+		pairs[key] = pairs.get(key, 0) + 1
+	var seen := {}
+	var out := []
+	for l in active:
+		var key: String = l.source + "\n" + l.target if l.source < l.target else l.target + "\n" + l.source
+		var slot: int = seen.get(key, 0)
+		seen[key] = slot + 1
+		out.append(slot - (pairs[key] - 1) / 2.0)
+	return out
 
 
 func _set_link(kind: String, on: bool) -> void:
